@@ -16,12 +16,17 @@ revise the scene when the results say so.**
 
 ```bash
 which ensemble || npm ls @ghostmind-dev/ensemble   # installed? (global bin or local dep)
-echo ${OPENROUTER_API_KEY:+set}                # required for model nodes
+echo ${OPENROUTER_API_KEY:+set}                    # required for model nodes
+node -p "require('./package.json').type"           # MUST be "module"
 ```
 
 - Not installed → `npm i -g @ghostmind-dev/ensemble` (or `npm i @ghostmind-dev/ensemble` in-project).
 - `OPENROUTER_API_KEY` unset → stop and ask the user; model nodes cannot run without it.
+- **`"type": "module"` missing from the project's package.json** → add it. Scene files are
+  ES modules; without it Node loads them as CommonJS and the `import` fails. (Alternative:
+  name scenes `.mts`.) This is the single most common first-run failure.
 - `opencode` on PATH is needed **only** if the scene uses `runtime: "agent"` nodes.
+- Node must be ≥ 22.6 (native TypeScript type stripping).
 
 ## 1 · The scene format
 

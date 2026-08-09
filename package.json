@@ -1,6 +1,6 @@
 {
   "name": "@ghostmind-dev/ensemble",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Multi-model agent ensembles. Describe a scene \u2014 nodes wired by edges, each node any model with scoped state \u2014 in one TypeScript file, and run it: conditions, loops, parallel groups, live visualization.",
   "type": "module",
   "license": "MIT",
@@ -8,14 +8,16 @@
     "ensemble": "./bin/ensemble.js"
   },
   "exports": {
-    ".": "./src/index.ts",
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
     "bin",
-    "src",
+    "dist",
     "ui",
-    "scenes",
     "README.md",
     "LICENSE"
   ],
@@ -32,9 +34,9 @@
     "cli"
   ],
   "scripts": {
-    "graph": "node src/cli.ts",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "npm run typecheck"
+    "prepublishOnly": "npm run typecheck && npm run build"
   },
   "dependencies": {
     "@opencode-ai/sdk": "1.18.15",
@@ -63,5 +65,7 @@
   "homepage": "https://github.com/ghostmind-labo/ensemble#readme",
   "bugs": {
     "url": "https://github.com/ghostmind-labo/ensemble/issues"
-  }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts"
 }

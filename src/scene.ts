@@ -8,7 +8,7 @@
  * not three model calls into a run.
  */
 import { existsSync, statSync } from "node:fs";
-import { resolve } from "node:path";
+import { resolve, basename } from "node:path";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
 import type { Registry } from "./registry.ts";
@@ -265,7 +265,21 @@ export async function loadScene(file: string, reg: Registry): Promise<Scene> {
   try {
     mod = (await import(url)) as Record<string, unknown>;
   } catch (err) {
-    throw new SceneError([`scene failed to import: ${(err as Error).message}`]);
+    const message = (err as Error).message;
+
+    // Node picks a module system for .ts from the nearest package.json `type`.
+    // Without "module" it treats the scene as CommonJS and chokes on `import`,
+    // with an error that says nothing about how to fix it.
+    if (/Cannot use import statement outside a module|require\(\) of ES Module/.test(message)) {
+      throw new SceneError([
+        `${file} was loaded as CommonJS, so its \`import\` failed.`,
+        `Fix either way:`,
+        `  • add  "type": "module"  to the nearest package.json  (recommended), or`,
+        `  • rename the scene to ${basename(file).replace(/\.ts$/, ".mts")}`,
+      ]);
+    }
+
+    throw new SceneError([`scene failed to import: ${message}`]);
   }
 
   const doc = mod["default"];

@@ -79,15 +79,24 @@ Three things carry the design:
   gets its mistakes flagged by the type checker before a single token is spent —
   which is the point: this format is designed to be *generated*.
 
-## Requirements
-
-- Node ≥ 22.6 (runs TypeScript directly — no build step)
-- `OPENROUTER_API_KEY` in the environment
-- [`opencode`](https://opencode.ai) on `PATH` — **only if you use agent nodes**
+## Install
 
 ```bash
-npm install
-node src/cli.ts skills     # see your skill/MCP registry
+npm i -g @ghostmind-dev/ensemble      # CLI everywhere
+# or, per project:
+npm i @ghostmind-dev/ensemble
+```
+
+Requirements:
+
+- **Node ≥ 22.6** — your scene files are TypeScript, loaded via Node's native type stripping
+- **`"type": "module"`** in the nearest `package.json` — scenes are ES modules.
+  (Or name them `.mts`. `ensemble validate` tells you if you forgot.)
+- `OPENROUTER_API_KEY` in the environment
+- [`opencode`](https://opencode.ai) on `PATH` — **only if you use `runtime: "agent"` nodes**
+
+```bash
+ensemble skills     # confirm your skill/MCP registry is visible
 ```
 
 ## Commands
