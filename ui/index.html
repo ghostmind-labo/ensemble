@@ -1,0 +1,602 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ensemble</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #fbfbfc; --panel: #fff; --fg: #16161a; --muted: #71717a;
+    --line: #e4e4e7; --accent: #4f46e5; --accent-soft: #eef2ff;
+    --ok: #16a34a; --run: #2563eb; --fail: #dc2626; --warn: #d97706;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0b0b0e; --panel: #141418; --fg: #ededf0; --muted: #8b8b96;
+      --line: #26262c; --accent: #818cf8; --accent-soft: #1e1b3a;
+      --ok: #4ade80; --run: #60a5fa; --fail: #f87171; --warn: #fbbf24;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh; display: grid;
+    grid-template-columns: 232px 1fr; grid-template-rows: 1fr 240px;
+    grid-template-areas: "side canvas" "side console";
+    background: var(--bg); color: var(--fg);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif;
+  }
+
+  /* ---------- sidebar ---------- */
+  aside {
+    grid-area: side; border-right: 1px solid var(--line); background: var(--panel);
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .brand { padding: 14px 16px; border-bottom: 1px solid var(--line); font-weight: 700; letter-spacing: -.02em; }
+  .brand small { display: block; font-weight: 400; color: var(--muted); font-size: 11px; letter-spacing: 0; }
+  .section { padding: 10px 16px 4px; font-size: 11px; text-transform: uppercase;
+             letter-spacing: .07em; color: var(--muted); }
+  .scenes { overflow-y: auto; flex: 1; }
+  .scene {
+    padding: 8px 16px; cursor: pointer; border-left: 2px solid transparent;
+    display: flex; flex-direction: column; gap: 1px;
+  }
+  .scene:hover { background: var(--accent-soft); }
+  .scene.active { border-left-color: var(--accent); background: var(--accent-soft); }
+  .scene b { font-weight: 600; font-size: 13px; }
+  .scene span { font-size: 11px; color: var(--muted); }
+  .scene.invalid b { color: var(--fail); }
+  .reg { padding: 10px 16px 16px; border-top: 1px solid var(--line); font-size: 11px; color: var(--muted); }
+  .chip {
+    display: inline-block; padding: 1px 7px; margin: 2px 3px 0 0; border-radius: 999px;
+    background: var(--accent-soft); color: var(--accent); font-family: var(--mono); font-size: 10px;
+  }
+
+  /* ---------- canvas ---------- */
+  main { grid-area: canvas; overflow: auto; position: relative; padding: 20px 24px 28px; }
+  .toolbar {
+    position: sticky; top: 0; z-index: 5; display: flex; gap: 8px; align-items: center;
+    padding-bottom: 14px; background: linear-gradient(var(--bg) 72%, transparent);
+  }
+  .toolbar input[type=text] {
+    flex: 1; padding: 8px 11px; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--panel); color: var(--fg); font-size: 13px; min-width: 120px;
+  }
+  .toolbar input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  button {
+    padding: 8px 14px; border: 1px solid var(--line); border-radius: 8px; cursor: pointer;
+    background: var(--panel); color: var(--fg); font-size: 13px; font-weight: 500;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover:not(:disabled) { opacity: .9; color: #fff; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+
+  .stage { position: relative; }
+  .stage svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+  .layer { display: flex; gap: 26px; justify-content: center; margin-bottom: 46px; position: relative; z-index: 2; }
+
+  .target { display: flex; gap: 12px; padding: 0; cursor: grab; }
+  .target.dragging { cursor: grabbing; z-index: 10; }
+  .target.group {
+    padding: 12px; border: 1.5px dashed var(--line); border-radius: 14px;
+    background: color-mix(in srgb, var(--panel) 60%, transparent); position: relative;
+  }
+  .target.group::before {
+    content: attr(data-label); position: absolute; top: -9px; left: 12px; padding: 0 6px;
+    background: var(--bg); font-size: 10px; text-transform: uppercase;
+    letter-spacing: .07em; color: var(--muted);
+  }
+
+  .node {
+    min-width: 178px; max-width: 230px; padding: 11px 13px; border-radius: 11px;
+    border: 1.5px solid var(--line); background: var(--panel); cursor: pointer;
+    transition: border-color .15s, box-shadow .15s, transform .15s;
+  }
+  .node:hover { transform: translateY(-1px); box-shadow: 0 4px 14px rgba(0,0,0,.09); }
+  .node.sel { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .node .nm { font-weight: 650; display: flex; align-items: center; gap: 6px; }
+  .node .md { font-family: var(--mono); font-size: 10.5px; color: var(--muted); margin-top: 3px;
+              overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .node .sk { margin-top: 6px; }
+  .node .stat { margin-top: 7px; font-size: 10.5px; color: var(--muted); font-family: var(--mono); }
+
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--line); flex: none; }
+  .node.running { border-color: var(--run); }
+  .node.running .dot { background: var(--run); animation: pulse 1.1s ease-in-out infinite; }
+  .node.ok { border-color: var(--ok); }
+  .node.ok .dot { background: var(--ok); }
+  .node.fail { border-color: var(--fail); }
+  .node.fail .dot { background: var(--fail); }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .25; } }
+
+  .edge { stroke: var(--line); stroke-width: 1.6; fill: none; }
+  .edge.back { stroke-dasharray: 5 4; }
+  .edge.hot { stroke: var(--accent); stroke-width: 2.4; }
+  .elabel { font-size: 10px; fill: var(--muted); font-family: var(--mono); }
+
+  /* ---------- console ---------- */
+  footer {
+    grid-area: console; border-top: 1px solid var(--line); background: var(--panel);
+    display: grid; grid-template-columns: 1fr 320px; overflow: hidden;
+  }
+  .log { overflow-y: auto; padding: 12px 16px; font-family: var(--mono); font-size: 11.5px; line-height: 1.6; }
+  .log .ev { white-space: pre-wrap; word-break: break-word; }
+  .log .h { color: var(--accent); font-weight: 700; margin-top: 8px; }
+  .log .m { color: var(--muted); }
+  .log .g { color: var(--ok); }
+  .log .r { color: var(--fail); }
+  .log .w { color: var(--warn); }
+  .inspect { border-left: 1px solid var(--line); overflow-y: auto; padding: 12px 14px; font-size: 12px; }
+  .inspect h3 { margin: 0 0 8px; font-size: 13px; }
+  .inspect dt { font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
+                color: var(--muted); margin-top: 9px; }
+  .inspect dd { margin: 2px 0 0; font-family: var(--mono); font-size: 11px; word-break: break-word; }
+  .inspect pre { background: var(--bg); padding: 8px; border-radius: 7px; overflow-x: auto;
+                 font-size: 10.5px; white-space: pre-wrap; max-height: 150px; }
+  .empty { color: var(--muted); padding: 20px; text-align: center; font-size: 12px; }
+  .panel { display: flex; flex-direction: column; overflow: hidden; }
+  .tabs { display: flex; gap: 2px; padding: 6px 10px 0; border-bottom: 1px solid var(--line); align-items: center; }
+  .tab { border: none; background: none; padding: 6px 12px; font-size: 12px; color: var(--muted);
+         border-radius: 7px 7px 0 0; cursor: pointer; }
+  .tab.active { color: var(--fg); background: var(--accent-soft); font-weight: 600; }
+  #savemsg { margin-left: auto; font-size: 11px; padding-right: 8px; }
+  .pane { display: none; overflow-y: auto; flex: 1; }
+  .pane.active { display: block; }
+  .pane.src.active { display: flex; flex-direction: column; }
+  #state { padding: 12px 16px; font-family: var(--mono); font-size: 11.5px; }
+  #state .kv { margin-bottom: 10px; }
+  #state .k { color: var(--accent); font-weight: 700; }
+  #state pre { margin: 3px 0 0; white-space: pre-wrap; word-break: break-word;
+               background: var(--bg); padding: 7px 9px; border-radius: 7px; max-height: 140px; overflow-y: auto; }
+  .src textarea { flex: 1; resize: none; border: none; outline: none; padding: 12px 16px;
+                  background: var(--bg); color: var(--fg); font-family: var(--mono); font-size: 12px; line-height: 1.5; }
+  .srcbar { display: flex; gap: 10px; align-items: center; padding: 8px 12px; border-top: 1px solid var(--line); }
+  .srcbar .hint { font-size: 11px; color: var(--muted); }
+  .badge { font-size: 9px; padding: 1px 5px; border-radius: 4px; margin-left: auto; font-family: var(--mono); }
+  .badge.model { background: var(--accent-soft); color: var(--accent); }
+  .badge.agent { background: color-mix(in srgb, var(--warn) 15%, transparent); color: var(--warn); }
+  .node.waiting { opacity: .55; }
+  .node .wait { margin-top: 6px; font-size: 10px; color: var(--muted); }
+  .stream { font-family: var(--mono); font-size: 10.5px; color: var(--muted); margin-top: 7px;
+            max-height: 72px; overflow-y: auto; white-space: pre-wrap; word-break: break-word;
+            border-top: 1px dashed var(--line); padding-top: 5px; }
+  .banner { padding: 10px 14px; border-radius: 9px; background: color-mix(in srgb, var(--fail) 12%, transparent);
+            border: 1px solid var(--fail); color: var(--fail); font-size: 12px; margin-bottom: 14px; }
+  .banner ul { margin: 6px 0 0; padding-left: 18px; }
+</style>
+</head>
+<body>
+
+<aside>
+  <div class="brand">ensemble<small id="conn">connecting…</small></div>
+  <div class="section">Scenes</div>
+  <div class="scenes" id="scenes"></div>
+  <div class="reg" id="registry"></div>
+</aside>
+
+<main>
+  <div class="toolbar">
+    <input type="text" id="goal" placeholder="Goal for this run…">
+    <button class="primary" id="run">Run</button>
+    <button id="stop" disabled>Stop</button>
+  </div>
+  <div id="problems"></div>
+  <div class="stage" id="stage"><svg id="wires"></svg><div id="layers"></div></div>
+</main>
+
+<footer>
+  <div class="panel">
+    <div class="tabs">
+      <button class="tab active" data-tab="log">Log</button>
+      <button class="tab" data-tab="state">State</button>
+      <button class="tab" data-tab="source">Source</button>
+      <span id="savemsg"></span>
+    </div>
+    <div class="log pane active" id="log"><div class="empty">Run a scene to see live output.</div></div>
+    <div class="pane" id="state"><div class="empty">State appears here as nodes complete.</div></div>
+    <div class="pane src" id="source">
+      <textarea id="srctext" spellcheck="false"></textarea>
+      <div class="srcbar">
+        <button id="savebtn">Save</button>
+        <span class="hint">validated before saving — a broken scene is never written</span>
+      </div>
+    </div>
+  </div>
+  <div class="inspect" id="inspect"><div class="empty">Select a node.</div></div>
+</footer>
+
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const state = {
+  scenes: [], current: null, layout: null,
+  status: new Map(),   // node -> {state, meta, text, stream}
+  blackboard: {},      // live copy of the run state
+  selected: null, running: false,
+};
+
+// ---------------------------------------------------------------- data
+async function loadScenes() {
+  const r = await fetch("/api/scenes").then((x) => x.json());
+  state.scenes = r.scenes;
+  renderScenes();
+  if (!state.current && r.scenes.length) select(r.scenes[0].file);
+}
+
+async function loadRegistry() {
+  const r = await fetch("/api/registry").then((x) => x.json());
+  const skills = r.skills.map((s) => `<span class="chip">${esc(s.name)}</span>`).join("") || "<i>none</i>";
+  const mcp = r.mcp.map((s) => `<span class="chip">${esc(s.name)}</span>`).join("") || "<i>none</i>";
+  const warn = r.problems?.length
+    ? `<div style="margin-top:8px;color:var(--warn)">${r.problems.length} skipped</div>` : "";
+  $("registry").innerHTML = `<b>Skills</b><br>${skills}<br><b style="display:inline-block;margin-top:8px">MCP</b><br>${mcp}${warn}`;
+}
+
+async function select(file) {
+  state.current = file;
+  state.status.clear();
+  state.selected = null;
+  renderScenes();
+  $("inspect").innerHTML = '<div class="empty">Select a node.</div>';
+
+  const res = await fetch(`/api/scene?file=${encodeURIComponent(file)}`);
+  const data = await res.json();
+
+  if (!res.ok) {
+    state.layout = null;
+    $("layers").innerHTML = "";
+    $("wires").innerHTML = "";
+    $("srctext").value = data.source ?? "";
+    $("problems").innerHTML =
+      `<div class="banner"><b>${esc(data.error ?? "invalid scene")}</b><ul>` +
+      (data.problems ?? []).map((p) => `<li>${esc(p)}</li>`).join("") + "</ul></div>";
+    return;
+  }
+  $("problems").innerHTML = "";
+  state.layout = data.layout;
+  $("srctext").value = data.source ?? "";
+  draw();
+}
+
+// ---------------------------------------------------------------- render
+function renderScenes() {
+  $("scenes").innerHTML = state.scenes.map((s) => `
+    <div class="scene ${s.file === state.current ? "active" : ""} ${s.valid ? "" : "invalid"}"
+         data-file="${esc(s.file)}">
+      <b>${esc(s.name)}</b>
+      <span>${s.valid ? `${s.nodes} nodes · ${s.edges} edges` : "invalid"}</span>
+    </div>`).join("");
+  for (const el of document.querySelectorAll(".scene")) {
+    el.onclick = () => select(el.dataset.file);
+  }
+}
+
+function nodeCard(n) {
+  const st = state.status.get(n.name);
+  let cls = st?.state ?? "";
+  // A node with no status yet, whose inputs are not all in state, is waiting.
+  let wait = "";
+  if (!cls && state.running && n.inputs?.length) {
+    const missing = n.inputs.filter((k) => !(k in state.blackboard));
+    if (missing.length) { cls = "waiting"; wait = `<div class="wait">⏳ waiting on: ${esc(missing.join(", "))}</div>`; }
+  }
+  const skills = n.skills.length
+    ? `<div class="sk">${n.skills.map((s) => `<span class="chip">${esc(s)}</span>`).join("")}</div>` : "";
+  const stat = st?.meta ? `<div class="stat">${esc(st.meta)}</div>` : "";
+  const live = st?.state === "running" && st.stream
+    ? `<div class="stream" data-stream="${esc(n.name)}">${esc(st.stream.slice(-800))}</div>` : "";
+  const badge = `<span class="badge ${n.runtime}">${n.runtime === "agent" ? "⛭ agent" : "⚡ model"}</span>`;
+  return `<div class="node ${cls} ${state.selected === n.name ? "sel" : ""}" data-node="${esc(n.name)}">
+    <div class="nm"><span class="dot"></span>${esc(n.name)}${badge}</div>
+    <div class="md">${esc(n.model.replace(/^openrouter\//, ""))}</div>
+    ${skills}${wait}${stat}${live}
+  </div>`;
+}
+
+function draw() {
+  if (!state.layout) return;
+  const layers = new Map();
+  for (const t of state.layout.targets) {
+    if (!layers.has(t.layer)) layers.set(t.layer, []);
+    layers.get(t.layer).push(t);
+  }
+
+  $("layers").innerHTML = [...layers.keys()].sort((a, b) => a - b).map((k) => {
+    const row = layers.get(k).sort((a, b) => a.index - b.index);
+    return `<div class="layer">` + row.map((t) =>
+      `<div class="target ${t.group ? "group" : ""}" data-target="${esc(t.name)}"
+            ${t.group ? `data-label="${esc(t.name)} · parallel"` : ""}>
+         ${t.members.map(nodeCard).join("")}
+       </div>`).join("") + `</div>`;
+  }).join("");
+
+  for (const el of document.querySelectorAll(".node")) {
+    el.onclick = () => { state.selected = el.dataset.node; draw(); inspect(el.dataset.node); };
+  }
+  applyOffsets();
+  attachDrag();
+  requestAnimationFrame(wires);
+}
+
+// ---------------------------------------------------------------- drag
+// Targets (nodes and whole groups) can be dragged; offsets persist per scene
+// in localStorage so your arrangement survives reloads and re-renders.
+function offsetsKey() { return `ensemble:pos:${state.current}`; }
+function loadOffsets() {
+  try { return JSON.parse(localStorage.getItem(offsetsKey()) ?? "{}"); } catch { return {}; }
+}
+function applyOffsets() {
+  const saved = loadOffsets();
+  for (const el of document.querySelectorAll("[data-target]")) {
+    const o = saved[el.dataset.target];
+    el.style.transform = o ? `translate(${o.x}px, ${o.y}px)` : "";
+  }
+}
+function attachDrag() {
+  for (const el of document.querySelectorAll("[data-target]")) {
+    el.onmousedown = (down) => {
+      // Left button only; ignore drags starting on buttons/inputs.
+      if (down.button !== 0) return;
+      const name = el.dataset.target;
+      const saved = loadOffsets();
+      const start = saved[name] ?? { x: 0, y: 0 };
+      const ox = down.clientX, oy = down.clientY;
+      let moved = false;
+
+      const move = (m) => {
+        const dx = m.clientX - ox, dy = m.clientY - oy;
+        if (!moved && Math.hypot(dx, dy) < 4) return;   // click vs drag threshold
+        moved = true;
+        el.classList.add("dragging");
+        el.style.transform = `translate(${start.x + dx}px, ${start.y + dy}px)`;
+        requestAnimationFrame(wires);                    // wires follow live
+      };
+      const up = (u) => {
+        removeEventListener("mousemove", move);
+        removeEventListener("mouseup", up);
+        el.classList.remove("dragging");
+        if (!moved) return;                              // was a click — let onclick run
+        const dx = u.clientX - ox, dy = u.clientY - oy;
+        saved[name] = { x: start.x + dx, y: start.y + dy };
+        localStorage.setItem(offsetsKey(), JSON.stringify(saved));
+        // A real drag shouldn't also select — swallow the pending click once.
+        el.addEventListener("click", (c) => c.stopImmediatePropagation(), { capture: true, once: true });
+        requestAnimationFrame(wires);
+      };
+      addEventListener("mousemove", move);
+      addEventListener("mouseup", up);
+    };
+  }
+}
+
+/** Draws edges as SVG paths between the rendered target boxes. */
+function wires() {
+  if (!state.layout) return;
+  const svg = $("wires");
+  const stage = $("stage").getBoundingClientRect();
+  const box = (name) => {
+    const el = document.querySelector(`[data-target="${CSS.escape(name)}"]`);
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return { x: r.left - stage.left, y: r.top - stage.top, w: r.width, h: r.height };
+  };
+
+  const parts = [];
+  for (const e of state.layout.edges) {
+    const a = box(e.from), b = box(e.to);
+    if (!a || !b) continue;
+
+    const hot = state.hotEdge === `${e.from}->${e.to}`;
+    let d, lx, ly;
+
+    if (e.back) {
+      // Route loops around the left side so they never cross the nodes.
+      const x = Math.min(a.x, b.x) - 30;
+      const ay = a.y + a.h / 2, by = b.y + b.h / 2;
+      d = `M ${a.x} ${ay} C ${x} ${ay}, ${x} ${by}, ${b.x} ${by}`;
+      lx = x + 4; ly = (ay + by) / 2;
+    } else {
+      const ax = a.x + a.w / 2, ay = a.y + a.h;
+      const bx = b.x + b.w / 2, by = b.y;
+      const mid = (ay + by) / 2;
+      d = `M ${ax} ${ay} C ${ax} ${mid}, ${bx} ${mid}, ${bx} ${by}`;
+      lx = (ax + bx) / 2 + 6; ly = mid;
+    }
+
+    parts.push(`<path class="edge ${e.back ? "back" : ""} ${hot ? "hot" : ""}" d="${d}" marker-end="url(#arw)"/>`);
+    if (e.when) {
+      const label = e.when + (e.maxLoops ? ` ⟲${e.maxLoops}` : "");
+      parts.push(`<text class="elabel" x="${lx}" y="${ly}">${esc(label)}</text>`);
+    }
+  }
+
+  svg.innerHTML =
+    `<defs><marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6"
+       orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--line)"/></marker></defs>` +
+    parts.join("");
+}
+addEventListener("resize", () => requestAnimationFrame(wires));
+
+function inspect(name) {
+  const node = state.layout?.targets.flatMap((t) => t.members).find((m) => m.name === name);
+  if (!node) return;
+  const st = state.status.get(name);
+  const row = (k, v) => v ? `<dt>${k}</dt><dd>${esc(v)}</dd>` : "";
+  $("inspect").innerHTML = `<h3>${esc(node.name)}</h3><dl>
+    ${row("model", node.model)}
+    ${row("skills", node.skills.join(", ") || "none")}
+    ${row("mcp", node.mcp.join(", ") || "none")}
+    ${row("inputs", node.inputs.join(", ") || "—")}
+    ${row("outputs", node.outputs.join(", ") || "—")}
+    ${st?.meta ? `<dt>last run</dt><dd>${esc(st.meta)}</dd>` : ""}
+  </dl>
+  ${node.prompt ? `<dt style="font-size:10px;text-transform:uppercase;color:var(--muted);margin-top:10px">prompt</dt><pre>${esc(node.prompt)}</pre>` : ""}
+  ${st?.text ? `<dt style="font-size:10px;text-transform:uppercase;color:var(--muted);margin-top:10px">output</dt><pre>${esc(st.text)}</pre>` : ""}`;
+}
+
+// ---------------------------------------------------------------- log
+function log(html, cls = "") {
+  const el = $("log");
+  if (el.querySelector(".empty")) el.innerHTML = "";
+  const div = document.createElement("div");
+  div.className = `ev ${cls}`;
+  div.innerHTML = html;
+  el.appendChild(div);
+  el.scrollTop = el.scrollHeight;
+  return div;
+}
+
+// ---------------------------------------------------------------- events
+function onEvent(e) {
+  switch (e.type) {
+    case "scenes:changed":
+      loadScenes();
+      if (state.current === e.file || !state.current) select(state.current ?? e.file);
+      else select(state.current);
+      break;
+
+    case "run:start": {
+      state.status.clear();
+      state.blackboard = {};
+      state.running = true;
+      $("run").disabled = true; $("stop").disabled = false;
+      $("log").innerHTML = "";
+      log(`▶ ${esc(e.scene)} — ${esc(e.goal)}`, "h");
+
+      // A run can be triggered for a scene we are not looking at (another tab, or
+      // the API directly). Follow it, otherwise nodes light up off-screen.
+      const owner = state.scenes.find((s) => s.name === e.scene);
+      if (owner && owner.file !== state.current) select(owner.file);
+      else draw();
+      break;
+    }
+
+    case "node:start":
+      state.status.set(e.node, { state: "running", meta: "running…", stream: "" });
+      log(`┌ ${esc(e.node)} <span class="m">${esc(e.model)}</span>`, "");
+      draw();
+      break;
+
+    case "node:delta": {
+      const st = state.status.get(e.node);
+      if (st) {
+        st.stream = (st.stream ?? "") + e.delta;
+        // Update just the stream element — a full draw() per token would thrash.
+        const el = document.querySelector(`[data-stream="${CSS.escape(e.node)}"]`);
+        if (el) { el.textContent = st.stream.slice(-800); el.scrollTop = el.scrollHeight; }
+        else draw();
+      }
+      break;
+    }
+
+    case "state": {
+      state.blackboard = e.state ?? {};
+      const pane = $("state");
+      pane.innerHTML = Object.entries(state.blackboard).map(([k, v]) =>
+        `<div class="kv"><span class="k">${esc(k)}</span><pre>${esc(
+          typeof v === "string" ? v : JSON.stringify(v, null, 2))}</pre></div>`).join("")
+        || '<div class="empty">State is empty.</div>';
+      draw();
+      break;
+    }
+
+    case "node:retry":
+      log(`⚠ ${esc(e.node)}: ${esc(e.problem)} — reprompting`, "w");
+      break;
+
+    case "node:end": {
+      const meta = `${e.tokensIn}→${e.tokensOut} tok · $${e.cost.toFixed(4)} · ${(e.ms / 1000).toFixed(1)}s`;
+      state.status.set(e.node, { state: e.ok ? "ok" : "fail", meta, text: e.text });
+      // opencode gives no incremental text, so the reply lands here in one piece.
+      if (e.text) log(esc(e.text.trim()), "m");
+      log(`└ ${esc(e.node)} ${e.ok ? "ok" : "failed"} <span class="m">${esc(meta)}</span>`, e.ok ? "g" : "r");
+      if (!e.ok && e.error) log(`  ${esc(e.error)}`, "r");
+      draw();
+      if (state.selected === e.node) inspect(e.node);
+      break;
+    }
+
+    case "edge":
+      if (e.skipped) log(`  ${esc(e.from)}→${esc(e.to)} loop cap reached`, "m");
+      else {
+        state.hotEdge = `${e.from}->${e.to}`;
+        log(`  → ${esc(e.to)}${e.when ? ` <span class="m">(${esc(e.when)})</span>` : ""}`, "");
+        requestAnimationFrame(wires);
+      }
+      break;
+
+    case "run:end":
+      state.running = false;
+      draw();
+      state.hotEdge = null;
+      $("run").disabled = false; $("stop").disabled = true;
+      if (e.ok) log(`✓ done · ${e.nodeRuns} node runs · $${e.totalCost.toFixed(4)}`, "g h");
+      else log(`✗ ${esc(e.reason ?? "failed")}`, "r h");
+      requestAnimationFrame(wires);
+      break;
+  }
+}
+
+function connect() {
+  const es = new EventSource("/api/events");
+  es.onopen = () => { $("conn").textContent = "connected"; $("conn").style.color = "var(--ok)"; };
+  es.onerror = () => { $("conn").textContent = "reconnecting…"; $("conn").style.color = "var(--warn)"; };
+  es.onmessage = (m) => { try { onEvent(JSON.parse(m.data)); } catch {} };
+}
+
+// ---------------------------------------------------------------- actions
+$("run").onclick = async () => {
+  const goal = $("goal").value.trim();
+  if (!goal) { $("goal").focus(); return; }
+  if (!state.current) return;
+  $("run").disabled = true;
+  const res = await fetch("/api/run", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ file: state.current, goal }),
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    log(`✗ ${esc(err.error ?? "could not start")}`, "r");
+    (err.problems ?? []).forEach((p) => log(`  ${esc(p)}`, "r"));
+    $("run").disabled = false;
+  }
+};
+$("stop").onclick = () => fetch("/api/stop", { method: "POST" });
+$("goal").addEventListener("keydown", (e) => { if (e.key === "Enter") $("run").click(); });
+
+for (const t of document.querySelectorAll(".tab")) {
+  t.onclick = () => {
+    document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("active", x === t));
+    document.querySelectorAll(".pane").forEach((x) => x.classList.toggle("active", x.id === t.dataset.tab));
+  };
+}
+
+$("savebtn").onclick = async () => {
+  if (!state.current) return;
+  const msg = $("savemsg");
+  msg.textContent = "validating…"; msg.style.color = "var(--muted)";
+  const res = await fetch("/api/scene", {
+    method: "PUT", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ file: state.current, source: $("srctext").value }),
+  });
+  const data = await res.json();
+  if (res.ok) {
+    msg.textContent = "saved ✓"; msg.style.color = "var(--ok)";
+    select(state.current);
+  } else {
+    msg.textContent = (data.problems?.[0] ?? data.error ?? "invalid").slice(0, 90);
+    msg.style.color = "var(--fail)";
+  }
+  setTimeout(() => { if (msg.style.color !== "var(--fail)") msg.textContent = ""; }, 2500);
+};
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (ch) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+}
+
+loadScenes(); loadRegistry(); connect();
+</script>
+</body>
+</html>

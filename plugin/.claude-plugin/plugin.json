@@ -1,0 +1,20 @@
+{
+  "name": "ensemble",
+  "version": "0.1.0",
+  "description": "Author, run, observe, and revise multi-model agent scenes with @ghostmind-dev/ensemble.",
+  "author": {
+    "name": "ghostmind",
+    "url": "https://github.com/ghostmind-labo"
+  },
+  "license": "MIT",
+  "keywords": [
+    "ensemble",
+    "agents",
+    "multi-model",
+    "orchestration",
+    "openrouter",
+    "opencode"
+  ],
+  "repository": "https://github.com/ghostmind-labo/ensemble",
+  "homepage": "https://github.com/ghostmind-labo/ensemble#readme"
+}

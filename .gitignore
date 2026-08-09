@@ -1,0 +1,13 @@
+node_modules/
+.ensemble/
+*.log
+
+# Generated opencode agents — derived from scenes, never hand-edited.
+.opencode/agents/ensemble-*.md
+
+# opencode installs its own ~61MB dependency tree per project root.
+# It writes its own .opencode/.gitignore too; this is belt and braces.
+.opencode/node_modules/
+.opencode/package.json
+.opencode/package-lock.json
+.opencode/bun.lock

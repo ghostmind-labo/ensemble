@@ -1,0 +1,73 @@
+{
+  "id": "JDPxx3FVr4HO",
+  "name": "ensemble",
+  "version": "0.1.0",
+  "type": "project",
+  "description": "Multi-model agent ensembles. Scenes (one TypeScript file) define nodes \u2014 any model, scoped skills/state \u2014 wired by conditional edges, executed over OpenRouter/opencode.",
+  "tags": [
+    "agents",
+    "orchestration",
+    "opencode",
+    "openrouter",
+    "cli"
+  ],
+  "routines": {
+    "check": "npx tsc --noEmit",
+    "skills": "node src/cli.ts skills",
+    "validate": "node src/cli.ts validate scenes/example.yaml",
+    "view": "node src/cli.ts view scenes/example.yaml",
+    "smoke": "node src/cli.ts run scenes/smoke.yaml \"Which AI model are you? Name your vendor and model precisely.\"",
+    "herdr_init": "run herdr init ensemble --all",
+    "herdr_attach": "run herdr attach ensemble"
+  },
+  "herdr": {
+    "workspaces": [
+      {
+        "label": "ensemble",
+        "focus": false,
+        "tabs": [
+          {
+            "label": "dev",
+            "focus": true,
+            "layout": "compact",
+            "compact": {
+              "type": "main-side",
+              "panes": [
+                {
+                  "name": "run",
+                  "description": "Primary pane for executing scenes: `node src/cli.ts run scenes/<scene>.yaml \"<goal>\"`. Runs are long-lived and stream per-node output, so keep this pane dedicated to them.",
+                  "focus": true
+                },
+                {
+                  "name": "check",
+                  "description": "Typecheck and validation loop: `npx tsc --noEmit` and `node src/cli.ts validate scenes/*.yaml`. Validation is free, so run it here before spending tokens on a run."
+                },
+                {
+                  "name": "shell",
+                  "description": "Free shell for ad-hoc work \u2014 editing scenes, inspecting .graph/runs/<id>/state.json, or checking `opencode models`. Kept empty so the run pane is never interrupted."
+                }
+              ]
+            }
+          },
+          {
+            "label": "inspect",
+            "layout": "compact",
+            "compact": {
+              "type": "vertical",
+              "panes": [
+                {
+                  "name": "graphviz",
+                  "description": "Render scene topology: `node src/cli.ts view scenes/<scene>.yaml` for the terminal sketch, `--mermaid` for diagram source, or `--html=g.html` for a browser view."
+                },
+                {
+                  "name": "artifacts",
+                  "description": "Inspect run output under .graph/runs/<timestamp>-<scene>/ \u2014 `state.json` is the checkpointed blackboard, `result.md` renders every state key."
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
