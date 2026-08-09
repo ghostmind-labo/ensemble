@@ -134,6 +134,20 @@ function buildSystem(req: AgentCallRequest, toolCount: number): string {
   );
 
   if (toolCount > 0) {
+    // The tool-guidance block is the tunable part of the agent scaffold. An
+    // override file lets the autoresearch loop (bench/) measure a candidate
+    // without editing source, and lets a user specialise it per project.
+    const override = process.env["ENSEMBLE_AGENT_PROMPT"];
+    if (override) {
+      try {
+        sections.push(readFileSync(override, "utf8").replace(/\{toolCount\}/g, String(toolCount)).trim());
+        return sections.join("\n\n");
+      } catch {
+        // Unreadable override: fall through to the built-in block rather than
+        // silently running an agent with no operating guidance at all.
+      }
+    }
+
     sections.push(
       [
         `## Working with your ${toolCount} tool(s)`,

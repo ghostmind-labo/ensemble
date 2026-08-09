@@ -1,6 +1,6 @@
 {
   "name": "@ghostmind-dev/ensemble",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Multi-model agent ensembles. Describe a scene \u2014 nodes wired by edges, each node any model with scoped state \u2014 in one TypeScript file, and run it: conditions, loops, parallel groups, live visualization.",
   "type": "module",
   "license": "MIT",
@@ -37,7 +37,10 @@
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "npm run typecheck && npm run build"
+    "prepublishOnly": "npm run typecheck && npm run build",
+    "bench": "node bench/run.mts",
+    "bench:optimize": "node bench/optimize.mts",
+    "bench:test": "node bench/checker.test.mts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

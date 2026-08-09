@@ -423,6 +423,36 @@ stream — your consumer sees exactly what they see.
 **real run** with actual output, timings, and cost. Start with
 [01 — Model Jury](./examples/01-model-jury).
 
+## Tuning the agent scaffolding
+
+Every `runtime: "agent"` node receives a short block of operating instructions —
+batch independent calls, don't repeat failing ones, quote evidence, stop when done.
+That block is **measurable and swappable**.
+
+```bash
+ENSEMBLE_AGENT_PROMPT=my-prompt.md ensemble run scene.mts "goal"   # try one
+npm run bench                                                      # score it
+npm run bench:optimize -- --iterations=5 --repeat=3                # improve it
+```
+
+[`bench/`](./bench) is a [Karpathy autoresearch](https://github.com/karpathy/autoresearch)
+loop — propose, measure, **keep or revert**, repeat, with an audit trail in
+`bench/log.jsonl`. Twelve tasks, all graded by code (never a model judge), against a
+fixture project with known ground truth. Objective: `passes × 100 − turns`, so
+correctness dominates and efficiency breaks ties.
+
+Two things keep it honest, both learned the hard way:
+
+- **The metric must not punish correct answers.** An early checker failed a right
+  answer because the model wrote "does not *actually* mention". There are now unit
+  tests over the exact strings that were misgraded.
+- **Nothing is believed without clearing the noise floor.** The same prompt scored
+  9/12 and 12/12 on consecutive sweeps, so every measurement averages N sweeps and a
+  candidate must win by more than ~1 point. Ties revert.
+
+`optimize.mts` never edits source — a winner lands in `bench/prompts/best.md` and
+promotion is a deliberate step.
+
 ## Status
 
 v0.2 — **fully self-contained**; the opencode dependency is gone. Verified: per-node

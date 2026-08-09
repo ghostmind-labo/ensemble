@@ -191,7 +191,21 @@ ensemble mcp       # servers CONNECTED (not just declared) + every tool they exp
   `claudeMcp`: false, `skillDirs: ["./team-skills"]`) turns inheritance off for repos
   that must not depend on the machine. Custom dirs are scanned first.
 
-## 5 · Library use (embedding in code)
+## 5 · Tuning agent behaviour (advanced)
+
+The operating instructions every agent node receives can be replaced per project:
+
+```bash
+ENSEMBLE_AGENT_PROMPT=/path/to/block.md ensemble run scene.mts "goal"
+```
+
+The file replaces the built-in "how to use your tools" block (keep the literal
+`{toolCount}` placeholder). The repo's `bench/` is an autoresearch loop that
+measures candidates against 12 code-graded tasks and keeps only variants that beat
+the incumbent by more than the measured noise floor. Reach for this only if a user
+has a specific, repeated complaint about agent-node behaviour — the default is tuned.
+
+## 6 · Library use (embedding in code)
 
 ```ts
 import { loadScene, loadRegistry, runScene } from "@ghostmind-dev/ensemble";

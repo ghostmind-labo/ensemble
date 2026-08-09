@@ -16,3 +16,7 @@ node_modules/
 dist/
 examples/**/node_modules/
 examples/**/.opencode/node_modules/
+
+# autoresearch run artifacts (baseline.md and best.md ARE tracked)
+bench/prompts/candidate-*.md
+bench/log.jsonl
