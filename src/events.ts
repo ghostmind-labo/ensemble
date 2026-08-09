@@ -23,6 +23,16 @@ export type RunEvent =
   /** Live token text from a model-runtime node (agent nodes report only on completion). */
   | { type: "node:delta"; node: string; delta: string }
   | { type: "node:retry"; node: string; problem: string }
+  /** An agent node executed a tool. */
+  | {
+      type: "node:tool";
+      node: string;
+      tool: string;
+      args: Record<string, unknown>;
+      ok: boolean;
+      preview: string;
+      ms: number;
+    }
   /** The node's outputs look like a summary of a much longer reply. */
   | { type: "node:lossy"; node: string; extractedLength: number; replyLength: number }
   | {

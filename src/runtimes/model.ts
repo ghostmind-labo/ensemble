@@ -9,7 +9,15 @@
  * Cost and token counts come from OpenRouter's `usage` object, which is included
  * automatically in the final SSE chunk of every response.
  */
-import type { NodeResult } from "./agent.ts";
+export interface NodeResult {
+  text: string;
+  modelID: string;
+  providerID: string;
+  cost: number;
+  tokensIn: number;
+  tokensOut: number;
+  error?: string;
+}
 
 export interface ModelCallRequest {
   /** `openrouter/<vendor>/<model>` — the scene-level format. */

@@ -49,6 +49,7 @@ const nodeSchema = z
     skills: z.array(z.string()).optional(),
     mcp: z.array(z.string()).optional(),
     tools: z.record(z.boolean()).optional(),
+    maxTurns: z.number().int().positive().max(50).optional(),
     description: z.string().optional(),
     temperature: z.number().min(0).max(2).optional(),
   })

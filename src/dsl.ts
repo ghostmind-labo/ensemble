@@ -18,8 +18,9 @@ export type State = Record<string, unknown>;
  *
  * - `"model"` (default): a direct OpenRouter HTTP call. Fast, streams tokens,
  *   no local dependencies. No tools, no skills, no MCP — pure think.
- * - `"agent"`: a full opencode agent. Gets the agent loop, tools, and the
- *   skill/MCP registries, with per-node allowlist scoping. Pure do.
+ * - `"agent"`: our own tool-calling loop. Gets read-only built-in tools plus any
+ *   MCP servers it allowlists, and loops until the model stops asking for tools.
+ *   Pure do.
  */
 export type NodeRuntime = "model" | "agent";
 
@@ -37,8 +38,10 @@ export interface NodeSpec {
   skills?: string[];
   /** agent nodes only — MCP server allowlist. */
   mcp?: string[];
-  /** agent nodes only — tool gating overrides (write/edit default to false). */
+  /** agent nodes only — opt a built-in tool out, e.g. { grep: false }. */
   tools?: Record<string, boolean>;
+  /** agent nodes only — max tool-calling turns before giving up (default 12). */
+  maxTurns?: number;
   description?: string;
   temperature?: number;
 }

@@ -1,195 +1,265 @@
 /**
- * Bridge to opencode.
+ * The "agent" runtime — our own tool-calling loop. No opencode, no subprocess.
  *
- * We spawn `opencode serve` ourselves rather than using the SDK's
- * createOpencodeServer, for two reasons:
- *   1. It sets OPENCODE_CONFIG_CONTENT={} when no config is passed, which would
- *      shadow the user's real opencode.json (and therefore their OpenRouter
- *      provider setup).
- *   2. It offers no cwd control, but opencode discovers project agents by walking
- *      up from its working directory — so the server must start at the scene root.
+ * The mechanism is a `while`: send the model its tools, execute whatever it asks
+ * for, feed the results back, repeat until it answers with content instead of
+ * tool calls. That loop *is* "keep going until the goal is reached"; `maxTurns`
+ * is the budget that guarantees it terminates.
  *
- * No token streaming. opencode 1.18.15's event bus was measured and does not
- * publish incremental assistant text on this path: a 400-word generation emits a
- * single `message.part.updated` at length 0, and the text only materialises in
- * the `session.prompt` response. Reporting is therefore per node, which is what
- * the engine's events express.
+ * Why we own this rather than renting it: an off-the-shelf coding agent injects
+ * ~8,800 tokens of its own system prompt, tool schemas, and personality into
+ * every call, and that prompt competes with the scene's output contract. Here
+ * the system prompt is the node's prompt plus roughly 200 tokens of scaffolding,
+ * and the tool list is assembled per node — a tool a node did not ask for is not
+ * denied, it is absent.
  */
-import { spawn, type ChildProcess } from "node:child_process";
-import { createOpencodeClient } from "@opencode-ai/sdk";
-import { splitModel } from "../scene.ts";
+import type { NodeResult } from "./model.ts";
+import type { McpHub, McpTool } from "../mcp.ts";
+import { BUILTIN_TOOLS, type BuiltinTool } from "../tools/builtin.ts";
+import type { Skill } from "../registry.ts";
+import { readFileSync } from "node:fs";
 
-type Client = ReturnType<typeof createOpencodeClient>;
+export type { NodeResult };
 
-export interface NodeResult {
-  text: string;
-  modelID: string;
-  providerID: string;
-  cost: number;
-  tokensIn: number;
-  tokensOut: number;
-  error?: string;
+export interface ToolCallEvent {
+  tool: string;
+  args: Record<string, unknown>;
+  ok: boolean;
+  preview: string;
+  ms: number;
 }
 
-export interface PromptRequest {
-  agent: string;
+export interface AgentCallRequest {
   model: string;
-  text: string;
-  /** Reuses a session so a reprompt keeps the prior turn in context. */
-  sessionID?: string;
+  system?: string;
+  messages: Array<{ role: "user" | "assistant"; content: string }>;
+  temperature?: number;
+  /** Which MCP servers this node may use. Others are not offered at all. */
+  mcp: string[];
+  /** Built-in tool names this node may use. Empty disables built-ins. */
+  builtins: string[];
+  /** Skills whose instructions get inlined into the system prompt. */
+  skills: Skill[];
+  hub: McpHub | undefined;
+  root: string;
+  maxTurns: number;
+  onDelta?: (delta: string) => void;
+  onToolCall?: (event: ToolCallEvent) => void;
+  signal?: AbortSignal;
 }
 
-export class Runtime {
-  private client: Client;
-  private root: string;
-  url: string;
-  private proc: ChildProcess | undefined;
+const ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
 
-  private constructor(client: Client, root: string, url: string, proc: ChildProcess | undefined) {
-    this.client = client;
-    this.root = root;
-    this.url = url;
-    this.proc = proc;
-  }
+/**
+ * Ceiling on a single tool result entering the conversation.
+ *
+ * Defence in depth: built-ins cap themselves, but an MCP server is someone
+ * else's code and can return anything. Since every prior tool result is resent
+ * on each turn, one unbounded response inflates the whole rest of the run.
+ */
+const MAX_TOOL_RESULT = 8_000;
 
-  /** Attaches to an existing server when `port` is given, otherwise spawns one. */
-  static async start(root: string, port?: number): Promise<Runtime> {
-    if (port !== undefined) {
-      const url = `http://127.0.0.1:${port}`;
-      const client = createOpencodeClient({ baseUrl: url, directory: root });
-      // Fail fast with a clear message rather than at the first prompt.
+function clampResult(text: string): string {
+  return text.length <= MAX_TOOL_RESULT
+    ? text
+    : `${text.slice(0, MAX_TOOL_RESULT)}\n… [truncated: ${text.length} chars total — narrow your query to see more]`;
+}
+
+function apiKey(): string {
+  const key = process.env["OPENROUTER_API_KEY"];
+  if (!key) throw new Error("OPENROUTER_API_KEY is not set — ensemble calls OpenRouter directly.");
+  return key;
+}
+
+function apiModel(ref: string): string {
+  if (!ref.startsWith("openrouter/")) throw new Error(`model must be "openrouter/…", got "${ref}"`);
+  return ref.slice("openrouter/".length);
+}
+
+interface OpenAITool {
+  type: "function";
+  function: { name: string; description: string; parameters: Record<string, unknown> };
+}
+
+/**
+ * A skill's SKILL.md body becomes part of the system prompt.
+ *
+ * Deliberately eager rather than progressive: a graph node has one narrow job and
+ * an explicit allowlist, so the file it was given is the file it needs. Making it
+ * fetch its own instructions would only add a turn.
+ */
+function renderSkills(skills: Skill[]): string {
+  if (skills.length === 0) return "";
+  const blocks = skills.map((skill) => {
+    let body = "";
+    try {
+      body = readFileSync(skill.path, "utf8").replace(/^\s*---[\s\S]*?\n\s*---\n?/, "").trim();
+    } catch {
+      body = skill.description;
+    }
+    return `### Skill: ${skill.name}\n\n${body}`;
+  });
+  return `\n\n## Skills available to you\n\n${blocks.join("\n\n---\n\n")}`;
+}
+
+export async function callAgent(req: AgentCallRequest): Promise<NodeResult & { turns: number }> {
+  const model = apiModel(req.model);
+
+  // --- assemble this node's tools. Omission is the access control. ---
+  const builtins: BuiltinTool[] = BUILTIN_TOOLS.filter((t) => req.builtins.includes(t.name));
+  const mcpTools: McpTool[] = req.hub ? req.hub.toolsFor(req.mcp) : [];
+
+  const tools: OpenAITool[] = [
+    ...builtins.map((t) => ({
+      type: "function" as const,
+      function: { name: t.name, description: t.description, parameters: t.inputSchema },
+    })),
+    ...mcpTools.map((t) => ({
+      type: "function" as const,
+      function: { name: t.name, description: t.description, parameters: t.inputSchema },
+    })),
+  ];
+
+  const system =
+    (req.system ?? "You are a capable agent. Use the tools available to you to accomplish the goal.") +
+    renderSkills(req.skills) +
+    (tools.length > 0
+      ? `\n\n## Tools\n\nYou have ${tools.length} tool(s). Use them to gather what you need. ` +
+        `When you have enough to answer, stop calling tools and give your final answer.`
+      : "");
+
+  const messages: Array<Record<string, unknown>> = [
+    { role: "system", content: system },
+    ...req.messages,
+  ];
+
+  let text = "";
+  let cost = 0;
+  let tokensIn = 0;
+  let tokensOut = 0;
+  let turns = 0;
+
+  while (turns < req.maxTurns) {
+    turns++;
+
+    const res = await fetch(ENDPOINT, {
+      method: "POST",
+      ...(req.signal ? { signal: req.signal } : {}),
+      headers: {
+        authorization: `Bearer ${apiKey()}`,
+        "content-type": "application/json",
+        "x-title": "ensemble",
+      },
+      body: JSON.stringify({
+        model,
+        messages,
+        ...(tools.length > 0 ? { tools } : {}),
+        ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
+      }),
+    });
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      let detail = body.slice(0, 300);
       try {
-        await client.project.list({ throwOnError: true });
+        detail = (JSON.parse(body) as { error?: { message?: string } }).error?.message ?? detail;
       } catch {
-        throw new Error(`no opencode server reachable at ${url} — start one with \`opencode serve --port ${port}\``);
+        /* keep raw */
       }
-      return new Runtime(client, root, url, undefined);
+      return {
+        text,
+        modelID: model,
+        providerID: "openrouter",
+        cost,
+        tokensIn,
+        tokensOut,
+        turns,
+        error: `OpenRouter ${res.status}: ${detail || res.statusText}`,
+      };
     }
 
-    const proc = spawn("opencode", ["serve", "--hostname=127.0.0.1", "--port=0"], {
-      cwd: root,
-      stdio: ["ignore", "pipe", "pipe"],
-      // env inherited untouched, so opencode.json and OPENROUTER_API_KEY apply.
-    });
-
-    const url = await new Promise<string>((resolve, reject) => {
-      let output = "";
-      let settled = false;
-
-      const timer = setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        proc.kill();
-        reject(new Error(`opencode serve did not start within 30s.\n${output}`));
-      }, 30_000);
-
-      const scan = (chunk: Buffer): void => {
-        if (settled) return;
-        output += chunk.toString();
-        const match = /listening on\s+(https?:\/\/[^\s]+)/i.exec(output);
-        if (match?.[1]) {
-          settled = true;
-          clearTimeout(timer);
-          resolve(match[1]);
-        }
-      };
-
-      proc.stdout?.on("data", scan);
-      proc.stderr?.on("data", scan);
-
-      proc.on("error", (err) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        reject(new Error(`could not launch opencode: ${err.message}. Is it on PATH?`));
-      });
-
-      proc.on("exit", (code) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        reject(new Error(`opencode serve exited with code ${code}.\n${output}`));
-      });
-    });
-
-    return new Runtime(createOpencodeClient({ baseUrl: url, directory: root }), root, url, proc);
-  }
-
-  /**
-   * Live MCP server status, straight from the running opencode instance.
-   *
-   * This is the only honest answer to "which MCP servers can a node actually
-   * use": parsing opencode.json tells you what was *declared*, not what
-   * connected. A server can be configured and still be failed, disabled, or
-   * waiting on OAuth.
-   */
-  async mcpStatus(): Promise<Record<string, { status: string; error?: string }>> {
-    const res = await this.client.mcp.status({
-      query: { directory: this.root },
-      throwOnError: true,
-    });
-    return (res.data ?? {}) as Record<string, { status: string; error?: string }>;
-  }
-
-  async createSession(title: string): Promise<string> {
-    const res = await this.client.session.create({
-      body: { title },
-      query: { directory: this.root },
-      throwOnError: true,
-    });
-    const id = (res.data as { id?: string } | undefined)?.id;
-    if (!id) throw new Error("opencode did not return a session id");
-    return id;
-  }
-
-  /**
-   * One node turn. Model is passed per-call so the scene stays the single
-   * source of truth even though the generated agent also declares one.
-   */
-  async prompt(req: PromptRequest): Promise<NodeResult & { sessionID: string }> {
-    const sessionID = req.sessionID ?? (await this.createSession(`graph:${req.agent}`));
-    const { providerID, modelID } = splitModel(req.model);
-
-    const res = await this.client.session.prompt({
-      path: { id: sessionID },
-      query: { directory: this.root },
-      body: {
-        agent: req.agent,
-        model: { providerID, modelID },
-        parts: [{ type: "text", text: req.text }],
-      },
-      throwOnError: true,
-    });
-
-    const data = res.data as
-      | { info?: Record<string, unknown>; parts?: Array<Record<string, unknown>> }
-      | undefined;
-    const info = data?.info ?? {};
-    const parts = data?.parts ?? [];
-
-    const text = parts
-      .filter((part) => part["type"] === "text" && typeof part["text"] === "string")
-      .map((part) => part["text"] as string)
-      .join("\n")
-      .trim();
-
-    const tokens = (info["tokens"] ?? {}) as { input?: number; output?: number };
-    const err = info["error"] as { name?: string; data?: { message?: string } } | undefined;
-
-    return {
-      sessionID,
-      text,
-      // Reported by the server, so this reflects what actually ran — not what we asked for.
-      modelID: typeof info["modelID"] === "string" ? info["modelID"] : modelID,
-      providerID: typeof info["providerID"] === "string" ? info["providerID"] : providerID,
-      cost: typeof info["cost"] === "number" ? info["cost"] : 0,
-      tokensIn: tokens.input ?? 0,
-      tokensOut: tokens.output ?? 0,
-      ...(err ? { error: err.data?.message ?? err.name ?? "unknown provider error" } : {}),
+    const payload = (await res.json()) as {
+      choices?: Array<{ message?: Record<string, unknown> }>;
+      usage?: { prompt_tokens?: number; completion_tokens?: number; cost?: number };
+      error?: { message?: string };
     };
+
+    if (payload.error?.message) {
+      return {
+        text, modelID: model, providerID: "openrouter", cost, tokensIn, tokensOut, turns,
+        error: payload.error.message,
+      };
+    }
+
+    cost += payload.usage?.cost ?? 0;
+    tokensIn += payload.usage?.prompt_tokens ?? 0;
+    tokensOut += payload.usage?.completion_tokens ?? 0;
+
+    const message = payload.choices?.[0]?.message ?? {};
+    messages.push(message);
+
+    const calls = (message["tool_calls"] ?? []) as Array<{
+      id: string;
+      function: { name: string; arguments: string };
+    }>;
+
+    // No tool calls → the model considers itself done. This is the exit.
+    if (calls.length === 0) {
+      text = typeof message["content"] === "string" ? message["content"] : "";
+      if (text) req.onDelta?.(text);
+      return { text: text.trim(), modelID: model, providerID: "openrouter", cost, tokensIn, tokensOut, turns };
+    }
+
+    // The model may request several tools at once — run them concurrently.
+    const results = await Promise.all(
+      calls.map(async (call) => {
+        const started = Date.now();
+        let args: Record<string, unknown> = {};
+        try {
+          args = call.function.arguments ? (JSON.parse(call.function.arguments) as Record<string, unknown>) : {};
+        } catch {
+          return { call, output: `invalid JSON arguments: ${call.function.arguments}`, ok: false, ms: 0 };
+        }
+
+        try {
+          const builtin = builtins.find((t) => t.name === call.function.name);
+          const output = builtin
+            ? await builtin.run(args, req.root)
+            : await (req.hub as McpHub).call(call.function.name, args);
+          return { call, output, ok: true, ms: Date.now() - started };
+        } catch (err) {
+          // Tool errors are fed back as content, not thrown: the model can often
+          // recover (fix a path, try another query) given the error text.
+          return {
+            call,
+            output: `error: ${err instanceof Error ? err.message : String(err)}`,
+            ok: false,
+            ms: Date.now() - started,
+          };
+        }
+      }),
+    );
+
+    for (const { call, output, ok, ms } of results) {
+      req.onToolCall?.({
+        tool: call.function.name,
+        args: {},
+        ok,
+        preview: output.slice(0, 160).replace(/\s+/g, " "),
+        ms,
+      });
+      messages.push({ role: "tool", tool_call_id: call.id, content: clampResult(output) });
+    }
   }
 
-  async close(): Promise<void> {
-    if (this.proc && this.proc.exitCode === null) this.proc.kill();
-  }
+  return {
+    text: text.trim(),
+    modelID: model,
+    providerID: "openrouter",
+    cost,
+    tokensIn,
+    tokensOut,
+    turns,
+    error: `agent did not finish within maxTurns (${req.maxTurns}) — raise it or narrow the node's job`,
+  };
 }

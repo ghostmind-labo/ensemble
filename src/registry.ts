@@ -1,8 +1,8 @@
 /**
  * The central catalog.
  *
- * Skills and MCP servers are NOT owned by this project — opencode already stores
- * them globally. We only discover what is there so scenes can reference entries by
+ * Skills are shared with Claude Code (same SKILL.md format and locations);
+ * MCP servers are configured in ensemble.json. We only discover what is there so scenes can reference entries by
  * name and `graph validate` can reject typos before a run burns tokens.
  */
 import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
@@ -20,8 +20,14 @@ export interface Skill {
 
 export interface McpServer {
   name: string;
-  type: string;
+  type: "local" | "remote";
   enabled: boolean;
+  /** local: argv, e.g. ["npx","-y","@modelcontextprotocol/server-filesystem","."] */
+  command?: string[];
+  environment?: Record<string, string>;
+  /** remote: the server URL */
+  url?: string;
+  headers?: Record<string, string>;
 }
 
 export interface Registry {
@@ -37,7 +43,8 @@ export interface Registry {
 }
 
 /**
- * The six directories opencode itself scans, in its documented precedence order.
+ * The six directories we scan for skills — the same ones Claude Code and
+ * opencode use, so existing skills work unchanged.
  * Project-local entries win over global ones, so later writes must not clobber
  * earlier ones — see the `has()` guard in collectSkills.
  */
@@ -132,14 +139,16 @@ function collectSkills(cwd: string): { skills: Map<string, Skill>; problems: str
   return { skills, problems };
 }
 
-/** MCP servers live in opencode.json / opencode.jsonc, project first then global. */
+/**
+ * MCP servers live in `ensemble.json` — project first, then global.
+ * Skills are still read from the shared Claude/agent directories, so skills you
+ * already have keep working; only MCP configuration is ours.
+ */
 function collectMcp(cwd: string): { mcp: Map<string, McpServer>; configPath?: string } {
   const home = homedir();
   const candidates = [
-    join(cwd, "opencode.json"),
-    join(cwd, "opencode.jsonc"),
-    join(home, ".config", "opencode", "opencode.json"),
-    join(home, ".config", "opencode", "opencode.jsonc"),
+    join(cwd, "ensemble.json"),
+    join(home, ".config", "ensemble", "ensemble.json"),
   ];
 
   const mcp = new Map<string, McpServer>();
@@ -163,11 +172,20 @@ function collectMcp(cwd: string): { mcp: Map<string, McpServer>; configPath?: st
     for (const [name, value] of Object.entries(block as Record<string, unknown>)) {
       if (mcp.has(name)) continue;
       const server = (typeof value === "object" && value !== null ? value : {}) as Record<string, unknown>;
+      const type = server["type"] === "remote" ? "remote" : "local";
       mcp.set(name, {
         name,
-        type: typeof server["type"] === "string" ? (server["type"] as string) : "local",
-        // opencode treats a missing `enabled` as true.
+        type,
+        // A missing `enabled` means enabled.
         enabled: server["enabled"] !== false,
+        ...(Array.isArray(server["command"]) ? { command: server["command"] as string[] } : {}),
+        ...(typeof server["url"] === "string" ? { url: server["url"] } : {}),
+        ...(typeof server["environment"] === "object" && server["environment"]
+          ? { environment: server["environment"] as Record<string, string> }
+          : {}),
+        ...(typeof server["headers"] === "object" && server["headers"]
+          ? { headers: server["headers"] as Record<string, string> }
+          : {}),
       });
     }
   }

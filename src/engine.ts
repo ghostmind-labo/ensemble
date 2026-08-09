@@ -7,10 +7,10 @@
  * either a single node or a group, and a group's members run concurrently.
  *
  * Two runtimes, chosen per node:
- *   - "model": direct OpenRouter fetch. Streams real token deltas.
- *   - "agent": a scoped opencode agent (tools, skills, MCP).
- * opencode is spawned lazily, on the first agent node — a scene of pure model
- * nodes never pays for it.
+ *   - "model": one direct OpenRouter call. Streams real token deltas.
+ *   - "agent": our own tool-calling loop — built-in read-only tools plus any MCP
+ *     servers the node allowlisted, looping until the model stops asking for tools.
+ * MCP servers connect lazily, only if some node actually names one.
  *
  * The engine only emits events; rendering lives in reporter.ts and serve.ts.
  */
@@ -19,9 +19,10 @@ import { join, resolve } from "node:path";
 import type { Scene, NodeSpec } from "./scene.ts";
 import { resolveTarget, runtimeOf } from "./scene.ts";
 import { loadRegistry } from "./registry.ts";
-import { compileScene, type Compilation } from "./compile.ts";
-import { Runtime, type NodeResult } from "./runtimes/agent.ts";
-import { callModel } from "./runtimes/model.ts";
+import { callAgent } from "./runtimes/agent.ts";
+import { callModel, type NodeResult } from "./runtimes/model.ts";
+import { McpHub } from "./mcp.ts";
+import { BUILTIN_NAMES } from "./tools/builtin.ts";
 import {
   extractOutputs,
   renderInputs,
@@ -67,25 +68,27 @@ function buildPrompt(scene: Scene, node: string, goal: string, state: State): st
   return sections.join("\n\n");
 }
 
-/** Lazily-started opencode, shared by every agent node in the run. */
-class AgentPool {
-  private runtime: Runtime | undefined;
-  private starting: Promise<Runtime> | undefined;
+/** Lazily-connected MCP servers, shared by every agent node in the run. */
+class ToolHub {
+  private hub: McpHub | undefined;
+  private starting: Promise<McpHub> | undefined;
   private root: string;
-  private port: number | undefined;
+  private servers: import("./registry.ts").McpServer[];
 
-  constructor(root: string, port: number | undefined) {
+  constructor(root: string, servers: import("./registry.ts").McpServer[]) {
     this.root = root;
-    this.port = port;
+    this.servers = servers;
   }
 
-  get(): Promise<Runtime> {
-    if (this.runtime) return Promise.resolve(this.runtime);
-    // Single-flight: parallel agent nodes must not each spawn a server.
-    this.starting ??= Runtime.start(this.root, this.port).then((rt) => {
-      this.runtime = rt;
-      return rt;
-    });
+  get(): Promise<McpHub> {
+    if (this.hub) return Promise.resolve(this.hub);
+    // Single-flight: parallel agent nodes must not each connect the servers.
+    this.starting ??= (async () => {
+      const hub = new McpHub(this.root);
+      await hub.connect(this.servers);
+      this.hub = hub;
+      return hub;
+    })();
     return this.starting;
   }
 
@@ -98,8 +101,8 @@ interface NodeCallCtx {
   scene: Scene;
   goal: string;
   state: State;
-  pool: AgentPool;
-  compilation: Compilation;
+  hub: ToolHub;
+  needsMcp: boolean;
   emit: EventSink;
   signal?: AbortSignal;
 }
@@ -111,13 +114,12 @@ async function callOnce(
   spec: NodeSpec,
   text: string,
   history: Array<{ role: "user" | "assistant"; content: string }>,
-  sessionID: string | undefined,
-): Promise<NodeResult & { sessionID?: string }> {
+): Promise<NodeResult> {
   const model = spec.model ?? ctx.scene.defaults.model ?? "";
   const temperature = spec.temperature ?? ctx.scene.defaults.temperature;
 
   if (runtimeOf(ctx.scene, spec) === "model") {
-    const res = await callModel({
+    return callModel({
       model,
       ...(spec.prompt ? { system: spec.prompt } : {}),
       messages: [...history, { role: "user", content: text }],
@@ -125,13 +127,31 @@ async function callOnce(
       onDelta: (delta) => ctx.emit({ type: "node:delta", node, delta }),
       ...(ctx.signal ? { signal: ctx.signal } : {}),
     });
-    return res;
   }
 
-  const agent = ctx.compilation.agents.get(node);
-  if (!agent) throw new Error(`node "${node}" was not compiled`);
-  const runtime = await ctx.pool.get();
-  return runtime.prompt({ agent: agent.agentName, model, text, ...(sessionID ? { sessionID } : {}) });
+  const wanted = spec.mcp ?? [];
+  const hub = wanted.length > 0 ? await ctx.hub.get() : undefined;
+  const registry = loadRegistry();
+  const skills = (spec.skills ?? [])
+    .map((name) => registry.skills.get(name))
+    .filter((s): s is NonNullable<typeof s> => Boolean(s));
+
+  return callAgent({
+    model,
+    ...(spec.prompt ? { system: spec.prompt } : {}),
+    messages: [...history, { role: "user", content: text }],
+    ...(temperature !== undefined ? { temperature } : {}),
+    mcp: wanted,
+    // `tools: { grep: false }` opts a built-in out; default is all of them.
+    builtins: BUILTIN_NAMES.filter((n) => spec.tools?.[n] !== false),
+    skills,
+    hub,
+    root: resolve(process.cwd()),
+    maxTurns: spec.maxTurns ?? 12,
+    onDelta: (delta) => ctx.emit({ type: "node:delta", node, delta }),
+    onToolCall: (event) => ctx.emit({ type: "node:tool", node, ...event }),
+    ...(ctx.signal ? { signal: ctx.signal } : {}),
+  });
 }
 
 /**
@@ -152,7 +172,6 @@ async function runNode(
 
   const firstPrompt = buildPrompt(ctx.scene, node, ctx.goal, ctx.state);
   const history: Array<{ role: "user" | "assistant"; content: string }> = [];
-  let sessionID: string | undefined;
   let parseProblem: string | undefined;
   let last: NodeResult | undefined;
 
@@ -163,9 +182,9 @@ async function runNode(
         : `Your previous reply could not be parsed: ${parseProblem ?? "invalid output"}\n\n` +
           `Reply again with ONLY the required json block.`;
 
-    let res: NodeResult & { sessionID?: string };
+    let res: NodeResult;
     try {
-      res = await callOnce(ctx, node, spec, text, history, sessionID);
+      res = await callOnce(ctx, node, spec, text, history);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       ctx.emit({
@@ -184,7 +203,6 @@ async function runNode(
       return { error: `node "${node}" failed: ${message}` };
     }
 
-    sessionID = res.sessionID;
     history.push({ role: "user", content: text }, { role: "assistant", content: res.text });
     last = res;
 
@@ -241,11 +259,13 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
   const registry = loadRegistry();
   const root = resolve(process.cwd());
 
-  // Agents are only compiled — and opencode only ever started — if some node needs it.
-  const hasAgentNodes = Object.values(scene.nodes).some((n) => runtimeOf(scene, n) === "agent");
-  const compilation: Compilation = hasAgentNodes
-    ? compileScene(scene, registry)
-    : { root, agentDir: "", agents: new Map() };
+  // MCP servers connect only if some node actually names one.
+  const wantedServers = new Set(
+    Object.values(scene.nodes)
+      .filter((n) => runtimeOf(scene, n) === "agent")
+      .flatMap((n) => n.mcp ?? []),
+  );
+  const servers = [...registry.mcp.values()].filter((s) => wantedServers.has(s.name));
 
   const id = runId(scene);
   const runDir = join(root, ".ensemble", "runs", id);
@@ -266,7 +286,7 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
   }));
   emit({ type: "run:start", runId: id, scene: scene.name, goal, nodes: nodeMeta });
 
-  const pool = new AgentPool(root, opts.port);
+  const hub = new ToolHub(root, servers);
   const checkpoint = (): void => {
     writeFileSync(join(runDir, "state.json"), JSON.stringify(state, null, 2), "utf8");
   };
@@ -281,8 +301,8 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
     scene,
     goal,
     state,
-    pool,
-    compilation,
+    hub,
+    needsMcp: servers.length > 0,
     emit,
     ...(opts.signal ? { signal: opts.signal } : {}),
   };
@@ -374,7 +394,7 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
   } catch (err) {
     return fail(err instanceof Error ? err.message : String(err));
   } finally {
-    await pool.close();
+    await hub.close();
   }
 }
 

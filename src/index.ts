@@ -29,11 +29,13 @@ export type { Registry, Skill, McpServer } from "./registry.ts";
 // --- execution --------------------------------------------------------------
 export { runScene } from "./engine.ts";
 export type { RunOptions, RunResult } from "./engine.ts";
-export { Runtime } from "./runtimes/agent.ts";
-export type { NodeResult, PromptRequest } from "./runtimes/agent.ts";
+export { callAgent } from "./runtimes/agent.ts";
+export type { AgentCallRequest, ToolCallEvent } from "./runtimes/agent.ts";
 export { callModel } from "./runtimes/model.ts";
-export { compileScene } from "./compile.ts";
-export type { Compilation, CompiledAgent } from "./compile.ts";
+export type { NodeResult, ModelCallRequest } from "./runtimes/model.ts";
+export { McpHub } from "./mcp.ts";
+export type { McpTool, ServerStatus } from "./mcp.ts";
+export { BUILTIN_TOOLS, BUILTIN_NAMES } from "./tools/builtin.ts";
 
 // --- events -----------------------------------------------------------------
 export { combineSinks } from "./events.ts";

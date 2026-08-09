@@ -1,7 +1,7 @@
 {
   "name": "@ghostmind-dev/ensemble",
-  "version": "0.1.1",
-  "description": "Multi-model agent ensembles. Describe a scene — nodes wired by edges, each node any model with scoped state — in one TypeScript file, and run it: conditions, loops, parallel groups, live visualization.",
+  "version": "0.2.0",
+  "description": "Multi-model agent ensembles. Describe a scene \u2014 nodes wired by edges, each node any model with scoped state \u2014 in one TypeScript file, and run it: conditions, loops, parallel groups, live visualization.",
   "type": "module",
   "license": "MIT",
   "bin": {
@@ -28,10 +28,11 @@
     "multi-model",
     "orchestration",
     "graph",
-    "opencode",
     "openrouter",
     "llm",
-    "cli"
+    "cli",
+    "mcp",
+    "tool-calling"
   ],
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
@@ -39,21 +40,13 @@
     "prepublishOnly": "npm run typecheck && npm run build"
   },
   "dependencies": {
-    "@opencode-ai/sdk": "1.18.15",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "yaml": "^2.7.0",
     "zod": "^3.24.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
     "typescript": "^5.7.0"
-  },
-  "peerDependencies": {
-    "opencode-ai": ">=1.18.0"
-  },
-  "peerDependenciesMeta": {
-    "opencode-ai": {
-      "optional": true
-    }
   },
   "engines": {
     "node": ">=22.6.0"

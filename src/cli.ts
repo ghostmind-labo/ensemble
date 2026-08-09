@@ -15,8 +15,8 @@ ${c.bold("Usage")}
   ensemble view <scene.ts>           Draw the graph (terminal, mermaid, or html)
   ensemble validate <scene.ts>       Check a scene without running it
   ensemble skills                      List the skill + MCP registry (from config)
-  ensemble mcp                         Verify which MCP servers actually connected
-  ensemble models [filter]             List models available through opencode
+  ensemble mcp                         Connect MCP servers and list their tools
+  ensemble models [filter]             List models available through OpenRouter
 
 ${c.bold("Options")}
   --port <n>        Attach to an opencode server already on this port
@@ -47,7 +47,7 @@ async function cmdSkills(): Promise<number> {
 
   info(c.bold(`\nMCP servers (${reg.mcp.size})`) + c.dim("  declared in config"));
   if (reg.mcp.size === 0) {
-    info(c.dim("  none configured — run `ensemble mcp` to verify against a live opencode"));
+    info(c.dim("  none configured — declare them in ensemble.json; `ensemble mcp` connects them"));
   } else {
     for (const server of [...reg.mcp.values()].sort((a, b) => a.name.localeCompare(b.name))) {
       const state = server.enabled ? c.green("enabled") : c.dim("disabled");
@@ -95,86 +95,73 @@ async function cmdValidate(path: string | undefined): Promise<number> {
 /**
  * Live MCP verification.
  *
- * `ensemble skills` reads opencode.json, which only tells you what was *declared*.
- * This boots opencode and asks it what actually connected — a server can be
- * configured and still be failed, disabled, or waiting on OAuth.
+ * `ensemble skills` reads ensemble.json, which only says what was *declared*.
+ * This actually connects each server and reports what happened — a server can be
+ * configured and still fail to start, or start and expose nothing.
  */
-async function cmdMcp(opts: { port?: number }): Promise<number> {
-  const { Runtime } = await import("./runtimes/agent.ts");
+async function cmdMcp(): Promise<number> {
+  const { McpHub } = await import("./mcp.ts");
   const registry = loadRegistry();
+  const servers = [...registry.mcp.values()];
 
-  info(c.dim("starting opencode…"));
-  let runtime;
-  try {
-    runtime = await Runtime.start(process.cwd(), opts.port);
-  } catch (err) {
-    error(err instanceof Error ? err.message : String(err));
-    return 1;
-  }
-
-  try {
-    const status = await runtime.mcpStatus();
-    const names = Object.keys(status).sort();
-
-    info(`\n${c.bold(`MCP servers (${names.length})`)} ${c.dim(runtime.url)}`);
-
-    if (names.length === 0) {
-      info(c.dim("  none connected\n"));
-      info(`  opencode reads MCP servers from ${c.cyan(registry.configPath ?? "opencode.json")}.`);
-      info(c.dim("  Servers configured in Claude Code are NOT visible to graph nodes —"));
-      info(c.dim("  the two runtimes keep separate registries. To add one:\n"));
-      info(
-        c.dim(
-          [
-            '  "mcp": {',
-            '    "github": {',
-            '      "type": "local",',
-            '      "command": ["npx", "-y", "@modelcontextprotocol/server-github"],',
-            '      "enabled": true',
-            "    }",
-            "  }",
-          ].join("\n"),
-        ),
-      );
-      info("");
-      return 0;
-    }
-
-    const width = Math.max(...names.map((n) => n.length));
-    const paint = (state: string): string => {
-      if (state === "connected") return c.green("connected");
-      if (state === "disabled") return c.dim("disabled");
-      if (state === "needs_auth") return c.yellow("needs auth");
-      if (state === "needs_client_registration") return c.yellow("needs registration");
-      return c.red(state);
-    };
-
-    for (const name of names) {
-      const entry = status[name];
-      if (!entry) continue;
-      const declared = registry.mcp.get(name);
-      info(`  ${c.cyan(name.padEnd(width))}  ${paint(entry.status)}${declared ? c.dim(`  ${declared.type}`) : ""}`);
-      if (entry.error) info(`  ${" ".repeat(width)}  ${c.red(entry.error)}`);
-    }
-
-    // Declared but absent from the live list — usually a typo or a bad command.
-    for (const name of registry.mcp.keys()) {
-      if (!(name in status)) {
-        info(`  ${c.cyan(name.padEnd(width))}  ${c.red("declared but not loaded")}`);
-      }
-    }
-
-    // Per-server tool listings are deliberately absent: opencode 1.18.15's
-    // /experimental/tool endpoint returns only the 12 built-in tools and never
-    // enumerates MCP-contributed ones, so any grouping here would report (0)
-    // for every server regardless of what it actually exposes.
+  if (servers.length === 0) {
+    info("\n" + c.bold("MCP servers (0)"));
+    info(c.dim("  none configured\n"));
+    info("  Declare them in " + c.cyan("ensemble.json") + " (this project) or " +
+         c.cyan("~/.config/ensemble/ensemble.json") + " (global):\n");
+    info(
+      c.dim(
+        [
+          "  {",
+          '    "mcp": {',
+          '      "fs": {',
+          '        "type": "local",',
+          '        "command": ["npx", "-y", "@modelcontextprotocol/server-filesystem", "."]',
+          "      }",
+          "    }",
+          "  }",
+        ].join("\n"),
+      ),
+    );
     info("");
     return 0;
-  } catch (err) {
-    error(`could not read MCP status: ${err instanceof Error ? err.message : String(err)}`);
-    return 1;
+  }
+
+  info(c.dim(`connecting ${servers.length} server(s)…`));
+  const hub = new McpHub(process.cwd());
+  try {
+    await hub.connect(servers);
+    const statuses = hub.status();
+    info("\n" + c.bold(`MCP servers (${statuses.length})`));
+
+    const width = Math.max(...statuses.map((s) => s.name.length));
+    for (const s of statuses) {
+      const state =
+        s.status === "connected"
+          ? c.green("connected")
+          : s.status === "disabled"
+            ? c.dim("disabled")
+            : c.red("failed");
+      const tools = s.toolCount !== undefined ? c.dim(`  ${s.toolCount} tool(s)`) : "";
+      info(`  ${c.cyan(s.name.padEnd(width))}  ${state}${tools}`);
+      if (s.error) info(`  ${" ".repeat(width)}  ${c.red(s.error)}`);
+    }
+
+    const connected = statuses.filter((s) => s.status === "connected").map((s) => s.name);
+    if (connected.length > 0) {
+      info("\n" + c.bold("Tools"));
+      for (const name of connected) {
+        for (const tool of hub.toolsFor([name])) {
+          const first = tool.description.split("\n")[0] ?? "";
+          info(`  ${c.dim(tool.name)}  ${c.dim(first.slice(0, 70))}`);
+        }
+      }
+    }
+    if (registry.configPath) info(c.dim("\nconfig: " + registry.configPath));
+    info("");
+    return 0;
   } finally {
-    await runtime.close();
+    await hub.close();
   }
 }
 
@@ -262,21 +249,26 @@ async function cmdRun(
 }
 
 async function cmdModels(filter: string | undefined): Promise<number> {
-  const { execFile } = await import("node:child_process");
-  const { promisify } = await import("node:util");
-  const run = promisify(execFile);
-
+  // Straight from OpenRouter — the only provider `runtime: "model"` and the agent
+  // loop speak to. No local tooling involved.
   try {
-    const { stdout } = await run("opencode", ["models"], { maxBuffer: 1 << 22 });
-    const lines = stdout
-      .split("\n")
-      .filter((l) => l.trim().length > 0)
-      .filter((l) => !filter || l.toLowerCase().includes(filter.toLowerCase()));
-    for (const line of lines) info(line);
-    info(c.dim(`\n${lines.length} model(s)`));
+    const res = await fetch("https://openrouter.ai/api/v1/models");
+    if (!res.ok) {
+      error(`OpenRouter ${res.status} ${res.statusText}`);
+      return 1;
+    }
+    const body = (await res.json()) as { data?: Array<{ id?: string; name?: string }> };
+    const models = (body.data ?? [])
+      .map((m) => m.id)
+      .filter((id): id is string => typeof id === "string")
+      .filter((id) => !filter || id.toLowerCase().includes(filter.toLowerCase()))
+      .sort();
+
+    for (const id of models) info(`openrouter/${id}`);
+    info(c.dim(`\n${models.length} model(s)`));
     return 0;
-  } catch {
-    error("could not run `opencode models` — is opencode installed and on PATH?");
+  } catch (err) {
+    error(`could not reach OpenRouter: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
   }
 }
@@ -339,7 +331,7 @@ async function main(): Promise<number> {
       return 0; // serve blocks until SIGINT
     }
     case "mcp":
-      return cmdMcp({ port: num(values.port) });
+      return cmdMcp();
     case "models":
       return cmdModels(rest[0]);
     default:

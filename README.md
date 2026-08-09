@@ -7,20 +7,22 @@ edges, each node a model with scoped state access — in **one TypeScript file**
 Every node can use a **different model from a different vendor**, and every node can
 be one of two kinds:
 
-- **`runtime: "model"`** (default) — a direct OpenRouter call. Fast, streams tokens
-  live, costs come from OpenRouter's own usage accounting. Pure *think*.
-- **`runtime: "agent"`** — a full [opencode](https://opencode.ai) agent with tools,
-  skills, and MCP, scoped per node by allowlist. Pure *do*.
+- **`runtime: "model"`** (default) — one direct OpenRouter call. Streams tokens live.
+  Pure *think*.
+- **`runtime: "agent"`** — our own tool-calling loop: read-only built-in tools plus any
+  MCP servers the node allowlists, looping until the model stops asking for tools.
+  Pure *do*.
 
-A scene of pure model nodes never spawns opencode at all.
+**No subprocess, no external agent, nothing to install but this package.** The only
+credential is `OPENROUTER_API_KEY`.
 
 ```
 scenes/*.ts ──import──> Scene ──validate──> engine ──events──> terminal / browser
                                               │
                             ┌─────────────────┴────────────────┐
                     runtime: "model"                    runtime: "agent"
-                    direct OpenRouter fetch             opencode serve (lazy)
-                    SSE streaming · usage.cost          skills · MCP · tools
+                    one OpenRouter call                 tool-calling loop
+                    SSE streaming · usage.cost          built-ins + MCP servers
 ```
 
 ## A scene is one TypeScript file
@@ -44,8 +46,9 @@ export default scene({
       outputs: ["verdict", "notes"],
     },
     inspector: {
-      runtime: "agent",                          // the only kind that touches opencode
-      skills: ["graphify"],                      // allowlist from the central registry
+      runtime: "agent",                          // gets tools, loops until done
+      mcp: ["fs"],                               // MCP servers it may use
+      skills: ["graphify"],                      // skills inlined into its prompt
       inputs: ["findings"],
       outputs: ["report"],
     },
@@ -92,8 +95,7 @@ Requirements:
 - **Node ≥ 22.6** — your scene files are TypeScript, loaded via Node's native type stripping
 - **`"type": "module"`** in the nearest `package.json` — scenes are ES modules.
   (Or name them `.mts`. `ensemble validate` tells you if you forgot.)
-- `OPENROUTER_API_KEY` in the environment
-- [`opencode`](https://opencode.ai) on `PATH` — **only if you use `runtime: "agent"` nodes**
+- `OPENROUTER_API_KEY` in the environment — **that's the only credential**
 
 ```bash
 ensemble skills     # confirm your skill/MCP registry is visible
@@ -107,8 +109,8 @@ ensemble serve [scenes-dir]          # live viewer + editor in the browser
 ensemble view <scene.ts>             # draw it (--mermaid, --html[=file])
 ensemble validate <scene.ts>         # check it without spending tokens
 ensemble skills                      # list the skill + MCP registry (from config)
-ensemble mcp                         # verify which MCP servers actually connected
-ensemble models [filter]             # list models opencode can reach
+ensemble mcp                         # connect MCP servers and list their tools
+ensemble models [filter]             # list models available through OpenRouter
 ```
 
 `validate` catches unknown skills, edges to missing nodes, unreachable exits,
@@ -134,24 +136,42 @@ ensemble serve            # http://127.0.0.1:7777
 
 Scene files stay the source of truth; the server is a window onto them.
 
-## Skill & MCP scoping (agent nodes)
+## Agent nodes: tools, MCP, skills
 
-The skill store is opencode's, not this project's — `ensemble skills` shows it. An agent
-node names its allowlist and gets a generated opencode agent that starts deny-all:
+An agent node **loops** — call tools, read results, call more, until it can answer.
+`maxTurns` (default 12) bounds it. Tool calls the model requests together run
+concurrently.
 
-```yaml
-permission:
-  skill:
-    "*": deny
-    graphify: allow
+**Built-in tools** are read-only by design: `read_file`, `list_files`, `glob`, `grep`,
+`fetch_url`. There is deliberately **no `bash`, no `write`, no `edit`** — a shell tool
+is the largest attack surface an agent can have, and anything that must mutate the
+world should go through an MCP server whose author sandboxed it on purpose. Every path
+is confined to the project root. Opt one out with `tools: { grep: false }`.
+
+**MCP servers** live in `ensemble.json` (project) or `~/.config/ensemble/ensemble.json`
+(global):
+
+```json
+{
+  "mcp": {
+    "fs": {
+      "type": "local",
+      "command": ["npx", "-y", "@modelcontextprotocol/server-filesystem", "."]
+    }
+  }
+}
 ```
 
-Verified behavior: a node with `skills: ["graphify"]` sees graphify and nothing
-else; a model node has no tools at all ("no tools", in its own words).
+A node opts in by name: `mcp: ["fs"]`. Servers connect lazily — a scene naming none
+never starts one. `ensemble mcp` connects them all and lists every tool they expose.
 
-> MCP servers configured in Claude Code are **not** visible to graph nodes — opencode
-> keeps its own registry in `opencode.json`. Run `ensemble mcp` to see what actually
-> connected before writing a scene that depends on one.
+**Skills** use the same `SKILL.md` format and locations as Claude Code
+(`~/.claude/skills/`, `.claude/skills/`, …), so skills you already have work unchanged.
+A node's `skills: [...]` are inlined into its system prompt.
+
+> **Scoping is by construction, not by policy.** We assemble each node's tool array
+> ourselves, so a tool a node did not ask for isn't *denied* — it is absent. There is
+> no deny-list to trust and nothing to misconfigure.
 
 ## Safety rails
 
@@ -160,7 +180,8 @@ else; a model node has no tools at all ("no tools", in its own words).
 | Total node executions | 50 | `--max-runs` |
 | Wall clock | 20 min | `--timeout` (minutes) |
 | Per-edge loops | unlimited | `maxLoops:` on the edge |
-| Filesystem writes (agent nodes) | denied | `tools: { write: true }` |
+| Agent tool-calling turns | 12 | `maxTurns:` on the node |
+| Filesystem writes | **impossible** — no write tool exists | use an MCP server |
 
 A `when` predicate that throws fails the run naming the edge. Two JSON-contract
 failures in a row fail the node loudly. An extraction that keeps <25% of a long
@@ -197,7 +218,8 @@ stream — your consumer sees exactly what they see.
 
 ## Status
 
-v2. Verified: per-node cross-vendor routing, skill scoping, function conditions,
-loop caps, parallel groups, token streaming, lazy opencode, validate-before-save
-editing. Not built yet: the orchestrator node (dynamic routing), drag-and-drop
-editing, the Claude Code plugin.
+v0.2 — **fully self-contained**; the opencode dependency is gone. Verified: per-node
+cross-vendor routing, the agent loop calling built-in *and* MCP tools until done,
+skills inlined from SKILL.md, function conditions, loop caps, parallel groups, token
+streaming, validate-before-save editing. Not built yet: the orchestrator node (dynamic
+routing) and drag-and-drop editing.

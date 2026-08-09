@@ -42,6 +42,13 @@ export function createTerminalReporter(opts: { verbose: boolean }): EventSink {
         );
         break;
 
+      case "node:tool":
+        info(
+          `${c.dim("│")}  ${event.ok ? c.cyan("⚒") : c.red("⚒")} ${c.bold(event.tool)} ` +
+            `${c.dim(`${duration(event.ms)} · ${event.preview}`)}`,
+        );
+        break;
+
       case "node:retry":
         warn(`${event.node}: ${event.problem} — reprompting once`);
         break;
