@@ -188,10 +188,18 @@ a loopback port, and stores the tokens in `~/.config/ensemble/auth.json` (mode `
 Once per server, not once per run; refresh is automatic.
 
 ```bash
-ensemble login                 # list authorized servers
-ensemble login notion          # authorize one (opens a browser)
-ensemble login notion --logout # forget its tokens
+ensemble mcp                   # status — OAuth servers show `needs auth`
+ensemble mcp login notion      # authorize (opens a browser)
+ensemble mcp logout notion     # forget its tokens
 ```
+
+The command authorizes **that MCP server**, not ensemble — there is no ensemble
+account. Set `ENSEMBLE_NO_BROWSER=1` on a headless box and it prints the URL instead
+of opening one. `ENSEMBLE_OAUTH_PORT` moves the loopback port if 8976 is taken.
+
+Dynamic client registration is handled for you: against Linear's server this
+registers a client, generates a PKCE `S256` challenge, and negotiates `read write`
+scopes with no configuration at all.
 
 A server needing auth shows as `needs_auth` in `ensemble mcp`, with the exact command
 to fix it. Nothing forces a bearer token.

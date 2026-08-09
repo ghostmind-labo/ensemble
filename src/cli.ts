@@ -16,7 +16,8 @@ ${c.bold("Usage")}
   ensemble validate <scene.ts>       Check a scene without running it
   ensemble skills                      List the skill + MCP registry (from config)
   ensemble mcp                         Connect MCP servers and list their tools
-  ensemble login [server]              Authorize a remote MCP server (OAuth)
+  ensemble mcp login <server>          Authorize an MCP server that needs OAuth
+  ensemble mcp logout <server>         Forget that server's stored tokens
   ensemble models [filter]             List models available through OpenRouter
 
 ${c.bold("Options")}
@@ -146,7 +147,9 @@ async function cmdMcp(): Promise<number> {
           ? c.green("connected")
           : s.status === "disabled"
             ? c.dim("disabled")
-            : c.red("failed");
+            : s.status === "needs_auth"
+              ? c.yellow("needs auth")
+              : c.red("failed");
       const tools = s.toolCount !== undefined ? c.dim(`  ${s.toolCount} tool(s)`) : "";
       const from = registry.mcp.get(s.name)?.source;
       info(`  ${c.cyan(s.name.padEnd(width))}  ${state}${tools}${from ? c.dim(`  ${from}`) : ""}`);
@@ -189,7 +192,7 @@ async function cmdLogin(name: string | undefined, opts: { logout: boolean }): Pr
     info("\n" + c.bold("Authorized servers"));
     if (authed.length === 0) info(c.dim("  none"));
     else for (const s of authed) info(`  ${c.green("✓")} ${c.cyan(s)}`);
-    info(c.dim("\nusage: ensemble login <server>   |   ensemble login <server> --logout"));
+    info(c.dim("\nusage: ensemble mcp login <server>   |   ensemble mcp logout <server>"));
     info("");
     return 0;
   }
@@ -215,9 +218,11 @@ async function cmdLogin(name: string | undefined, opts: { logout: boolean }): Pr
   );
 
   const callback = waitForCallback();
+  const headless = Boolean(process.env["ENSEMBLE_NO_BROWSER"]);
   const provider = new FileOAuthProvider(name, (url) => {
-    info(`\n${c.bold("Opening your browser to authorize")} ${c.cyan(name)}`);
-    info(c.dim(`if it did not open, visit:\n  ${url}`));
+    info(`\n${c.bold(`Authorize ${name}`)}`);
+    info(headless ? c.dim("open this URL to continue:") : c.dim("your browser should open; if not, visit:"));
+    info(`  ${c.cyan(url)}`);
     info(c.dim(`\nwaiting for the redirect on 127.0.0.1:${CALLBACK_PORT} …`));
   });
 
@@ -425,10 +430,14 @@ async function main(): Promise<number> {
       });
       return 0; // serve blocks until SIGINT
     }
-    case "mcp":
+    case "mcp": {
+      // `mcp login <server>` / `mcp logout <server>` — the subject is the server.
+      const sub = rest[0];
+      if (sub === "login") return cmdLogin(rest[1], { logout: false });
+      if (sub === "logout") return cmdLogin(rest[1], { logout: true });
+      if (sub === "auth") return cmdLogin(rest[1], { logout: false });
       return cmdMcp();
-    case "login":
-      return cmdLogin(rest[0], { logout: values.logout ?? false });
+    }
     case "models":
       return cmdModels(rest[0]);
     default:

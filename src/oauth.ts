@@ -83,6 +83,8 @@ export function listAuthorized(): string[] {
 }
 
 function openBrowser(url: string): void {
+  // Headless/CI/remote-shell: print the URL and let the operator open it.
+  if (process.env["ENSEMBLE_NO_BROWSER"]) return;
   const cmd =
     process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
   try {

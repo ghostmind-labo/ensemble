@@ -105,7 +105,7 @@ export class McpHub {
           this.statuses.set(server.name, {
             name: server.name,
             status: needsAuth ? "needs_auth" : "failed",
-            error: needsAuth ? `run: ensemble login ${server.name}` : message,
+            error: needsAuth ? `needs authorization — run: ensemble mcp login ${server.name}` : message,
           });
         }
       }),
