@@ -14,3 +14,5 @@ node_modules/
 
 # build output
 dist/
+examples/**/node_modules/
+examples/**/.opencode/node_modules/

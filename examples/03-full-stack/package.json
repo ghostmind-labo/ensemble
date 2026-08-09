@@ -1,0 +1,6 @@
+{
+  "name": "ensemble-example-full-stack",
+  "private": true,
+  "type": "module",
+  "dependencies": { "@ghostmind-dev/ensemble": "^0.1.1" }
+}
