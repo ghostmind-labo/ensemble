@@ -1,13 +1,13 @@
 ---
 name: ensemble
-description: "Author and run multi-model agent scenes with @ghostmind-dev/ensemble. Use when the user wants several AI models working together on a goal — a jury/second opinion from other vendors, a score-gated improve-until-good loop, a research→critique→write pipeline, or any multi-agent workflow where each node can be a different model (via OpenRouter) or a tool-using opencode agent with scoped skills. Trigger on: 'ensemble', 'scene', 'multi-model', 'jury', 'ask several models', 'agent graph/workflow/team', or requests to build/modify/run a .ts scene file. Covers writing scenes, validating, running, watching live, reading results, and revising a scene based on what a run produced."
+description: "Author and run multi-model agent scenes with @ghostmind-dev/ensemble. Use when the user wants several AI models working together on a goal — a jury/second opinion from other vendors, a score-gated improve-until-good loop, a research→critique→write pipeline, or any multi-agent workflow where each node can be a different model (via OpenRouter) or a tool-using agent with MCP servers and scoped skills. Trigger on: 'ensemble', 'scene', 'multi-model', 'jury', 'ask several models', 'agent graph/workflow/team', or requests to build/modify/run a .ts scene file. Covers writing scenes, validating, running, watching live, reading results, and revising a scene based on what a run produced."
 ---
 
 # ensemble
 
 `@ghostmind-dev/ensemble` runs **scenes**: multi-model agent graphs described in one
 TypeScript file. Each node is either a direct OpenRouter model call (any vendor) or a
-tool-using opencode agent with scoped skills. Nodes share a typed state blackboard,
+tool-using agent that loops over MCP and built-in tools. Nodes share a typed state blackboard,
 wired by conditional edges that are plain TypeScript predicates. You — the model
 reading this — are expected to **author scenes, run them, read the results, and
 revise the scene when the results say so.**
@@ -25,8 +25,9 @@ node -p "require('./package.json').type"           # MUST be "module"
 - **`"type": "module"` missing from the project's package.json** → add it. Scene files are
   ES modules; without it Node loads them as CommonJS and the `import` fails. (Alternative:
   name scenes `.mts`.) This is the single most common first-run failure.
-- `opencode` on PATH is needed **only** if the scene uses `runtime: "agent"` nodes.
 - Node must be ≥ 22.6 (native TypeScript type stripping).
+- **Nothing else to install.** `OPENROUTER_API_KEY` is the only credential; there is no
+  external agent or subprocess.
 
 ## 1 · The scene format
 
@@ -51,7 +52,7 @@ export default scene({
       outputs: ["verdict", "notes"],
     },
     inspector: {
-      runtime: "agent",                     // opencode agent: tools, skills, MCP
+      runtime: "agent",                     // tool-calling loop: built-ins + MCP
       skills: ["graphify"],                 // allowlist; everything else denied
       inputs: ["findings"],
       outputs: ["report"],
@@ -77,10 +78,18 @@ Rules that matter when authoring:
 - **`inputs`/`outputs` are the entire data-flow AND access-control model.** A node
   sees the goal plus exactly its declared `inputs` — nothing else. Independence is a
   feature: jury nodes get NO inputs so they can't anchor on each other.
-- **`runtime: "model"` is the default** — a direct OpenRouter call, fast, streams.
-  Model nodes must use `openrouter/<vendor>/<model>` refs and may NOT declare
-  `skills`/`mcp`/`tools` (validation error). Use `runtime: "agent"` when the node
-  must *do* things (run code, use skills, call MCP).
+- **`runtime: "model"` is the default** — one OpenRouter call, fast, streams.
+  Model nodes may NOT declare `skills`/`mcp`/`tools` (validation error).
+- **`runtime: "agent"`** loops: it calls tools, reads results, calls more, until it can
+  answer. Built-in tools are read-only (`read_file`, `list_files`, `glob`, `grep`,
+  `fetch_url`) — there is no bash/write/edit. Add MCP servers with `mcp: ["name"]`.
+  `maxTurns` (default 12) bounds the loop.
+- **Agent nodes cost real money.** Every prior tool result is resent each turn, so a
+  vague job ("audit everything") compounds fast — one example went $0.44 → $0.05 just
+  by narrowing the prompt. Give agent nodes a narrow, bounded job.
+- **Agent nodes doing heavy tool work need the output contract restated at the END of
+  their prompt** ("after you finish using tools, your FINAL message must end with the
+  required json block"). Deep in a loop, the model stays in "keep working" mode.
 - **Conditions are real code**: `when: (s) => Number(s["score"]) < 8`. Wrap numeric
   comparisons in `Number()` — models sometimes emit `"7"` as a string. A throwing
   predicate fails the run.
@@ -143,13 +152,14 @@ ensemble view scenes/my.ts # topology in the terminal; --mermaid / --html for sh
 
 ## 5 · Pitfalls
 
-- MCP servers configured in **Claude Code are invisible to ensemble** — opencode has
-  its own registry (`opencode.json`). Run `ensemble mcp` before writing a scene that
-  depends on one.
+- **MCP servers are declared in `ensemble.json`** (project) or
+  `~/.config/ensemble/ensemble.json` (global), then opted into per node with
+  `mcp: ["name"]`. Config is **cwd-relative** — run from the directory holding it.
+  `ensemble mcp` connects each server and lists its tools; declared ≠ connected.
+- Skills use Claude Code's own `SKILL.md` format and locations, so existing skills work.
 - Scenes must live where you run: relative import `@ghostmind-dev/ensemble` requires the
   package installed in that project (or globally linked).
-- Run from the project root, not from inside a scenes/ subfolder — opencode treats
-  cwd as project root and installs ~61 MB of deps per root it sees (agent nodes only).
+- Agent nodes' file tools are confined to the cwd — run from the project root.
 - If a run ends `exceeded maxNodeRuns`, a cycle has no working exit condition — check
   that the gate's state key is actually being written by the node you think.
 
