@@ -204,6 +204,46 @@ scopes with no configuration at all.
 A server needing auth shows as `needs_auth` in `ensemble mcp`, with the exact command
 to fix it. Nothing forces a bearer token.
 
+### Keeping tokens out of the config
+
+`ensemble.json` is meant to be committed, so never put a secret in it. Reference the
+environment instead — `${VAR}` and `${VAR:-fallback}` are expanded anywhere in the
+config:
+
+```json
+{
+  "mcp": {
+    "gh": {
+      "type": "remote",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "headers": { "Authorization": "Bearer ${GH_MCP_TOKEN}" }
+    }
+  }
+}
+```
+
+The value can come from a real environment variable, or from a **`.env` beside the
+config** — loaded automatically, so the usual pattern is:
+
+```bash
+echo "GH_MCP_TOKEN=ghp_..." >> .env
+echo ".env" >> .gitignore          # commit ensemble.json, never the token
+```
+
+Exported variables win over `.env`, so CI can override without editing files.
+
+A variable that is referenced but unset is reported by name **before** connecting:
+
+```
+! config references ${GH_MCP_TOKEN} but GH_MCP_TOKEN is not set — export it or add it to .env
+```
+
+That is deliberate: expanding to the literal string `${GH_MCP_TOKEN}` would send a
+nonsense `Authorization` header and produce a baffling 401 instead of a fixable error.
+
+> For servers that use **OAuth**, no token belongs in the config at all —
+> `ensemble mcp login <server>` stores credentials outside the project entirely.
+
 ### Turning inheritance off
 
 Inheriting is the default because it is usually what you want — but a repo that must

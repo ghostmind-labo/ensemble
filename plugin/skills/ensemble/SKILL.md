@@ -152,6 +152,11 @@ ensemble view scenes/my.ts # topology in the terminal; --mermaid / --html for sh
 
 ## 5 · Pitfalls
 
+- **Never hardcode a token in ensemble.json** — it is meant to be committed. Use
+  `"Authorization": "Bearer ${MY_TOKEN}"`; `${VAR}` and `${VAR:-default}` expand from
+  the environment or from a gitignored `.env` beside the config (loaded automatically).
+  An unset variable is reported by name before connecting. OAuth servers need no token
+  in config at all.
 - **MCP transports**: stdio, Streamable HTTP (incl. stateless), and SSE (auto-fallback)
   all work. **Auth**: none, header token, or OAuth via `ensemble login <server>` — a
   server needing it shows `needs_auth` in `ensemble mcp` with the command to run.

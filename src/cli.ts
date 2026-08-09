@@ -129,6 +129,12 @@ async function cmdMcp(): Promise<number> {
     return 0;
   }
 
+  // Unresolved ${VAR} is the likeliest cause of a confusing auth failure — say so
+  // before connecting rather than after a 401.
+  for (const problem of registry.problems.filter((p) => p.includes("${"))) {
+    info(`${c.yellow("!")} ${c.yellow(problem)}`);
+  }
+
   info(c.dim(`connecting ${servers.length} server(s)…`));
   const { FileOAuthProvider } = await import("./oauth.ts");
   const hub = new McpHub(

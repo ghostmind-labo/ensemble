@@ -242,11 +242,70 @@ function normalise(name: string, raw: unknown, source: string): McpServer | unde
   };
 }
 
+/**
+ * Loads `.env` from the project root, once, if present.
+ *
+ * The whole point of `${VAR}` interpolation below is that ensemble.json can be
+ * committed while the secret is not. That only holds if the secret has somewhere
+ * convenient to live — so a gitignored `.env` beside the config is read
+ * automatically. Real environment variables always win over the file.
+ */
+let envLoaded = false;
+function loadDotEnv(cwd: string): void {
+  if (envLoaded) return;
+  envLoaded = true;
+  const file = join(cwd, ".env");
+  if (!existsSync(file)) return;
+  try {
+    const before = { ...process.env };
+    process.loadEnvFile(file);
+    // Node's loader overwrites; restore anything that was already set so an
+    // explicitly exported variable beats a stale line in the file.
+    for (const [key, value] of Object.entries(before)) {
+      if (value !== undefined) process.env[key] = value;
+    }
+  } catch {
+    /* a malformed .env should not stop the whole registry from loading */
+  }
+}
+
+/** Names referenced by `${VAR}` in a config but absent from the environment. */
+export const missingEnv = new Set<string>();
+
+/**
+ * Expands `${VAR}` and `${VAR:-fallback}` throughout a config value.
+ *
+ * Without this, the only way to give a server a token is to hardcode it — which
+ * makes the file uncommittable. A missing variable is recorded and expanded to
+ * an empty string rather than left as the literal `${VAR}`, because sending
+ * "Bearer ${GITHUB_TOKEN}" to a server produces a baffling 401 instead of a
+ * clear "you forgot to set GITHUB_TOKEN".
+ */
+function expandEnv<T>(value: T): T {
+  if (typeof value === "string") {
+    return value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g, (_m, name: string, fallback?: string) => {
+      const found = process.env[name];
+      if (found !== undefined && found !== "") return found;
+      if (fallback !== undefined) return fallback;
+      missingEnv.add(name);
+      return "";
+    }) as unknown as T;
+  }
+  if (Array.isArray(value)) return value.map((v) => expandEnv(v)) as unknown as T;
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = expandEnv(v);
+    return out as unknown as T;
+  }
+  return value;
+}
+
 function readJson(file: string): Record<string, unknown> | undefined {
   if (!existsSync(file)) return undefined;
   try {
     // Tolerate // comments so a jsonc-ish config still loads.
-    return JSON.parse(readFileSync(file, "utf8").replace(/^\s*\/\/.*$/gm, "")) as Record<string, unknown>;
+    const raw = JSON.parse(readFileSync(file, "utf8").replace(/^\s*\/\/.*$/gm, "")) as Record<string, unknown>;
+    return expandEnv(raw);
   } catch {
     return undefined;
   }
@@ -284,8 +343,13 @@ function collectMcp(cwd: string, sources: Sources): { mcp: Map<string, McpServer
 }
 
 export function loadRegistry(cwd: string = process.cwd()): Registry {
+  loadDotEnv(cwd);
+  missingEnv.clear();
   const sources = readSources(cwd);
   const { mcp, configPath } = collectMcp(cwd, sources);
   const { skills, problems } = collectSkills(cwd, sources);
+  for (const name of missingEnv) {
+    problems.push(`config references \${${name}} but ${name} is not set — export it or add it to .env`);
+  }
   return { skills, mcp, configPath, problems, sources };
 }
