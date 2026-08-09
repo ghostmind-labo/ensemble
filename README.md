@@ -82,6 +82,92 @@ Three things carry the design:
   gets its mistakes flagged by the type checker before a single token is spent —
   which is the point: this format is designed to be *generated*.
 
+## Getting started from scratch
+
+You are in a project. You have never used this before.
+
+```bash
+# 1 · install + the one credential
+npm i -g @ghostmind-dev/ensemble
+export OPENROUTER_API_KEY=sk-or-...          # https://openrouter.ai/keys
+
+# 2 · your project must be an ES module (scenes are .ts ES modules)
+npm pkg set type=module                       # or name scenes .mts
+
+# 3 · see what you already have — both are free and instant
+ensemble skills        # skills found (yours + Claude Code's)
+ensemble mcp           # MCP servers, CONNECTED and their tools listed
+ensemble models gpt    # what models you can reach
+
+# 4 · write a scene (see below), then
+ensemble validate scenes/my.ts               # free — catches every wiring mistake
+ensemble run scenes/my.ts "your goal"        # costs money
+ensemble serve                                # watch it live in a browser
+```
+
+Step 3 is the habit. `validate` is free and catches unknown skills, dangling edges,
+unreachable exits, and state-key collisions before a single token is spent.
+
+## Where skills and MCP servers live
+
+**You probably don't need to configure anything.** Both registries are inherited from
+Claude Code if you already use it.
+
+### Skills
+
+Same `SKILL.md` format and the same six directories Claude Code reads, project first:
+
+```
+.claude/skills/<name>/SKILL.md          ← project   (Claude Code's own location)
+.opencode/skills/<name>/SKILL.md        ← project
+.agents/skills/<name>/SKILL.md          ← project
+~/.claude/skills/<name>/SKILL.md        ← global    (Claude Code's own location)
+~/.config/opencode/skills/<name>/       ← global
+~/.agents/skills/<name>/SKILL.md        ← global
+```
+
+Every skill you already wrote for Claude Code works here unchanged. A node opts in
+with `skills: ["name"]`; the file's body is inlined into that node's system prompt.
+
+### MCP servers
+
+Four sources, first definition wins:
+
+| Order | File | Format |
+|---|---|---|
+| 1 | `./ensemble.json` → `mcp` | ours |
+| 2 | `./.mcp.json` → `mcpServers` | **Claude Code's** |
+| 3 | `~/.config/ensemble/ensemble.json` → `mcp` | ours |
+| 4 | `~/.claude.json` → `mcpServers` | **Claude Code's** |
+
+So **your existing Claude Code MCP servers just work.** Verified on a real machine:
+
+```
+$ ensemble mcp
+  github  connected  44 tool(s)  global:claude
+  tmux    connected  13 tool(s)  global:claude
+```
+
+The formats differ slightly — Claude splits `command`/`args` and calls remote servers
+`"http"` — and ensemble normalises both. Declare your own only when you want something
+Claude Code doesn't have, or want to override a name:
+
+```json
+{
+  "mcp": {
+    "fs": { "type": "local", "command": ["npx", "-y", "@modelcontextprotocol/server-filesystem", "."] }
+  }
+}
+```
+
+`ensemble mcp` shows the source of every server, so you always know which file a
+definition came from.
+
+**Authentication.** Header-based auth works today — a remote server with a token in
+`headers` (which is how Claude Code's GitHub server is configured) connects fine.
+Interactive **OAuth with a browser redirect is not yet supported**; use a personal
+access token in `headers` for now.
+
 ## Install
 
 ```bash
@@ -96,10 +182,6 @@ Requirements:
 - **`"type": "module"`** in the nearest `package.json` — scenes are ES modules.
   (Or name them `.mts`. `ensemble validate` tells you if you forgot.)
 - `OPENROUTER_API_KEY` in the environment — **that's the only credential**
-
-```bash
-ensemble skills     # confirm your skill/MCP registry is visible
-```
 
 ## Commands
 

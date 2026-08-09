@@ -51,7 +51,7 @@ async function cmdSkills(): Promise<number> {
   } else {
     for (const server of [...reg.mcp.values()].sort((a, b) => a.name.localeCompare(b.name))) {
       const state = server.enabled ? c.green("enabled") : c.dim("disabled");
-      info(`  ${c.cyan(server.name)}  ${c.dim(server.type)}  ${state}`);
+      info(`  ${c.cyan(server.name)}  ${c.dim(server.type)}  ${state}  ${c.dim(server.source)}`);
     }
   }
 
@@ -143,7 +143,8 @@ async function cmdMcp(): Promise<number> {
             ? c.dim("disabled")
             : c.red("failed");
       const tools = s.toolCount !== undefined ? c.dim(`  ${s.toolCount} tool(s)`) : "";
-      info(`  ${c.cyan(s.name.padEnd(width))}  ${state}${tools}`);
+      const from = registry.mcp.get(s.name)?.source;
+      info(`  ${c.cyan(s.name.padEnd(width))}  ${state}${tools}${from ? c.dim(`  ${from}`) : ""}`);
       if (s.error) info(`  ${" ".repeat(width)}  ${c.red(s.error)}`);
     }
 

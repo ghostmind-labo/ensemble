@@ -22,6 +22,8 @@ export interface McpServer {
   name: string;
   type: "local" | "remote";
   enabled: boolean;
+  /** Where this definition came from, for `ensemble mcp` output. */
+  source: string;
   /** local: argv, e.g. ["npx","-y","@modelcontextprotocol/server-filesystem","."] */
   command?: string[];
   environment?: Record<string, string>;
@@ -140,53 +142,87 @@ function collectSkills(cwd: string): { skills: Map<string, Skill>; problems: str
 }
 
 /**
- * MCP servers live in `ensemble.json` — project first, then global.
- * Skills are still read from the shared Claude/agent directories, so skills you
- * already have keep working; only MCP configuration is ours.
+ * MCP servers, gathered from four places in precedence order:
+ *
+ *   1. ./ensemble.json                    (this project, ours)
+ *   2. ./.mcp.json                        (this project, Claude Code's format)
+ *   3. ~/.config/ensemble/ensemble.json   (global, ours)
+ *   4. ~/.claude.json → mcpServers        (global, Claude Code's)
+ *
+ * Reading Claude Code's config is deliberate: a user who already wired up MCP
+ * servers there should not have to re-declare them. The two formats differ
+ * slightly — Claude splits `command` and `args`, and calls remote servers
+ * "http" — so they are normalised here rather than at the point of use.
+ *
+ * First definition wins, so a name declared in ensemble.json overrides the same
+ * name inherited from Claude Code.
  */
+function normalise(name: string, raw: unknown, source: string): McpServer | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const cfg = raw as Record<string, unknown>;
+
+  const declared = typeof cfg["type"] === "string" ? (cfg["type"] as string) : undefined;
+  const url = typeof cfg["url"] === "string" ? (cfg["url"] as string) : undefined;
+  // Claude says "http"/"sse"; we say "remote". A url implies remote either way.
+  const isRemote = declared === "remote" || declared === "http" || declared === "sse" || Boolean(url);
+
+  // Ours: command: ["npx","-y","pkg"].  Claude's: command: "npx", args: ["-y","pkg"].
+  let command: string[] | undefined;
+  if (Array.isArray(cfg["command"])) command = cfg["command"] as string[];
+  else if (typeof cfg["command"] === "string") {
+    command = [cfg["command"] as string, ...((cfg["args"] as string[] | undefined) ?? [])];
+  }
+
+  const env = (cfg["environment"] ?? cfg["env"]) as Record<string, string> | undefined;
+
+  return {
+    name,
+    type: isRemote ? "remote" : "local",
+    enabled: cfg["enabled"] !== false,
+    source,
+    ...(command ? { command } : {}),
+    ...(url ? { url } : {}),
+    ...(env && typeof env === "object" ? { environment: env } : {}),
+    ...(typeof cfg["headers"] === "object" && cfg["headers"]
+      ? { headers: cfg["headers"] as Record<string, string> }
+      : {}),
+  };
+}
+
+function readJson(file: string): Record<string, unknown> | undefined {
+  if (!existsSync(file)) return undefined;
+  try {
+    // Tolerate // comments so a jsonc-ish config still loads.
+    return JSON.parse(readFileSync(file, "utf8").replace(/^\s*\/\/.*$/gm, "")) as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+}
+
 function collectMcp(cwd: string): { mcp: Map<string, McpServer>; configPath?: string } {
   const home = homedir();
-  const candidates = [
-    join(cwd, "ensemble.json"),
-    join(home, ".config", "ensemble", "ensemble.json"),
+  const sources: Array<{ file: string; key: string; label: string }> = [
+    { file: join(cwd, "ensemble.json"), key: "mcp", label: "project:ensemble.json" },
+    { file: join(cwd, ".mcp.json"), key: "mcpServers", label: "project:.mcp.json" },
+    { file: join(home, ".config", "ensemble", "ensemble.json"), key: "mcp", label: "global:ensemble.json" },
+    { file: join(home, ".claude.json"), key: "mcpServers", label: "global:claude" },
   ];
 
   const mcp = new Map<string, McpServer>();
   let configPath: string | undefined;
 
-  for (const file of candidates) {
-    if (!existsSync(file)) continue;
-    let config: Record<string, unknown>;
-    try {
-      // Tolerate .jsonc comments; opencode accepts them.
-      const text = readFileSync(file, "utf8").replace(/^\s*\/\/.*$/gm, "");
-      config = JSON.parse(text) as Record<string, unknown>;
-    } catch {
-      continue;
-    }
+  for (const { file, key, label } of sources) {
+    const config = readJson(file);
+    if (!config) continue;
 
-    configPath ??= file;
-    const block = config["mcp"];
+    const block = config[key];
     if (typeof block !== "object" || block === null) continue;
 
+    configPath ??= file;
     for (const [name, value] of Object.entries(block as Record<string, unknown>)) {
-      if (mcp.has(name)) continue;
-      const server = (typeof value === "object" && value !== null ? value : {}) as Record<string, unknown>;
-      const type = server["type"] === "remote" ? "remote" : "local";
-      mcp.set(name, {
-        name,
-        type,
-        // A missing `enabled` means enabled.
-        enabled: server["enabled"] !== false,
-        ...(Array.isArray(server["command"]) ? { command: server["command"] as string[] } : {}),
-        ...(typeof server["url"] === "string" ? { url: server["url"] } : {}),
-        ...(typeof server["environment"] === "object" && server["environment"]
-          ? { environment: server["environment"] as Record<string, string> }
-          : {}),
-        ...(typeof server["headers"] === "object" && server["headers"]
-          ? { headers: server["headers"] as Record<string, string> }
-          : {}),
-      });
+      if (mcp.has(name)) continue; // first source wins
+      const server = normalise(name, value, label);
+      if (server) mcp.set(name, server);
     }
   }
 
