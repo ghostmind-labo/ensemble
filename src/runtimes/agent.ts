@@ -18,6 +18,7 @@ import type { McpHub, McpTool } from "../mcp.ts";
 import { BUILTIN_TOOLS, type BuiltinTool } from "../tools/builtin.ts";
 import type { Skill } from "../registry.ts";
 import { readFileSync } from "node:fs";
+import { basename } from "node:path";
 
 export type { NodeResult };
 
@@ -102,6 +103,57 @@ function renderSkills(skills: Skill[]): string {
   return `\n\n## Skills available to you\n\n${blocks.join("\n\n---\n\n")}`;
 }
 
+/**
+ * The agent node's system prompt.
+ *
+ * Order is deliberate: the scene author's prompt comes FIRST and dominates —
+ * everything after it is operational scaffolding, not personality. This whole
+ * block is ~250 tokens; the coding agent we replaced injected ~8,800, and its
+ * identity ("you are a coding CLI") actively fought scene-level instructions.
+ * Ours has no identity. The node is whatever the scene says it is.
+ */
+function buildSystem(req: AgentCallRequest, toolCount: number): string {
+  const sections: string[] = [];
+
+  sections.push(
+    req.system ?? "You are a capable agent. Accomplish the goal using the tools available to you.",
+  );
+
+  const skills = renderSkills(req.skills);
+  if (skills) sections.push(skills.trim());
+
+  // Grounding that file/tool work actually needs — nothing more.
+  sections.push(
+    [
+      "## Environment",
+      `- working directory: ${req.root} (all relative paths resolve here; file tools cannot leave it)`,
+      `- directory name: ${basename(req.root)}`,
+      `- date: ${new Date().toISOString().slice(0, 10)}`,
+      `- platform: ${process.platform}`,
+    ].join("\n"),
+  );
+
+  if (toolCount > 0) {
+    sections.push(
+      [
+        `## Working with your ${toolCount} tool(s)`,
+        "- Request independent tool calls together in one turn — they run in parallel.",
+        "- Prefer narrow, specific queries. Long results are truncated (a note says so);",
+        "  refine the query rather than re-requesting the same thing.",
+        "- If a tool returns an error, read it, fix the arguments or change approach.",
+        "  Never repeat an identical failing call.",
+        "- Report only what tool results actually showed. Quote concrete evidence",
+        "  (file names, values). If something could not be verified, say so plainly.",
+        "- Stop as soon as you can answer — do not keep exploring past the goal.",
+        "- Your FINAL message is the answer and is parsed programmatically: no",
+        "  trailing tool calls, and if the task specifies a json block, end with it.",
+      ].join("\n"),
+    );
+  }
+
+  return sections.join("\n\n");
+}
+
 export async function callAgent(req: AgentCallRequest): Promise<NodeResult & { turns: number }> {
   const model = apiModel(req.model);
 
@@ -120,13 +172,7 @@ export async function callAgent(req: AgentCallRequest): Promise<NodeResult & { t
     })),
   ];
 
-  const system =
-    (req.system ?? "You are a capable agent. Use the tools available to you to accomplish the goal.") +
-    renderSkills(req.skills) +
-    (tools.length > 0
-      ? `\n\n## Tools\n\nYou have ${tools.length} tool(s). Use them to gather what you need. ` +
-        `When you have enough to answer, stop calling tools and give your final answer.`
-      : "");
+  const system = buildSystem(req, tools.length);
 
   const messages: Array<Record<string, unknown>> = [
     { role: "system", content: system },
