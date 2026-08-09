@@ -16,6 +16,7 @@ ${c.bold("Usage")}
   ensemble validate <scene.ts>       Check a scene without running it
   ensemble skills                      List the skill + MCP registry (from config)
   ensemble mcp                         Connect MCP servers and list their tools
+  ensemble login [server]              Authorize a remote MCP server (OAuth)
   ensemble models [filter]             List models available through OpenRouter
 
 ${c.bold("Options")}
@@ -128,7 +129,11 @@ async function cmdMcp(): Promise<number> {
   }
 
   info(c.dim(`connecting ${servers.length} server(s)…`));
-  const hub = new McpHub(process.cwd());
+  const { FileOAuthProvider } = await import("./oauth.ts");
+  const hub = new McpHub(
+    process.cwd(),
+    (name) => new FileOAuthProvider(name, () => {}),
+  );
   try {
     await hub.connect(servers);
     const statuses = hub.status();
@@ -163,6 +168,94 @@ async function cmdMcp(): Promise<number> {
     return 0;
   } finally {
     await hub.close();
+  }
+}
+
+/**
+ * `ensemble login <server>` — the interactive half of OAuth.
+ *
+ * Connecting with an auth provider makes the SDK drive the flow: it opens the
+ * browser, we catch the redirect on a loopback port, hand back the code, and
+ * reconnect with real tokens. Tokens persist in ~/.config/ensemble/auth.json,
+ * so this is once per server, not once per run.
+ */
+async function cmdLogin(name: string | undefined, opts: { logout: boolean }): Promise<number> {
+  const { FileOAuthProvider, waitForCallback, forgetTokens, listAuthorized, CALLBACK_PORT } =
+    await import("./oauth.ts");
+  const registry = loadRegistry();
+
+  if (!name) {
+    const authed = listAuthorized();
+    info("\n" + c.bold("Authorized servers"));
+    if (authed.length === 0) info(c.dim("  none"));
+    else for (const s of authed) info(`  ${c.green("✓")} ${c.cyan(s)}`);
+    info(c.dim("\nusage: ensemble login <server>   |   ensemble login <server> --logout"));
+    info("");
+    return 0;
+  }
+
+  if (opts.logout) {
+    info(forgetTokens(name) ? `${c.green("logged out")} ${name}` : `no stored tokens for ${name}`);
+    return 0;
+  }
+
+  const server = registry.mcp.get(name);
+  if (!server) {
+    error(`no MCP server named "${name}" — declared: ${[...registry.mcp.keys()].join(", ") || "none"}`);
+    return 1;
+  }
+  if (server.type !== "remote" || !server.url) {
+    error(`"${name}" is a local server — OAuth applies to remote servers only`);
+    return 1;
+  }
+
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+  const { StreamableHTTPClientTransport } = await import(
+    "@modelcontextprotocol/sdk/client/streamableHttp.js"
+  );
+
+  const callback = waitForCallback();
+  const provider = new FileOAuthProvider(name, (url) => {
+    info(`\n${c.bold("Opening your browser to authorize")} ${c.cyan(name)}`);
+    info(c.dim(`if it did not open, visit:\n  ${url}`));
+    info(c.dim(`\nwaiting for the redirect on 127.0.0.1:${CALLBACK_PORT} …`));
+  });
+
+  const url = new URL(server.url);
+  try {
+    const transport = new StreamableHTTPClientTransport(url, { authProvider: provider });
+    const client = new Client({ name: "ensemble", version: "0.2.2" }, { capabilities: {} });
+
+    try {
+      // Already holding valid tokens? Then this simply succeeds.
+      await client.connect(transport);
+      info(`${c.green("already authorized")} — ${name} connected`);
+      await client.close();
+      return 0;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const needsAuth =
+        (err as Error)?.name === "UnauthorizedError" || /unauthoriz|401|403/i.test(message);
+      if (!needsAuth) throw err;
+    }
+
+    // The provider has now sent the browser off; wait for the code to come back.
+    const code = await callback.code;
+    await transport.finishAuth(code);
+
+    const client2 = new Client({ name: "ensemble", version: "0.2.2" }, { capabilities: {} });
+    await client2.connect(new StreamableHTTPClientTransport(url, { authProvider: provider }));
+    const tools = await client2.listTools();
+    await client2.close();
+
+    info(`\n${c.green("authorized")} ${c.cyan(name)} ${c.dim(`— ${tools.tools.length} tool(s)`)}`);
+    info(c.dim("tokens saved to ~/.config/ensemble/auth.json\n"));
+    return 0;
+  } catch (err) {
+    error(err instanceof Error ? err.message : String(err));
+    return 1;
+  } finally {
+    callback.close();
   }
 }
 
@@ -289,6 +382,7 @@ async function main(): Promise<number> {
       html: { type: "string" },
       // node:util parseArgs has no --no-x negation, so it is its own flag.
       "no-open": { type: "boolean", default: false },
+      logout: { type: "boolean", default: false },
     },
   });
 
@@ -333,6 +427,8 @@ async function main(): Promise<number> {
     }
     case "mcp":
       return cmdMcp();
+    case "login":
+      return cmdLogin(rest[0], { logout: values.logout ?? false });
     case "models":
       return cmdModels(rest[0]);
     default:

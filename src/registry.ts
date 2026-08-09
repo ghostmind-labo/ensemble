@@ -6,7 +6,7 @@
  * name and `graph validate` can reject typos before a run burns tokens.
  */
 import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, isAbsolute } from "node:path";
 import { homedir } from "node:os";
 import { parse as parseYaml } from "yaml";
 
@@ -42,24 +42,77 @@ export interface Registry {
    * a skill that vanishes without a word is worse than one that errors loudly.
    */
   problems: string[];
+  sources: Sources;
 }
 
 /**
- * The six directories we scan for skills — the same ones Claude Code and
- * opencode use, so existing skills work unchanged.
- * Project-local entries win over global ones, so later writes must not clobber
- * earlier ones — see the `has()` guard in collectSkills.
+ * Which registries to inherit, and where else to look.
+ *
+ * Inheriting Claude Code's skills and MCP servers is the default because it is
+ * almost always what someone wants — but "almost always" is not "always". A team
+ * shipping a repo may want *only* its own definitions, with no dependence on
+ * whatever happens to be on the machine. `sources` in ensemble.json turns each
+ * inherited location off, and `skillDirs` adds your own.
  */
-function skillRoots(cwd: string): Array<{ dir: string; label: string }> {
+export interface Sources {
+  claudeSkills: boolean;
+  opencodeSkills: boolean;
+  agentsSkills: boolean;
+  claudeMcp: boolean;
+  /** Extra skill directories, relative to the project (or absolute). */
+  skillDirs: string[];
+}
+
+const DEFAULT_SOURCES: Sources = {
+  claudeSkills: true,
+  opencodeSkills: true,
+  agentsSkills: true,
+  claudeMcp: true,
+  skillDirs: [],
+};
+
+function readSources(cwd: string): Sources {
+  const merged = { ...DEFAULT_SOURCES };
+  // Project config wins; global fills any gaps.
+  for (const file of [
+    join(homedir(), ".config", "ensemble", "ensemble.json"),
+    join(cwd, "ensemble.json"),
+  ]) {
+    const config = readJson(file);
+    const raw = config?.["sources"];
+    if (typeof raw !== "object" || raw === null) continue;
+    const src = raw as Record<string, unknown>;
+    for (const key of ["claudeSkills", "opencodeSkills", "agentsSkills", "claudeMcp"] as const) {
+      if (typeof src[key] === "boolean") merged[key] = src[key] as boolean;
+    }
+    if (Array.isArray(src["skillDirs"])) merged.skillDirs = src["skillDirs"] as string[];
+  }
+  return merged;
+}
+
+/**
+ * Directories scanned for skills. The defaults are the same six Claude Code and
+ * opencode use, so existing skills work unchanged; `sources` can switch any of
+ * them off. Earlier entries win, so project beats global and your own
+ * `skillDirs` beat everything.
+ */
+function skillRoots(cwd: string, sources: Sources): Array<{ dir: string; label: string }> {
   const home = homedir();
-  return [
-    { dir: join(cwd, ".opencode", "skills"), label: "project:.opencode" },
-    { dir: join(cwd, ".claude", "skills"), label: "project:.claude" },
-    { dir: join(cwd, ".agents", "skills"), label: "project:.agents" },
-    { dir: join(home, ".config", "opencode", "skills"), label: "global:opencode" },
-    { dir: join(home, ".claude", "skills"), label: "global:.claude" },
-    { dir: join(home, ".agents", "skills"), label: "global:.agents" },
-  ];
+  const roots: Array<{ dir: string; label: string }> = [];
+
+  // Yours first — an explicit location should never lose to an inherited one.
+  for (const dir of sources.skillDirs) {
+    roots.push({ dir: isAbsolute(dir) ? dir : join(cwd, dir), label: `custom:${dir}` });
+  }
+
+  if (sources.opencodeSkills) roots.push({ dir: join(cwd, ".opencode", "skills"), label: "project:.opencode" });
+  if (sources.claudeSkills) roots.push({ dir: join(cwd, ".claude", "skills"), label: "project:.claude" });
+  if (sources.agentsSkills) roots.push({ dir: join(cwd, ".agents", "skills"), label: "project:.agents" });
+  if (sources.opencodeSkills) roots.push({ dir: join(home, ".config", "opencode", "skills"), label: "global:opencode" });
+  if (sources.claudeSkills) roots.push({ dir: join(home, ".claude", "skills"), label: "global:.claude" });
+  if (sources.agentsSkills) roots.push({ dir: join(home, ".agents", "skills"), label: "global:.agents" });
+
+  return roots;
 }
 
 /** opencode's frontmatter contract: `name` and `description` required. */
@@ -104,11 +157,11 @@ function readSkill(
   };
 }
 
-function collectSkills(cwd: string): { skills: Map<string, Skill>; problems: string[] } {
+function collectSkills(cwd: string, sources: Sources): { skills: Map<string, Skill>; problems: string[] } {
   const skills = new Map<string, Skill>();
   const problems: string[] = [];
 
-  for (const { dir, label } of skillRoots(cwd)) {
+  for (const { dir, label } of skillRoots(cwd, sources)) {
     if (!existsSync(dir)) continue;
     let entries: string[];
     try {
@@ -199,19 +252,20 @@ function readJson(file: string): Record<string, unknown> | undefined {
   }
 }
 
-function collectMcp(cwd: string): { mcp: Map<string, McpServer>; configPath?: string } {
+function collectMcp(cwd: string, sources: Sources): { mcp: Map<string, McpServer>; configPath?: string } {
   const home = homedir();
-  const sources: Array<{ file: string; key: string; label: string }> = [
+  const files: Array<{ file: string; key: string; label: string }> = [
     { file: join(cwd, "ensemble.json"), key: "mcp", label: "project:ensemble.json" },
     { file: join(cwd, ".mcp.json"), key: "mcpServers", label: "project:.mcp.json" },
     { file: join(home, ".config", "ensemble", "ensemble.json"), key: "mcp", label: "global:ensemble.json" },
     { file: join(home, ".claude.json"), key: "mcpServers", label: "global:claude" },
-  ];
+    // `.mcp.json` and `~/.claude.json` are Claude Code's; sources can drop them.
+  ].filter((src) => sources.claudeMcp || !src.label.includes("claude"));
 
   const mcp = new Map<string, McpServer>();
   let configPath: string | undefined;
 
-  for (const { file, key, label } of sources) {
+  for (const { file, key, label } of files) {
     const config = readJson(file);
     if (!config) continue;
 
@@ -230,7 +284,8 @@ function collectMcp(cwd: string): { mcp: Map<string, McpServer>; configPath?: st
 }
 
 export function loadRegistry(cwd: string = process.cwd()): Registry {
-  const { mcp, configPath } = collectMcp(cwd);
-  const { skills, problems } = collectSkills(cwd);
-  return { skills, mcp, configPath, problems };
+  const sources = readSources(cwd);
+  const { mcp, configPath } = collectMcp(cwd, sources);
+  const { skills, problems } = collectSkills(cwd, sources);
+  return { skills, mcp, configPath, problems, sources };
 }

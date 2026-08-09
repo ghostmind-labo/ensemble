@@ -12,6 +12,8 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
+import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 import type { McpServer } from "./registry.ts";
 
 /** Separator between server and tool name. Double underscore avoids collisions
@@ -29,7 +31,7 @@ export interface McpTool {
 
 export interface ServerStatus {
   name: string;
-  status: "connected" | "failed" | "disabled";
+  status: "connected" | "failed" | "disabled" | "needs_auth";
   error?: string;
   toolCount?: number;
 }
@@ -39,9 +41,12 @@ export class McpHub {
   private statuses = new Map<string, ServerStatus>();
   private tools: McpTool[] = [];
   private cwd: string;
+  /** Supplies an OAuth provider per server; omitted when auth is not wanted. */
+  private oauth: ((server: string) => OAuthClientProvider) | undefined;
 
-  constructor(cwd: string) {
+  constructor(cwd: string, oauth?: (server: string) => OAuthClientProvider) {
     this.cwd = cwd;
+    this.oauth = oauth;
   }
 
   /**
@@ -57,18 +62,11 @@ export class McpHub {
         }
 
         try {
-          const client = new Client(
-            { name: "ensemble", version: "0.2.0" },
-            { capabilities: {} },
-          );
+          const client = new Client({ name: "ensemble", version: "0.2.2" }, { capabilities: {} });
 
           if (server.type === "remote") {
             if (!server.url) throw new Error('remote server needs a "url"');
-            await client.connect(
-              new StreamableHTTPClientTransport(new URL(server.url), {
-                ...(server.headers ? { requestInit: { headers: server.headers } } : {}),
-              }),
-            );
+            await this.connectRemote(client, server);
           } else {
             const [command, ...args] = server.command ?? [];
             if (!command) throw new Error('local server needs a "command" array');
@@ -101,14 +99,69 @@ export class McpHub {
             toolCount: listed.tools.length,
           });
         } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          const needsAuth =
+            (err as Error)?.name === "UnauthorizedError" || /unauthoriz|401|403/i.test(message);
           this.statuses.set(server.name, {
             name: server.name,
-            status: "failed",
-            error: err instanceof Error ? err.message : String(err),
+            status: needsAuth ? "needs_auth" : "failed",
+            error: needsAuth ? `run: ensemble login ${server.name}` : message,
           });
         }
       }),
     );
+  }
+
+  /**
+   * Connects a remote server, covering the whole current landscape:
+   *
+   *   - **Streamable HTTP** (the current spec) — including *stateless* servers,
+   *     which simply never issue a session id. Tried first.
+   *   - **SSE** (the earlier spec) — still what a lot of deployed servers speak.
+   *     Used as a fallback when Streamable HTTP is rejected outright.
+   *   - **Header auth** — a token in `headers`, for servers that issue one.
+   *   - **OAuth** — the browser redirect flow, for the many servers that issue
+   *     no static token at all. Only engaged when there is no header auth.
+   *
+   * Nothing here forces a bearer token: a server needing OAuth gets OAuth, and
+   * `ensemble login <server>` is how the interactive half happens.
+   */
+  private async connectRemote(client: Client, server: McpServer): Promise<void> {
+    const url = new URL(server.url as string);
+    const headers = server.headers;
+
+    // A caller-supplied Authorization header means auth is already handled.
+    const preAuthed = Boolean(
+      headers && Object.keys(headers).some((h) => h.toLowerCase() === "authorization"),
+    );
+
+    const authProvider =
+      !preAuthed && this.oauth ? this.oauth(server.name) : undefined;
+
+    const httpOptions = {
+      ...(headers ? { requestInit: { headers } } : {}),
+      ...(authProvider ? { authProvider } : {}),
+    };
+
+    try {
+      await client.connect(new StreamableHTTPClientTransport(url, httpOptions));
+      return;
+    } catch (err) {
+      // An auth failure is real — surfacing it beats masking it as a transport
+      // problem and retrying against SSE, which would fail the same way.
+      const message = err instanceof Error ? err.message : String(err);
+      if (/unauthoriz|401|403/i.test(message) || (err as Error)?.name === "UnauthorizedError") {
+        throw err;
+      }
+
+      // Otherwise assume the server predates Streamable HTTP and speak SSE.
+      await client.connect(
+        new SSEClientTransport(url, {
+          ...(headers ? { requestInit: { headers }, eventSourceInit: {} } : {}),
+          ...(authProvider ? { authProvider } : {}),
+        }),
+      );
+    }
   }
 
   /** Tools from the named servers only. An unlisted server contributes nothing. */

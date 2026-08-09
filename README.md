@@ -163,10 +163,60 @@ Claude Code doesn't have, or want to override a name:
 `ensemble mcp` shows the source of every server, so you always know which file a
 definition came from.
 
-**Authentication.** Header-based auth works today — a remote server with a token in
-`headers` (which is how Claude Code's GitHub server is configured) connects fine.
-Interactive **OAuth with a browser redirect is not yet supported**; use a personal
-access token in `headers` for now.
+### Transports — all of them
+
+| Kind | Support |
+|---|---|
+| **stdio** (local process) | ✅ |
+| **Streamable HTTP** (current spec) | ✅ including **stateless** servers |
+| **SSE** (earlier spec) | ✅ automatic fallback |
+
+Remote servers try Streamable HTTP first and fall back to SSE, so a server built
+against either spec connects without you declaring which.
+
+### Authentication — including OAuth
+
+| Method | How |
+|---|---|
+| **No auth** | nothing to do |
+| **Token in a header** | `"headers": { "Authorization": "Bearer ..." }` |
+| **OAuth (browser redirect)** | `ensemble login <server>` |
+
+Many hosted servers issue no static token at all — the only way in is an
+authorization-code flow. `ensemble login` opens your browser, catches the redirect on
+a loopback port, and stores the tokens in `~/.config/ensemble/auth.json` (mode `0600`).
+Once per server, not once per run; refresh is automatic.
+
+```bash
+ensemble login                 # list authorized servers
+ensemble login notion          # authorize one (opens a browser)
+ensemble login notion --logout # forget its tokens
+```
+
+A server needing auth shows as `needs_auth` in `ensemble mcp`, with the exact command
+to fix it. Nothing forces a bearer token.
+
+### Turning inheritance off
+
+Inheriting is the default because it is usually what you want — but a repo that must
+not depend on whatever is on the machine can say so, in `ensemble.json`:
+
+```json
+{
+  "sources": {
+    "claudeSkills": false,
+    "opencodeSkills": false,
+    "agentsSkills": false,
+    "claudeMcp": false,
+    "skillDirs": ["./team-skills"]
+  }
+}
+```
+
+Every flag defaults to `true`. `skillDirs` adds your own locations and is scanned
+**first**, so an explicit skill always beats an inherited one of the same name. With
+the config above, `ensemble skills` reports exactly one skill — yours — sourced
+`custom:./team-skills`.
 
 ## Install
 

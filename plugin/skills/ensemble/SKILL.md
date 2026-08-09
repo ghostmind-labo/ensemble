@@ -152,6 +152,12 @@ ensemble view scenes/my.ts # topology in the terminal; --mermaid / --html for sh
 
 ## 5 · Pitfalls
 
+- **MCP transports**: stdio, Streamable HTTP (incl. stateless), and SSE (auto-fallback)
+  all work. **Auth**: none, header token, or OAuth via `ensemble login <server>` — a
+  server needing it shows `needs_auth` in `ensemble mcp` with the command to run.
+- **Inheritance can be switched off** with a `sources` block in ensemble.json
+  (`claudeSkills`/`opencodeSkills`/`agentsSkills`/`claudeMcp`: false) plus
+  `skillDirs: ["./team-skills"]` for your own locations.
 - **MCP servers are declared in `ensemble.json`** (project) or
   `~/.config/ensemble/ensemble.json` (global), then opted into per node with
   `mcp: ["name"]`. Config is **cwd-relative** — run from the directory holding it.

@@ -84,7 +84,8 @@ class ToolHub {
     if (this.hub) return Promise.resolve(this.hub);
     // Single-flight: parallel agent nodes must not each connect the servers.
     this.starting ??= (async () => {
-      const hub = new McpHub(this.root);
+      const { FileOAuthProvider } = await import("./oauth.ts");
+      const hub = new McpHub(this.root, (name) => new FileOAuthProvider(name, () => {}));
       await hub.connect(this.servers);
       this.hub = hub;
       return hub;
