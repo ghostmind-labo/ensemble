@@ -9,7 +9,7 @@
  */
 import { existsSync, statSync } from "node:fs";
 import { resolve, basename } from "node:path";
-import { pathToFileURL } from "node:url";
+import { pathToFileURL, fileURLToPath } from "node:url";
 import { z } from "zod";
 import type { Registry } from "./registry.ts";
 import type { SceneSpec, NodeSpec, EdgeSpec, State } from "./dsl.ts";
@@ -248,6 +248,30 @@ export function validateSpec(doc: unknown, file: string, reg: Registry): Scene {
 }
 
 /**
+ * Makes `@ghostmind-dev/ensemble` resolvable from a scene that has no
+ * node_modules — see resolver.ts. Registered lazily and once; a project that
+ * *does* have the package installed never reaches the hook, because Node
+ * resolves the real one first.
+ */
+let resolverRegistered = false;
+async function ensureResolver(): Promise<void> {
+  if (resolverRegistered) return;
+  resolverRegistered = true;
+  try {
+    const { register } = await import("node:module");
+    // index is a sibling of this file in both src/ (.ts) and dist/ (.js).
+    const here = new URL(".", import.meta.url);
+    const candidates = [new URL("index.js", here), new URL("index.ts", here)];
+    const selfUrl = candidates.find((u) => existsSync(fileURLToPath(u)))?.href;
+    if (!selfUrl) return;
+    register(new URL("resolver.js", here).href, { data: { selfUrl } });
+  } catch {
+    // Older Node, or hooks unavailable: a scene with the package installed
+    // locally still works, and one without gets the normal resolution error.
+  }
+}
+
+/**
  * Imports and validates a scene module.
  *
  * The `?v=<mtime>` query defeats Node's module cache so `graph serve` sees edits
@@ -259,6 +283,8 @@ export async function loadScene(file: string, reg: Registry): Promise<Scene> {
   if (!/\.(ts|mts|js|mjs)$/.test(abs)) {
     throw new SceneError([`scene must be a TypeScript module (.ts), got: ${file}`]);
   }
+
+  await ensureResolver();
 
   const url = `${pathToFileURL(abs).href}?v=${statSync(abs).mtimeMs}`;
 

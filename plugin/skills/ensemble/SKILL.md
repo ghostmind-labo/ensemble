@@ -1,6 +1,6 @@
 ---
 name: ensemble
-description: "Author and run multi-model agent scenes with @ghostmind-dev/ensemble. Use when the user wants several AI models working together on a goal — a jury/second opinion from other vendors, a score-gated improve-until-good loop, a research→critique→write pipeline, or any multi-agent workflow where each node can be a different model (via OpenRouter) or a tool-using agent with MCP servers and scoped skills. Trigger on: 'ensemble', 'scene', 'multi-model', 'jury', 'ask several models', 'agent graph/workflow/team', or requests to build/modify/run a .ts scene file. Covers writing scenes, validating, running, watching live, reading results, and revising a scene based on what a run produced."
+description: "Author and run multi-model agent scenes with @ghostmind-dev/ensemble. Use when the user wants several AI models working together on a goal — a jury/second opinion from other vendors, a score-gated improve-until-good loop, a research→critique→write pipeline, or any multi-agent workflow where each node can be a different model (via OpenRouter) or a tool-using agent with MCP servers and scoped skills. Trigger on: 'ensemble', 'scene', 'multi-model', 'jury', 'ask several models', 'agent graph/workflow/team', or requests to build/modify/run a .mts scene file. Covers writing scenes, validating, running, watching live, reading results, and revising a scene based on what a run produced."
 ---
 
 # ensemble
@@ -22,9 +22,9 @@ node -p "require('./package.json').type"           # MUST be "module"
 
 - Not installed → `npm i -g @ghostmind-dev/ensemble` (or `npm i @ghostmind-dev/ensemble` in-project).
 - `OPENROUTER_API_KEY` unset → stop and ask the user; model nodes cannot run without it.
-- **`"type": "module"` missing from the project's package.json** → add it. Scene files are
-  ES modules; without it Node loads them as CommonJS and the `import` fails. (Alternative:
-  name scenes `.mts`.) This is the single most common first-run failure.
+- **Name scenes `.mts`.** Then no package.json is needed at all — a directory containing
+  only `my.mts` works, and the `@ghostmind-dev/ensemble` import resolves against the
+  global install. Use `.ts` only when the project already has `"type": "module"`.
 - Node must be ≥ 22.6 (native TypeScript type stripping).
 - **Nothing else to install.** `OPENROUTER_API_KEY` is the only credential; there is no
   external agent or subprocess.
@@ -101,8 +101,8 @@ Rules that matter when authoring:
 ## 2 · The workflow: validate → run → read → revise
 
 ```bash
-ensemble validate scenes/my.ts          # FREE. Always run before spending tokens.
-ensemble run scenes/my.ts "<the goal>"  # execute; per-node cost/tokens printed
+ensemble validate scenes/my.mts          # FREE. Always run before spending tokens.
+ensemble run scenes/my.mts "<the goal>"  # execute; per-node cost/tokens printed
 ensemble serve                          # browser: live canvas, streaming, state tab,
                                         # source editor (validate-before-save)
 ```
@@ -147,7 +147,7 @@ Working examples with real run logs live in the package repo under `examples/`.
 ensemble models [filter]   # 300+ OpenRouter models reachable
 ensemble skills            # skill registry available to agent nodes
 ensemble mcp               # which MCP servers ACTUALLY connected (not just declared)
-ensemble view scenes/my.ts # topology in the terminal; --mermaid / --html for sharing
+ensemble view scenes/my.mts # topology in the terminal; --mermaid / --html for sharing
 ```
 
 ## 5 · Pitfalls
@@ -178,7 +178,7 @@ ensemble view scenes/my.ts # topology in the terminal; --mermaid / --html for sh
 
 ```ts
 import { loadScene, loadRegistry, runScene } from "@ghostmind-dev/ensemble";
-const scn = await loadScene("scenes/my.ts", loadRegistry());
+const scn = await loadScene("scenes/my.mts", loadRegistry());
 const result = await runScene(scn, goal, {
   onEvent: (e) => { if (e.type === "node:delta") process.stdout.write(e.delta); },
 });

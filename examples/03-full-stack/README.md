@@ -27,8 +27,7 @@ config and run from the repo root.
 my-project/
 ├── ensemble.json                    ← MCP servers, THIS PROJECT   ← used here
 ├── .claude/skills/<name>/SKILL.md   ← skills, THIS PROJECT        ← used here
-├── package.json                     ← needs "type": "module"
-└── audit.ts                         ← the scene
+└── audit.mts                         ← the scene
 ```
 
 Project entries win over global ones. `ensemble skills` and `ensemble mcp` show you
@@ -86,16 +85,15 @@ npm i -g @ghostmind-dev/ensemble
 export OPENROUTER_API_KEY=sk-or-...
 
 # 2 · this example (config is cwd-relative, so run from HERE)
-cd examples/03-full-stack
-npm i                       # package.json already has "type": "module"
+cd examples/03-full-stack   # no npm install — audit.mts needs no package.json
 
 # 3 · confirm the registries BEFORE spending anything
 ensemble skills             # should list release-notes as project:.claude
 ensemble mcp                # should show:  fs  connected  local
-ensemble validate audit.ts  # free
+ensemble validate audit.mts  # free
 
 # 4 · go
-ensemble run audit.ts "Audit this project for anything a user would need to know"
+ensemble run audit.mts "Audit this project for anything a user would need to know"
 ensemble serve .            # or watch it live in the browser
 ```
 
@@ -110,7 +108,7 @@ Step 3 is the habit worth forming. `ensemble mcp` actually connects each server 
 ▶ plan     gemini-2.5-flash                    174→295 tok · $0.0008 ·  3.1s
   → inspect
 ▶ inspect  claude-sonnet-5  [fs MCP + built-ins]
-   ⚒ fs__list_directory   5ms · [DIR] .claude [FILE] README.md [FILE] audit.ts …
+   ⚒ fs__list_directory   5ms · [DIR] .claude [FILE] README.md [FILE] audit.mts …
    ⚒ read_file            9ms · // The full stack in one scene: both runtimes …
    ⚒ glob                 1ms · no files match **/tsconfig*.json
    ⚒ grep                 4ms · README.md:23: ~/.config/ensemble/ensemble.json …
@@ -159,7 +157,7 @@ hard stop, but the prompt is what keeps you well under it.
 An early run **failed**: `inspect` did all its tool work, then narrated in prose and
 never emitted the required json block — twice, so the run halted.
 
-The fix is in `audit.ts`:
+The fix is in `audit.mts`:
 
 ```ts
 "CRITICAL: after you finish using tools, your FINAL message must end with",

@@ -53,8 +53,8 @@ the money goes.
 
 ```bash
 # from the repo root
-ensemble validate examples/02-score-gate/gate.ts
-ensemble run examples/02-score-gate/gate.ts \
+ensemble validate examples/02-score-gate/gate.mts
+ensemble run examples/02-score-gate/gate.mts \
   "a CLI tool that runs multi-model AI agent graphs from one TypeScript file"
 ```
 

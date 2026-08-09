@@ -25,9 +25,9 @@ You need `opencode` on PATH with an OpenRouter provider configured, and
 ## The habit worth forming
 
 ```bash
-ensemble validate <scene>.ts      # free, instant, catches typos and broken wiring
-ensemble view <scene>.ts          # see the topology before you trust it
-ensemble run <scene>.ts "…"       # only now does it cost anything
+ensemble validate <scene>.mts      # free, instant, catches typos and broken wiring
+ensemble view <scene>.mts          # see the topology before you trust it
+ensemble run <scene>.mts "…"       # only now does it cost anything
 ```
 
 `validate` catches unknown skills, edges to nonexistent nodes, unreachable exits,
@@ -36,7 +36,7 @@ parallel state-key collisions, and skills declared on model nodes — before any
 ## Run them from the repo root
 
 ```bash
-ensemble run examples/01-model-jury/jury.ts "your question"
+ensemble run examples/01-model-jury/jury.mts "your question"
 ```
 
 Not from inside the example folder. opencode treats your **working directory** as the
@@ -53,7 +53,7 @@ git.
 ```
 examples/NN-short-name/
 ├── README.md      what it does, how it works, how to test, a real run
-└── <name>.ts      the scene (TypeScript, default-exports scene({ … }))
+└── <name>.mts      the scene (TypeScript, default-exports scene({ … }))
 ```
 
 Keep each one focused on demonstrating **one** idea clearly. If a README claims a

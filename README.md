@@ -84,29 +84,55 @@ Three things carry the design:
 
 ## Getting started from scratch
 
-You are in a project. You have never used this before.
+**Two things: the CLI and an API key.** No `package.json`, no `npm install`, no
+project scaffolding.
 
 ```bash
-# 1 · install + the one credential
 npm i -g @ghostmind-dev/ensemble
 export OPENROUTER_API_KEY=sk-or-...          # https://openrouter.ai/keys
-
-# 2 · your project must be an ES module (scenes are .ts ES modules)
-npm pkg set type=module                       # or name scenes .mts
-
-# 3 · see what you already have — both are free and instant
-ensemble skills        # skills found (yours + Claude Code's)
-ensemble mcp           # MCP servers, CONNECTED and their tools listed
-ensemble models gpt    # what models you can reach
-
-# 4 · write a scene (see below), then
-ensemble validate scenes/my.ts               # free — catches every wiring mistake
-ensemble run scenes/my.ts "your goal"        # costs money
-ensemble serve                                # watch it live in a browser
 ```
 
-Step 3 is the habit. `validate` is free and catches unknown skills, dangling edges,
-unreachable exits, and state-key collisions before a single token is spent.
+Now write **one `.mts` file** anywhere:
+
+```ts
+// ask.mts
+import { scene } from "@ghostmind-dev/ensemble";
+
+export default scene({
+  name: "ask",
+  nodes: {
+    a: {
+      model: "openrouter/anthropic/claude-haiku-4.5",
+      prompt: "Answer briefly.",
+      outputs: ["answer"],
+    },
+  },
+  entry: "a",
+  exit: "a",
+});
+```
+
+```bash
+ensemble validate ask.mts        # free — catches every wiring mistake
+ensemble run ask.mts "your goal" # costs money
+ensemble serve .                 # watch it live in a browser
+```
+
+That directory can contain **nothing but `ask.mts`** and it works — verified. The
+`.mts` extension marks the file as an ES module without a `package.json`, and the
+import resolves against the global install.
+
+> Prefer `.ts`? That works too, but then the nearest `package.json` needs
+> `"type": "module"`. `.mts` avoids the question entirely, which is why every
+> example here uses it.
+
+Before spending anything, see what you already have — both are free and instant:
+
+```bash
+ensemble skills        # skills found (yours + Claude Code's)
+ensemble mcp           # MCP servers, CONNECTED, with their tools
+ensemble models gpt    # models you can reach
+```
 
 ## Where skills and MCP servers live
 
@@ -276,18 +302,19 @@ npm i @ghostmind-dev/ensemble
 
 Requirements:
 
-- **Node ≥ 22.6** — your scene files are TypeScript, loaded via Node's native type stripping
-- **`"type": "module"`** in the nearest `package.json` — scenes are ES modules.
-  (Or name them `.mts`. `ensemble validate` tells you if you forgot.)
+- **Node ≥ 22.6** — scenes are TypeScript, loaded via Node's native type stripping
 - `OPENROUTER_API_KEY` in the environment — **that's the only credential**
+
+Name scenes `.mts` and nothing else is needed. (`.ts` also works when the nearest
+`package.json` has `"type": "module"` — `ensemble validate` says so if it doesn't.)
 
 ## Commands
 
 ```bash
-ensemble run <scene.ts> "<goal>"     # execute a scene
+ensemble run <scene.mts> "<goal>"     # execute a scene
 ensemble serve [scenes-dir]          # live viewer + editor in the browser
-ensemble view <scene.ts>             # draw it (--mermaid, --html[=file])
-ensemble validate <scene.ts>         # check it without spending tokens
+ensemble view <scene.mts>             # draw it (--mermaid, --html[=file])
+ensemble validate <scene.mts>         # check it without spending tokens
 ensemble skills                      # list the skill + MCP registry (from config)
 ensemble mcp                         # connect MCP servers and list their tools
 ensemble models [filter]             # list models available through OpenRouter
@@ -378,7 +405,7 @@ away.
 ```ts
 import { loadScene, loadRegistry, runScene } from "@ghostmind-dev/ensemble";
 
-const scene = await loadScene("scenes/example.ts", loadRegistry());
+const scene = await loadScene("scenes/example.mts", loadRegistry());
 const result = await runScene(scene, "compare Bun and Deno", {
   onEvent: (e) => {
     if (e.type === "node:delta") process.stdout.write(e.delta);   // live tokens

@@ -35,7 +35,7 @@ worth anything. The foreman is the only node that sees all three.
 
 | File | What it is |
 |---|---|
-| `jury.ts` | The scene — 4 nodes, 1 parallel group, 1 edge. Every node is `runtime: "model"` (a direct OpenRouter call), so **no opencode server is spawned at all** — and every juror streams its tokens live in `ensemble serve` |
+| `jury.mts` | The scene — 4 nodes, 1 parallel group, 1 edge. Every node is `runtime: "model"` (a direct OpenRouter call), so **no opencode server is spawned at all** — and every juror streams its tokens live in `ensemble serve` |
 
 ---
 
@@ -45,9 +45,9 @@ Run it **from the repo root**, not from inside this folder:
 
 ```bash
 # from the graph repo root
-ensemble validate examples/01-model-jury/jury.ts   # free — catches typos first
-ensemble view     examples/01-model-jury/jury.ts   # draw the topology
-ensemble run      examples/01-model-jury/jury.ts \
+ensemble validate examples/01-model-jury/jury.mts   # free — catches typos first
+ensemble view     examples/01-model-jury/jury.mts   # draw the topology
+ensemble run      examples/01-model-jury/jury.mts \
   "Should a two-person startup write their own auth, or use a hosted provider?"
 ```
 
@@ -69,7 +69,7 @@ ensemble skills     # should list your skills; this example needs none
 ensemble models openrouter/deepseek   # confirm the models resolve
 ```
 
-If a model 404s, swap it in `jury.ts` for anything from `ensemble models`.
+If a model 404s, swap it in `jury.mts` for anything from `ensemble models`.
 
 ---
 

@@ -1,6 +1,6 @@
 {
   "name": "@ghostmind-dev/ensemble",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "description": "Multi-model agent ensembles. Describe a scene \u2014 nodes wired by edges, each node any model with scoped state \u2014 in one TypeScript file, and run it: conditions, loops, parallel groups, live visualization.",
   "type": "module",
   "license": "MIT",
