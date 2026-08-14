@@ -14,11 +14,12 @@
   "routines": {
     "check": "npx tsc --noEmit",
     "skills": "node src/cli.ts skills",
-    "validate": "node src/cli.ts validate scenes/example.yaml",
-    "view": "node src/cli.ts view scenes/example.yaml",
-    "smoke": "node src/cli.ts run scenes/smoke.yaml \"Which AI model are you? Name your vendor and model precisely.\"",
+    "validate": "node src/cli.ts validate scenes/example.mts",
+    "view": "node src/cli.ts view scenes/example.mts",
+    "smoke": "node src/cli.ts run scenes/smoke.mts \"Which AI model are you? Name your vendor and model precisely.\"",
     "herdr_init": "run herdr init ensemble --all",
-    "herdr_attach": "run herdr attach ensemble"
+    "herdr_attach": "run herdr attach ensemble",
+    "herdr_terminate": "run herdr terminate ensemble"
   },
   "herdr": {
     "workspaces": [
@@ -35,16 +36,16 @@
               "panes": [
                 {
                   "name": "run",
-                  "description": "Primary pane for executing scenes: `node src/cli.ts run scenes/<scene>.yaml \"<goal>\"`. Runs are long-lived and stream per-node output, so keep this pane dedicated to them.",
+                  "description": "Primary pane for executing scenes: `node src/cli.ts run scenes/<scene>.mts \"<goal>\"`. Runs are long-lived and stream per-node output, so keep this pane dedicated to them.",
                   "focus": true
                 },
                 {
                   "name": "check",
-                  "description": "Typecheck and validation loop: `npx tsc --noEmit` and `node src/cli.ts validate scenes/*.yaml`. Validation is free, so run it here before spending tokens on a run."
+                  "description": "Typecheck and validation loop: `npx tsc --noEmit` and `node src/cli.ts validate scenes/*.mts`. Validation is free, so run it here before spending tokens on a run."
                 },
                 {
                   "name": "shell",
-                  "description": "Free shell for ad-hoc work \u2014 editing scenes, inspecting .graph/runs/<id>/state.json, or checking `opencode models`. Kept empty so the run pane is never interrupted."
+                  "description": "Free shell for ad-hoc work \u2014 editing scenes, inspecting .ensemble/runs/<id>/state.json, or checking `opencode models`. Kept empty so the run pane is never interrupted."
                 }
               ]
             }
@@ -56,12 +57,12 @@
               "type": "vertical",
               "panes": [
                 {
-                  "name": "graphviz",
-                  "description": "Render scene topology: `node src/cli.ts view scenes/<scene>.yaml` for the terminal sketch, `--mermaid` for diagram source, or `--html=g.html` for a browser view."
+                  "name": "topology",
+                  "description": "Render scene topology: `node src/cli.ts view scenes/<scene>.mts` for the terminal sketch, `--mermaid` for diagram source, or `--html=g.html` for a browser view."
                 },
                 {
                   "name": "artifacts",
-                  "description": "Inspect run output under .graph/runs/<timestamp>-<scene>/ \u2014 `state.json` is the checkpointed blackboard, `result.md` renders every state key."
+                  "description": "Inspect run output under .ensemble/runs/<timestamp>-<scene>/ \u2014 `state.json` is the checkpointed blackboard, `result.md` renders every state key."
                 }
               ]
             }
