@@ -24,6 +24,8 @@ ${c.bold("Options")}
   --port <n>        Attach to an opencode server already on this port
   --max-runs <n>    Global node-execution cap (default 50)
   --timeout <min>   Wall-clock limit in minutes (default 20)
+  --budget <usd>    Hard cost cap for the run, e.g. --budget 0.50
+                    (ENSEMBLE_BUDGET sets a machine-wide default)
   --verbose         Print full node transcripts instead of clipped ones
   --mermaid         view: print Mermaid source instead of the terminal sketch
   --html [file]     view: write a standalone HTML page and print its path
@@ -308,7 +310,7 @@ async function cmdView(
 async function cmdRun(
   path: string | undefined,
   goal: string | undefined,
-  opts: { port?: number; maxRuns?: number; timeout?: number; verbose: boolean },
+  opts: { port?: number; maxRuns?: number; timeout?: number; budget?: number; verbose: boolean },
 ): Promise<number> {
   if (!path || !goal) {
     error('run needs a scene and a goal: ensemble run <scene.ts> "<goal>"');
@@ -334,6 +336,7 @@ async function cmdRun(
     port: opts.port,
     maxNodeRuns: opts.maxRuns,
     timeoutMs: opts.timeout ? opts.timeout * 60_000 : undefined,
+    ...(opts.budget !== undefined ? { budget: opts.budget } : {}),
     onEvent: createTerminalReporter({ verbose: opts.verbose }),
   });
 
@@ -350,6 +353,7 @@ async function cmdRun(
     info(`\n${c.bold("Result")}\n${headline.trim()}`);
   }
   info(c.dim(`\nstate → ${result.runDir}/state.json`));
+  info(c.dim(`costs → ${result.runDir}/costs.json`));
   return 0;
 }
 
@@ -388,6 +392,7 @@ async function main(): Promise<number> {
       port: { type: "string" },
       "max-runs": { type: "string" },
       timeout: { type: "string" },
+      budget: { type: "string" },
       mermaid: { type: "boolean", default: false },
       // Optional value: `--html` alone picks a filename from the scene name.
       html: { type: "string" },
@@ -425,6 +430,7 @@ async function main(): Promise<number> {
         port: num(values.port),
         maxRuns: num(values["max-runs"]),
         timeout: num(values.timeout),
+        budget: num(values.budget),
         verbose: values.verbose ?? false,
       });
     case "serve": {

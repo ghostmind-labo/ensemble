@@ -244,11 +244,16 @@ export async function serve(opts: ServeOptions): Promise<void> {
             return;
           }
 
+          // An optional per-run cost cap from the UI; ENSEMBLE_BUDGET still
+          // applies as the machine-wide fallback inside the engine.
+          const budget = Number(body["budget"]);
+
           const abort = new AbortController();
           currentRun = { events: [], active: true, abort };
           json(res, 202, { started: true });
 
           void runScene(scene, goal, {
+            ...(Number.isFinite(budget) && budget > 0 ? { budget } : {}),
             signal: abort.signal,
             onEvent: (event) => {
               currentRun?.events.push(event);

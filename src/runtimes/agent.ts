@@ -44,6 +44,12 @@ export interface AgentCallRequest {
   hub: McpHub | undefined;
   root: string;
   maxTurns: number;
+  /**
+   * USD ceiling for this node. Checked between turns: once crossed, the loop
+   * forces a final tool-free answer instead of continuing to spend. The engine
+   * passes the run budget's remainder here.
+   */
+  costLimit?: number;
   onDelta?: (delta: string) => void;
   onToolCall?: (event: ToolCallEvent) => void;
   signal?: AbortSignal;
@@ -64,6 +70,37 @@ function clampResult(text: string): string {
   return text.length <= MAX_TOOL_RESULT
     ? text
     : `${text.slice(0, MAX_TOOL_RESULT)}\n… [truncated: ${text.length} chars total — narrow your query to see more]`;
+}
+
+/**
+ * Context editing: how many of the most recent tool results stay full-size.
+ *
+ * Every prior tool result is resent on every turn, so a long loop pays for its
+ * early exploration again and again — the cost curve is quadratic in turns. The
+ * standard fix (what Anthropic's context-editing API does for Claude) is to
+ * clear old tool results and keep only the recent window: by the time a result
+ * is this many calls old, the model has either used it or can re-run the tool.
+ * Old results keep a short head so the model still knows what it once saw.
+ */
+const KEEP_TOOL_RESULTS = 6;
+const PRUNED_MARK = "[cleared] ";
+const PRUNE_HEAD = 200;
+
+function pruneOldToolResults(messages: Array<Record<string, unknown>>): void {
+  const toolIndexes: number[] = [];
+  for (let i = 0; i < messages.length; i++) {
+    if (messages[i]?.["role"] === "tool") toolIndexes.push(i);
+  }
+
+  for (const index of toolIndexes.slice(0, Math.max(0, toolIndexes.length - KEEP_TOOL_RESULTS))) {
+    const message = messages[index];
+    const content = message?.["content"];
+    if (!message || typeof content !== "string") continue;
+    if (content.startsWith(PRUNED_MARK) || content.length <= PRUNE_HEAD) continue;
+    message["content"] =
+      `${PRUNED_MARK}${content.slice(0, PRUNE_HEAD)}… ` +
+      `(older result cleared from context to save tokens — re-run the tool if you need it again)`;
+  }
 }
 
 function apiKey(): string {
@@ -202,6 +239,25 @@ export async function callAgent(req: AgentCallRequest): Promise<NodeResult & { t
   while (turns < req.maxTurns) {
     turns++;
 
+    // The last affordable turn is spent answering, not exploring. Two budgets
+    // trigger it: the final turn of the turn budget, and the node's cost
+    // ceiling. Either way tools are withheld and the model is told to answer
+    // from what it has — a best-effort answer instead of a hard failure.
+    const overCost = req.costLimit !== undefined && cost >= req.costLimit;
+    const mustAnswer = overCost || turns === req.maxTurns;
+    if (mustAnswer && tools.length > 0) {
+      messages.push({
+        role: "user",
+        content:
+          `Your ${overCost ? "cost" : "turn"} budget is exhausted — this is your FINAL turn and ` +
+          `tools are no longer available. Answer NOW from what you have already learned. State ` +
+          `plainly anything you could not verify, and if the task requires a fenced json block, ` +
+          `end with it.`,
+      });
+    }
+
+    pruneOldToolResults(messages);
+
     const res = await fetch(ENDPOINT, {
       method: "POST",
       ...(req.signal ? { signal: req.signal } : {}),
@@ -213,7 +269,7 @@ export async function callAgent(req: AgentCallRequest): Promise<NodeResult & { t
       body: JSON.stringify({
         model,
         messages,
-        ...(tools.length > 0 ? { tools } : {}),
+        ...(tools.length > 0 && !mustAnswer ? { tools } : {}),
         ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
       }),
     });
@@ -320,6 +376,6 @@ export async function callAgent(req: AgentCallRequest): Promise<NodeResult & { t
     tokensIn,
     tokensOut,
     turns,
-    error: `agent did not finish within maxTurns (${req.maxTurns}) — raise it or narrow the node's job`,
+    error: `agent produced no answer within maxTurns (${req.maxTurns}) — raise it or narrow the node's job`,
   };
 }

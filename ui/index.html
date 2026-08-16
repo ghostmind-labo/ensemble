@@ -63,7 +63,17 @@
     flex: 1; padding: 8px 11px; border: 1px solid var(--line); border-radius: 8px;
     background: var(--panel); color: var(--fg); font-size: 13px; min-width: 120px;
   }
+  .toolbar input[type=number] {
+    width: 92px; padding: 8px 11px; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--panel); color: var(--fg); font-size: 13px; font-family: var(--mono);
+  }
   .toolbar input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  #spend {
+    font-family: var(--mono); font-size: 12px; color: var(--muted); white-space: nowrap;
+    padding: 4px 9px; border: 1px solid var(--line); border-radius: 999px;
+  }
+  #spend.warn { color: var(--warn); border-color: var(--warn); }
+  #spend.over { color: var(--fail); border-color: var(--fail); }
   button {
     padding: 8px 14px; border: 1px solid var(--line); border-radius: 8px; cursor: pointer;
     background: var(--panel); color: var(--fg); font-size: 13px; font-weight: 500;
@@ -165,6 +175,16 @@
   .banner { padding: 10px 14px; border-radius: 9px; background: color-mix(in srgb, var(--fail) 12%, transparent);
             border: 1px solid var(--fail); color: var(--fail); font-size: 12px; margin-bottom: 14px; }
   .banner ul { margin: 6px 0 0; padding-left: 18px; }
+
+  /* ---------- costs tab ---------- */
+  #costs { padding: 12px 16px; font-family: var(--mono); font-size: 11.5px; }
+  .crow { display: grid; grid-template-columns: minmax(90px, 160px) 1fr 150px; gap: 10px;
+          align-items: center; margin-bottom: 7px; }
+  .crow .cname { color: var(--accent); font-weight: 700; overflow: hidden; text-overflow: ellipsis; }
+  .crow .cbar { height: 8px; border-radius: 4px; background: var(--accent-soft); overflow: hidden; }
+  .crow .cbar i { display: block; height: 100%; background: var(--accent); border-radius: 4px; }
+  .crow .cval { color: var(--muted); text-align: right; white-space: nowrap; }
+  .ctotal { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line); color: var(--fg); }
 </style>
 </head>
 <body>
@@ -179,6 +199,9 @@
 <main>
   <div class="toolbar">
     <input type="text" id="goal" placeholder="Goal for this run…">
+    <input type="number" id="budget" placeholder="$ cap" min="0" step="0.05"
+           title="Optional hard cost cap (USD) for this run">
+    <span id="spend" hidden></span>
     <button class="primary" id="run">Run</button>
     <button id="stop" disabled>Stop</button>
   </div>
@@ -191,11 +214,13 @@
     <div class="tabs">
       <button class="tab active" data-tab="log">Log</button>
       <button class="tab" data-tab="state">State</button>
+      <button class="tab" data-tab="costs">Costs</button>
       <button class="tab" data-tab="source">Source</button>
       <span id="savemsg"></span>
     </div>
     <div class="log pane active" id="log"><div class="empty">Run a scene to see live output.</div></div>
     <div class="pane" id="state"><div class="empty">State appears here as nodes complete.</div></div>
+    <div class="pane" id="costs"><div class="empty">Per-node spend appears here as nodes complete.</div></div>
     <div class="pane src" id="source">
       <textarea id="srctext" spellcheck="false"></textarea>
       <div class="srcbar">
@@ -213,8 +238,45 @@ const state = {
   scenes: [], current: null, layout: null,
   status: new Map(),   // node -> {state, meta, text, stream}
   blackboard: {},      // live copy of the run state
+  costs: new Map(),    // node -> {runs, cost, tokensIn, tokensOut}
+  spent: 0,            // running total for the ticker
+  budget: null,        // USD cap of the current run, if any
   selected: null, running: false,
 };
+
+// ---------------------------------------------------------------- costs
+const usd = (n) => `$${n < 0.01 && n > 0 ? n.toFixed(4) : n.toFixed(2)}`;
+
+function updateSpend() {
+  const el = $("spend");
+  if (!state.running && state.spent === 0) { el.hidden = true; return; }
+  el.hidden = false;
+  el.textContent = state.budget ? `${usd(state.spent)} / ${usd(state.budget)}` : usd(state.spent);
+  el.className = "";
+  if (state.budget) {
+    if (state.spent >= state.budget) el.className = "over";
+    else if (state.spent >= state.budget * 0.8) el.className = "warn";
+  }
+}
+
+function renderCosts() {
+  const pane = $("costs");
+  if (state.costs.size === 0) {
+    pane.innerHTML = '<div class="empty">Per-node spend appears here as nodes complete.</div>';
+    return;
+  }
+  const rows = [...state.costs.entries()].sort((a, b) => b[1].cost - a[1].cost);
+  const max = rows[0][1].cost || 1;
+  pane.innerHTML = rows.map(([node, t]) => {
+    const share = state.spent > 0 ? Math.round((t.cost / state.spent) * 100) : 0;
+    return `<div class="crow">
+      <span class="cname">${esc(node)}</span>
+      <div class="cbar"><i style="width:${Math.max(2, (t.cost / max) * 100)}%"></i></div>
+      <span class="cval">${usd(t.cost)} · ${share}% · ${t.runs}×</span>
+    </div>`;
+  }).join("") +
+    `<div class="ctotal">total ${usd(state.spent)}${state.budget ? ` of ${usd(state.budget)} budget` : ""}</div>`;
+}
 
 // ---------------------------------------------------------------- data
 async function loadScenes() {
@@ -459,7 +521,14 @@ function onEvent(e) {
     case "run:start": {
       state.status.clear();
       state.blackboard = {};
+      state.costs.clear();
+      state.spent = 0;
+      // The cap for a run we started is in the input; a run started elsewhere
+      // reports its budget (if any) on run:end.
+      const cap = Number($("budget").value);
+      state.budget = Number.isFinite(cap) && cap > 0 ? cap : null;
       state.running = true;
+      updateSpend(); renderCosts();
       $("run").disabled = true; $("stop").disabled = false;
       $("log").innerHTML = "";
       log(`▶ ${esc(e.scene)} — ${esc(e.goal)}`, "h");
@@ -505,9 +574,27 @@ function onEvent(e) {
       log(`⚠ ${esc(e.node)}: ${esc(e.problem)} — reprompting`, "w");
       break;
 
+    case "node:tool":
+      // The terminal reporter has always shown these; the browser dropped them.
+      log(`  ⚒ ${esc(e.tool)} <span class="m">${(e.ms / 1000).toFixed(1)}s · ${esc(e.preview)}</span>`,
+          e.ok ? "" : "r");
+      break;
+
+    case "node:lossy":
+      log(`⚠ ${esc(e.node)}: kept only ${e.extractedLength} of ${e.replyLength} chars — ` +
+          `the model summarised its prose into the json block`, "w");
+      break;
+
     case "node:end": {
       const meta = `${e.tokensIn}→${e.tokensOut} tok · $${e.cost.toFixed(4)} · ${(e.ms / 1000).toFixed(1)}s`;
       state.status.set(e.node, { state: e.ok ? "ok" : "fail", meta, text: e.text });
+
+      const tally = state.costs.get(e.node) ?? { runs: 0, cost: 0, tokensIn: 0, tokensOut: 0 };
+      tally.runs += 1; tally.cost += e.cost;
+      tally.tokensIn += e.tokensIn; tally.tokensOut += e.tokensOut;
+      state.costs.set(e.node, tally);
+      state.spent += e.cost;
+      updateSpend(); renderCosts();
       // opencode gives no incremental text, so the reply lands here in one piece.
       if (e.text) log(esc(e.text.trim()), "m");
       log(`└ ${esc(e.node)} ${e.ok ? "ok" : "failed"} <span class="m">${esc(meta)}</span>`, e.ok ? "g" : "r");
@@ -530,9 +617,15 @@ function onEvent(e) {
       state.running = false;
       draw();
       state.hotEdge = null;
+      // A run started outside this tab still reports its cap here.
+      if (e.budget !== undefined) state.budget = e.budget;
+      state.spent = e.totalCost;
+      updateSpend(); renderCosts();
       $("run").disabled = false; $("stop").disabled = true;
-      if (e.ok) log(`✓ done · ${e.nodeRuns} node runs · $${e.totalCost.toFixed(4)}`, "g h");
-      else log(`✗ ${esc(e.reason ?? "failed")}`, "r h");
+      if (e.ok) {
+        const under = state.budget ? ` of ${usd(state.budget)} budget` : "";
+        log(`✓ done · ${e.nodeRuns} node runs · $${e.totalCost.toFixed(4)}${under}`, "g h");
+      } else log(`✗ ${esc(e.reason ?? "failed")}`, "r h");
       requestAnimationFrame(wires);
       break;
   }
@@ -551,9 +644,13 @@ $("run").onclick = async () => {
   if (!goal) { $("goal").focus(); return; }
   if (!state.current) return;
   $("run").disabled = true;
+  const cap = Number($("budget").value);
   const res = await fetch("/api/run", {
     method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ file: state.current, goal }),
+    body: JSON.stringify({
+      file: state.current, goal,
+      ...(Number.isFinite(cap) && cap > 0 ? { budget: cap } : {}),
+    }),
   });
   if (!res.ok) {
     const err = await res.json();

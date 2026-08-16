@@ -36,10 +36,25 @@ export interface RunOptions {
   port?: number;
   maxNodeRuns?: number;
   timeoutMs?: number;
+  /**
+   * Hard USD ceiling for the whole run. Checked between nodes, and inside the
+   * agent loop between turns (where an agent node is told to answer with what it
+   * has rather than keep spending). Falls back to ENSEMBLE_BUDGET so one env var
+   * protects every run on a machine, including ones started from the browser.
+   */
+  budget?: number;
   /** Receives every run event. Omit for a silent run. */
   onEvent?: EventSink;
   /** Aborts the run; model nodes abort mid-stream, agent nodes between nodes. */
   signal?: AbortSignal;
+}
+
+/** Per-node spend, aggregated across every run of that node (loops included). */
+export interface NodeCost {
+  runs: number;
+  cost: number;
+  tokensIn: number;
+  tokensOut: number;
 }
 
 export type RunResult =
@@ -105,6 +120,8 @@ interface NodeCallCtx {
   hub: ToolHub;
   needsMcp: boolean;
   emit: EventSink;
+  /** USD left before the run budget is exhausted; undefined = no budget set. */
+  budgetLeft: () => number | undefined;
   signal?: AbortSignal;
 }
 
@@ -137,11 +154,14 @@ async function callOnce(
     .map((name) => registry.skills.get(name))
     .filter((s): s is NonNullable<typeof s> => Boolean(s));
 
+  const costLimit = ctx.budgetLeft();
+
   return callAgent({
     model,
     ...(spec.prompt ? { system: spec.prompt } : {}),
     messages: [...history, { role: "user", content: text }],
     ...(temperature !== undefined ? { temperature } : {}),
+    ...(costLimit !== undefined ? { costLimit } : {}),
     mcp: wanted,
     // `tools: { grep: false }` opts a built-in out; default is all of them.
     builtins: BUILTIN_NAMES.filter((n) => spec.tools?.[n] !== false),
@@ -278,6 +298,23 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
   const edgeLoops = new Map<number, number>();
   const deadline = Date.now() + timeoutMs;
 
+  // ENSEMBLE_BUDGET makes the cap a machine-wide default: exported once, it
+  // covers every run, including ones started from the serve UI.
+  const envBudget = Number(process.env["ENSEMBLE_BUDGET"]);
+  const budget = opts.budget ?? (Number.isFinite(envBudget) && envBudget > 0 ? envBudget : undefined);
+
+  // Where the money went, node by node — written next to state.json so an
+  // expensive run leaves an itemised receipt, not just a total.
+  const nodeCosts = new Map<string, NodeCost>();
+  const recordCost = (node: string, r: { cost: number; tokensIn: number; tokensOut: number }): void => {
+    const entry = nodeCosts.get(node) ?? { runs: 0, cost: 0, tokensIn: 0, tokensOut: 0 };
+    entry.runs += 1;
+    entry.cost += r.cost;
+    entry.tokensIn += r.tokensIn;
+    entry.tokensOut += r.tokensOut;
+    nodeCosts.set(node, entry);
+  };
+
   const nodeMeta: NodeMeta[] = Object.entries(scene.nodes).map(([name, spec]) => ({
     node: name,
     model: spec.model ?? scene.defaults.model ?? "",
@@ -290,11 +327,20 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
   const hub = new ToolHub(root, servers);
   const checkpoint = (): void => {
     writeFileSync(join(runDir, "state.json"), JSON.stringify(state, null, 2), "utf8");
+    writeFileSync(
+      join(runDir, "costs.json"),
+      JSON.stringify(
+        { totalCost, nodeRuns, ...(budget !== undefined ? { budget } : {}), nodes: Object.fromEntries(nodeCosts) },
+        null,
+        2,
+      ),
+      "utf8",
+    );
   };
 
   const fail = (reason: string): RunResult => {
     checkpoint();
-    emit({ type: "run:end", ok: false, reason, state, totalCost, nodeRuns });
+    emit({ type: "run:end", ok: false, reason, state, totalCost, nodeRuns, ...(budget !== undefined ? { budget } : {}) });
     return { ok: false, reason, state, runDir, runId: id };
   };
 
@@ -305,6 +351,7 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
     hub,
     needsMcp: servers.length > 0,
     emit,
+    budgetLeft: () => (budget === undefined ? undefined : Math.max(0, budget - totalCost)),
     ...(opts.signal ? { signal: opts.signal } : {}),
   };
 
@@ -331,13 +378,25 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
         members.map((member) => runNode({ ...ctx, state: snapshot }, member)),
       );
 
-      for (const outcome of outcomes) {
-        if (outcome.result) totalCost += outcome.result.cost;
+      for (const [index, outcome] of outcomes.entries()) {
+        if (outcome.result) {
+          totalCost += outcome.result.cost;
+          recordCost(members[index] ?? "?", outcome.result);
+        }
         if ("error" in outcome) return fail(outcome.error);
         Object.assign(state, outcome.values);
       }
       checkpoint();
       emit({ type: "state", state: { ...state } });
+
+      // The budget is a hard stop, not a warning: the run ends here with its
+      // state checkpointed, rather than starting work it was told not to afford.
+      if (budget !== undefined && totalCost >= budget) {
+        return fail(
+          `budget exhausted: spent $${totalCost.toFixed(4)} of the $${budget} cap — ` +
+            `state so far is checkpointed; raise with --budget or ENSEMBLE_BUDGET`,
+        );
+      }
 
       // Outgoing edges are consulted BEFORE the exit check, so a node can be both
       // the terminal node and a looping one. Terminating early here would make
@@ -389,7 +448,7 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
 
     checkpoint();
     writeFileSync(join(runDir, "result.md"), renderResult(scene, state), "utf8");
-    emit({ type: "run:end", ok: true, state, totalCost, nodeRuns });
+    emit({ type: "run:end", ok: true, state, totalCost, nodeRuns, ...(budget !== undefined ? { budget } : {}) });
 
     return { ok: true, state, runDir, totalCost, runId: id };
   } catch (err) {
