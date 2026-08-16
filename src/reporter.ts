@@ -13,6 +13,8 @@ export function createTerminalReporter(opts: { verbose: boolean }): EventSink {
   // footers in completion order, and nothing says which footer belongs to which.
   const models = new Map<string, string>();
   const warnings = new Map<string, string[]>();
+  // node → aggregated spend, for the end-of-run breakdown.
+  const spend = new Map<string, { runs: number; cost: number; tokensIn: number; tokensOut: number }>();
 
   return (event: RunEvent): void => {
     switch (event.type) {
@@ -62,6 +64,13 @@ export function createTerminalReporter(opts: { verbose: boolean }): EventSink {
         break;
 
       case "node:end": {
+        const tally = spend.get(event.node) ?? { runs: 0, cost: 0, tokensIn: 0, tokensOut: 0 };
+        tally.runs += 1;
+        tally.cost += event.cost;
+        tally.tokensIn += event.tokensIn;
+        tally.tokensOut += event.tokensOut;
+        spend.set(event.node, tally);
+
         const model = models.get(event.node) ?? `${event.providerID}/${event.modelID}`;
         const head = `\n${c.dim("┌─")} ${c.bold(c.magenta(event.node))} ${c.dim(model)}`;
 
@@ -98,14 +107,34 @@ export function createTerminalReporter(opts: { verbose: boolean }): EventSink {
         }
         break;
 
-      case "run:end":
+      case "run:end": {
         if (event.ok) {
+          const under =
+            event.budget !== undefined ? ` of $${event.budget} budget` : "";
           info(
             `\n${c.green(c.bold("done"))} ${c.dim(`${event.nodeRuns} node run(s)`)}` +
-              `${cost(event.totalCost) ? c.dim(` · ${cost(event.totalCost)}`) : ""}`,
+              `${cost(event.totalCost) ? c.dim(` · ${cost(event.totalCost)}${under}`) : ""}`,
           );
         }
+
+        // Where the money went — printed for failed runs too, since "which node
+        // burned the budget" matters most exactly when a run died on it.
+        if (event.totalCost > 0 && spend.size > 1) {
+          const rows = [...spend.entries()].sort((a, b) => b[1].cost - a[1].cost);
+          const width = Math.max(...rows.map(([node]) => node.length));
+          info(c.dim("\ncost by node"));
+          for (const [node, t] of rows) {
+            const share = Math.round((t.cost / event.totalCost) * 100);
+            info(
+              `  ${c.magenta(node.padEnd(width))}  ${(cost(t.cost) || "$0").padStart(7)}` +
+                c.dim(
+                  `  ${String(share).padStart(3)}%  ${t.runs} run(s) · ${t.tokensIn}→${t.tokensOut} tok`,
+                ),
+            );
+          }
+        }
         break;
+      }
 
       case "state":
         break;

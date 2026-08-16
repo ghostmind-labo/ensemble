@@ -386,9 +386,28 @@ A node's `skills: [...]` are inlined into its system prompt.
 |---|---|---|
 | Total node executions | 50 | `--max-runs` |
 | Wall clock | 20 min | `--timeout` (minutes) |
+| **Run cost (USD)** | unlimited | `--budget 0.50`, or `ENSEMBLE_BUDGET` machine-wide |
 | Per-edge loops | unlimited | `maxLoops:` on the edge |
 | Agent tool-calling turns | 12 | `maxTurns:` on the node |
 | Filesystem writes | **impossible** — no write tool exists | use an MCP server |
+
+**The budget is a hard stop, not a warning.** Between nodes, a run that has spent its
+cap ends immediately with state checkpointed. Inside an agent node, the loop checks the
+cap between turns: once crossed (or on the final `maxTurns` turn), tools are withheld
+and the model is told to answer from what it already learned — a best-effort answer
+instead of a hard failure. `ENSEMBLE_BUDGET=1` in your shell profile puts a $1 ceiling
+under every run on the machine, including ones started from the `serve` UI, which also
+takes a per-run cap in its toolbar.
+
+Two more things keep agent loops cheap by construction: every tool result is clamped
+to 8 KB before it enters the conversation, and once a result is more than six tool
+calls old it is cleared down to a 200-char stub (the model can re-run the tool if it
+truly needs it again). Without that second rule the loop pays for its early
+exploration on every subsequent turn — cost quadratic in turns.
+
+Every run writes `costs.json` next to `state.json` — an itemised per-node receipt —
+and the terminal prints a `cost by node` breakdown at the end, failed runs included,
+because "which node burned the budget" matters most exactly when a run died on it.
 
 A `when` predicate that throws fails the run naming the edge. Two JSON-contract
 failures in a row fail the node loudly. An extraction that keeps <25% of a long

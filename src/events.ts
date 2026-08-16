@@ -50,7 +50,16 @@ export type RunEvent =
     }
   | { type: "edge"; from: string; to: string; when?: string; skipped?: boolean }
   | { type: "state"; state: State }
-  | { type: "run:end"; ok: boolean; reason?: string; state: State; totalCost: number; nodeRuns: number };
+  | {
+      type: "run:end";
+      ok: boolean;
+      reason?: string;
+      state: State;
+      totalCost: number;
+      nodeRuns: number;
+      /** The USD cap the run was under, when one was set. */
+      budget?: number;
+    };
 
 export type EventSink = (event: RunEvent) => void;
 

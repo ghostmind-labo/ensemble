@@ -149,6 +149,13 @@ The first version of this example cost **$0.44**, with `inspect` alone consuming
 
 Same scene, after: **$0.05**, `inspect` at 16,204 input tokens.
 
+Since then the loop also **clears old tool results**: once a result is more than six
+tool calls behind, it is stubbed down to its first 200 chars, so a long loop no longer
+resends its early exploration on every turn. And a run can carry a hard cost cap —
+`--budget 0.10` (or `ENSEMBLE_BUDGET`) ends the run, state checkpointed, rather than
+letting a loop spend past it; an agent node that crosses the cap mid-loop is told to
+answer with what it has.
+
 **The rule:** give agent nodes a narrow, bounded job. `maxTurns` (default 12) is the
 hard stop, but the prompt is what keeps you well under it.
 
