@@ -386,7 +386,7 @@ A node's `skills: [...]` are inlined into its system prompt.
 |---|---|---|
 | Total node executions | 50 | `--max-runs` |
 | Wall clock | 20 min | `--timeout` (minutes) |
-| **Run cost (USD)** | unlimited | `--budget 0.50`, or `ENSEMBLE_BUDGET` machine-wide |
+| **Run cost (USD)** | unlimited | `--budget 0.50`, or `ENSEMBLE_BUDGET` machine-wide (resumable) |
 | Per-edge loops | unlimited | `maxLoops:` on the edge |
 | Agent tool-calling turns | 12 | `maxTurns:` on the node |
 | Filesystem writes | **impossible** — no write tool exists | use an MCP server |
@@ -414,10 +414,36 @@ failures in a row fail the node loudly. An extraction that keeps <25% of a long
 reply raises a `node:lossy` warning — the model probably summarised its real answer
 away.
 
+## Resumable runs
+
+A run that stops early — budget spent, node failed, ctrl-C, timeout — is not a dead
+end. Alongside the blackboard, every checkpoint records **where in the graph the run
+was**, so it can be picked back up:
+
+```bash
+ensemble run council.mts "the goal" --budget 0.25   # stops mid-graph, cheap
+cat .ensemble/runs/<id>/state.json                  # look at what you bought
+ensemble resume .ensemble/runs/<id> --budget 1.00   # continue, don't restart
+```
+
+**This is what makes `--budget` a pause button rather than a kill switch.** Spend a
+little, read the partial state, then decide whether it is worth more.
+
+The continuation skips everything already paid for and lands in the *same* run
+directory, so `costs.json` keeps one cumulative receipt. `journal.json` carries the
+position: the target still owed, the `maxLoops` counters already consumed (so a
+resumed run cannot quietly award itself a fresh loop budget), cumulative spend, and
+why it stopped. A budget applies to the running total — resuming without raising it
+says so immediately instead of burning a node first.
+
+Editing the scene between attempts is allowed, and often the point: a resume warns
+when the file's hash changed, because loop counters are keyed by edge order.
+
 ## Run artifacts
 
-`.ensemble/runs/<timestamp>-<scene>/` — `state.json` (checkpointed blackboard) and
-`result.md` (every key rendered).
+`.ensemble/runs/<timestamp>-<scene>/` — `state.json` (checkpointed blackboard),
+`costs.json` (per-node receipt), `journal.json` (graph position, for `resume`), and
+`result.md` (every key rendered, on completion).
 
 ## Using it as a library
 

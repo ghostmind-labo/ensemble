@@ -1,7 +1,7 @@
 import { parseArgs } from "node:util";
 import { loadRegistry } from "./registry.ts";
 import { loadScene, SceneError } from "./scene.ts";
-import { runScene } from "./engine.ts";
+import { runScene, readJournal, hashScene } from "./engine.ts";
 import { createTerminalReporter } from "./reporter.ts";
 import { toMermaid, toTerminal, toHtml } from "./view.ts";
 import { c, info, error, duration } from "./log.ts";
@@ -11,6 +11,7 @@ ${c.bold("ensemble")} — multi-model agent ensembles
 
 ${c.bold("Usage")}
   ensemble run <scene.ts> "<goal>"   Execute a scene against a goal
+  ensemble resume <run-dir>            Continue a stopped run from its checkpoint
   ensemble serve [scenes-dir]          Live viewer + run console in the browser
   ensemble view <scene.ts>           Draw the graph (terminal, mermaid, or html)
   ensemble validate <scene.ts>       Check a scene without running it
@@ -340,9 +341,23 @@ async function cmdRun(
     onEvent: createTerminalReporter({ verbose: opts.verbose }),
   });
 
+  return report(scene, result, started);
+}
+
+/**
+ * Shared tail of `run` and `resume`: the headline answer and where the
+ * artifacts landed. A stopped run advertises how to pick it back up, since the
+ * journal beside its state is the whole point of stopping cleanly.
+ */
+function report(
+  scene: Awaited<ReturnType<typeof loadScene>>,
+  result: Awaited<ReturnType<typeof runScene>>,
+  started: number,
+): number {
   if (!result.ok) {
     error(result.reason);
     info(c.dim(`\nfailed after ${duration(Date.now() - started)}`));
+    info(c.dim(`resume → ensemble resume ${result.runDir}`));
     return 1;
   }
 
@@ -355,6 +370,75 @@ async function cmdRun(
   info(c.dim(`\nstate → ${result.runDir}/state.json`));
   info(c.dim(`costs → ${result.runDir}/costs.json`));
   return 0;
+}
+
+/**
+ * `ensemble resume <run-dir>` — continue a run that stopped early.
+ *
+ * The journal carries the graph position, loop counters, and spend, so the
+ * continuation skips everything already paid for. A budget applies to the
+ * cumulative total, which is what makes `--budget` a pause button rather than a
+ * kill switch: stop cheap, look at the state, then decide to spend more.
+ */
+async function cmdResume(
+  dir: string | undefined,
+  opts: { maxRuns?: number; timeout?: number; budget?: number; verbose: boolean },
+): Promise<number> {
+  if (!dir) {
+    error("resume needs a run directory: ensemble resume .ensemble/runs/<id>");
+    return 2;
+  }
+
+  let resumeFrom;
+  try {
+    resumeFrom = readJournal(dir);
+  } catch (err) {
+    error(err instanceof Error ? err.message : String(err));
+    return 1;
+  }
+
+  const { journal } = resumeFrom;
+  const reg = loadRegistry();
+  let scene;
+  try {
+    scene = await loadScene(journal.scene.file, reg);
+  } catch (err) {
+    if (err instanceof SceneError) {
+      error(`the scene this run came from (${journal.scene.file}) is not valid:\n`);
+      for (const problem of err.problems) console.error(`  • ${problem}`);
+      console.error("");
+      return 1;
+    }
+    throw err;
+  }
+
+  // An edited scene is allowed — you often fix the thing that stalled the run —
+  // but edge indexes back the loop counters, so say so rather than silently
+  // applying stale budgets to renumbered edges.
+  if (hashScene(journal.scene.file) !== journal.scene.hash) {
+    info(
+      `${c.yellow("!")} ${c.yellow(`${journal.scene.file} changed since this run started`)} — ` +
+        c.dim("maxLoops counters are keyed by edge order and may no longer line up"),
+    );
+  }
+
+  info(
+    `${c.bold("resuming")} ${c.bold(c.magenta(journal.scene.name))} ${c.dim("at")} ` +
+      `${c.cyan(journal.resumeAt ?? "?")} ${c.dim(`· ${journal.nodeRuns} node run(s) already done`)}` +
+      `${journal.totalCost > 0 ? c.dim(` · $${journal.totalCost.toFixed(4)} spent`) : ""}`,
+  );
+  if (journal.stoppedBecause) info(c.dim(`stopped because: ${journal.stoppedBecause}`));
+
+  const started = Date.now();
+  const result = await runScene(scene, journal.goal, {
+    resumeFrom,
+    maxNodeRuns: opts.maxRuns,
+    timeoutMs: opts.timeout ? opts.timeout * 60_000 : undefined,
+    ...(opts.budget !== undefined ? { budget: opts.budget } : {}),
+    onEvent: createTerminalReporter({ verbose: opts.verbose }),
+  });
+
+  return report(scene, result, started);
 }
 
 async function cmdModels(filter: string | undefined): Promise<number> {
@@ -428,6 +512,13 @@ async function main(): Promise<number> {
     case "run":
       return cmdRun(rest[0], rest[1], {
         port: num(values.port),
+        maxRuns: num(values["max-runs"]),
+        timeout: num(values.timeout),
+        budget: num(values.budget),
+        verbose: values.verbose ?? false,
+      });
+    case "resume":
+      return cmdResume(rest[0], {
         maxRuns: num(values["max-runs"]),
         timeout: num(values.timeout),
         budget: num(values.budget),

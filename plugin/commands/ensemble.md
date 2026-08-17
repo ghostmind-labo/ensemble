@@ -15,7 +15,9 @@ Follow the skill's workflow:
    choosing the right pattern (jury, score gate, pipeline) and casting models
    deliberately — cheap models for volume work, a strong model at the gate.
 3. `ensemble validate` it (free) before any run; `ensemble skills` / `ensemble mcp` show what agent nodes can use.
-4. Run it with their goal, then read `.ensemble/runs/<id>/state.json` and report the
-   result — including per-node cost.
+4. Run it with their goal — set `--budget` when iterating or when cost matters — then
+   read `.ensemble/runs/<id>/state.json` and report the result, including per-node
+   cost from `costs.json`. If a run stopped early (budget, failure, timeout),
+   continue it with `ensemble resume <run-dir>` rather than restarting.
 5. If the result is weak, revise the scene (prompts, models, thresholds, topology)
    and re-run. Offer `ensemble serve` if the user wants to watch live.
