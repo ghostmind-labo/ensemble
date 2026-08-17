@@ -1,6 +1,6 @@
 ---
 name: ensemble
-description: "Author and run multi-model agent scenes with @ghostmind-dev/ensemble. Use when the user wants several AI models working together on a goal — a jury/second opinion from other vendors, a score-gated improve-until-good loop, a research→critique→write pipeline, or any multi-agent workflow where each node can be a different model (via OpenRouter) or a tool-using agent with MCP servers and scoped skills. Trigger on: 'ensemble', 'scene', 'multi-model', 'jury', 'ask several models', 'agent graph/workflow/team', or requests to build/modify/run a scene (.mts) file. Covers writing scenes, validating, running under a cost cap, resuming a stopped run, operating runs through the ensemble MCP tools (run_scene/run_status/peek_state/stop_run/resume_run), watching live, reading results, and revising a scene based on what a run produced."
+description: "Author and run multi-model agent scenes with @ghostmind-dev/ensemble. Use when the user wants several AI models working together on a goal — a jury/second opinion from other vendors, a score-gated improve-until-good loop, a research→critique→write pipeline, or any multi-agent workflow where each node can be a different model (via OpenRouter) or a tool-using agent with MCP servers and scoped skills. Trigger on: 'ensemble', 'scene', 'multi-model', 'jury', 'ask several models', 'agent graph/workflow/team', or requests to build/modify/run a scene (.mts) file. Covers writing scenes, validating, running under a cost cap, resuming a stopped run, answering a scene that paused for human or agent approval (runtime: \"ask\"), operating runs through the ensemble MCP tools (run_scene/run_status/peek_state/stop_run/resume_run), watching live, reading results, and revising a scene based on what a run produced."
 ---
 
 # ensemble
@@ -94,6 +94,11 @@ its reply is recorded but nothing is harvested.
   answers. Built-ins are read-only: `read_file`, `list_files`, `glob`, `grep`,
   `fetch_url`; there is **no bash/write/edit** by design. Disable one with
   `tools: { grep: false }`. Add MCP servers per node with `mcp: ["name"]`.
+- **`runtime: "ask"`** makes no model call at all — it **pauses the run** until
+  someone supplies its `outputs`. Declares `question` (what to ask) and `outputs`
+  (the state keys the answer must fill); never `model`/`prompt`/`mcp`/`skills`.
+  Free, and durable: the question lives in the journal, so the run can wait days.
+  See §3 for how to answer one.
 - **Agent nodes cost real money.** Recent tool results are resent each turn (results
   older than 6 calls are auto-pruned to stubs); a vague job ("audit everything") still
   compounds — a real example dropped $0.44 → $0.05 just by narrowing the prompt. Give
@@ -129,14 +134,15 @@ working instead of blocking on a shell.
 |---|---|
 | `validate_scene` | free pre-flight — always before spending |
 | `run_scene(file, goal, budget?)` | async start → runId |
-| `run_status(runId)` | running/stopped/completed · position · spend · recent activity |
+| `run_status(runId)` | running/**waiting**/stopped/completed · position · spend · recent activity |
 | `peek_state(runId, keys?)` | read the blackboard mid-run (clipped values) |
 | `stop_run(runId)` | abort safely — position journalled, resumable |
-| `resume_run(runId, budget?)` | continue from the checkpoint, cumulative budget |
+| `resume_run(runId, budget?, answers?)` | continue from the checkpoint; `answers` answers an ask node |
 | `list_runs()` | what exists, what's resumable |
 
 The loop: start with a low budget → poll `run_status` → `peek_state` at the partial
 work → stop if it's going sideways, resume with a higher cap only if it earned it.
+If status is **`waiting`**, the scene is asking a question — answer it (see §3).
 
 The CLI does the same jobs when there is a shell and no MCP host:
 
@@ -195,6 +201,34 @@ measured metric instead of an opinion.
 
 **Pipeline with rejection** — research → parallel review (critic + factchecker) →
 write, with `verdict === "reject"` looping back, capped by `maxLoops`.
+
+**Human — or agent — in the loop (`runtime: "ask"`)** — a node that stops the run and
+waits for an answer. The canonical shape is an approval gate:
+
+```ts
+approval: {
+  runtime: "ask",
+  question: "Ship this draft? Reply approve or reject, and say why.",
+  inputs: ["draft"],              // context for whoever answers
+  outputs: ["verdict", "why"],    // the keys their answer must fill
+},
+// then gate on it like any other state:
+{ from: "approval", to: "publish", when: (s) => s["verdict"] === "approve" },
+```
+
+**How you answer one, as the operating agent:**
+
+1. `run_status` reports `status: "waiting"` with `waitingFor: { node, question, answerKeys }`.
+2. Decide who answers. **You may answer it yourself** — you are a legitimate
+   answerer, so if the question is within your remit, answer it. If it needs the
+   human (taste, money, risk, anything irreversible), relay the question to them
+   verbatim and wait for their reply.
+3. `resume_run { runId, answers: { <answerKeys> } }`. The run continues from the
+   pause; nothing already paid for re-runs.
+
+Resuming **without** the answers parks again on the same question rather than
+skipping the gate — so a gate cannot be bypassed by retrying. CLI equivalent:
+`ensemble resume <run-dir> --answer verdict=approve --answer why="…"`.
 
 **Orchestrator + teams (council)** — composes the others at scale: one framing node
 writes `frame`/`constraints` that every later node reads (never re-litigated);

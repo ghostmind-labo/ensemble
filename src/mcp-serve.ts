@@ -97,7 +97,7 @@ export function buildEnsembleServer(root = process.cwd()): McpServer {
   async function launch(
     scene: Awaited<ReturnType<typeof loadScene>>,
     goal: string,
-    opts: { budget?: number; resumeFrom?: ReturnType<typeof readJournal> },
+    opts: { budget?: number; resumeFrom?: ReturnType<typeof readJournal>; answers?: State },
   ): Promise<{ runId: string }> {
     const abort = new AbortController();
     const recent: RunEvent[] = [];
@@ -108,6 +108,7 @@ export function buildEnsembleServer(root = process.cwd()): McpServer {
     const promise = runScene(scene, goal, {
       ...(opts.budget !== undefined ? { budget: opts.budget } : {}),
       ...(opts.resumeFrom ? { resumeFrom: opts.resumeFrom } : {}),
+      ...(opts.answers ? { answers: opts.answers } : {}),
       signal: abort.signal,
       onEvent: (e) => {
         if (e.type === "run:start") announce(e.runId);
@@ -135,9 +136,11 @@ export function buildEnsembleServer(root = process.cwd()): McpServer {
     const running = handle !== undefined && handle.result === undefined;
     const status = running
       ? "running"
-      : handle?.result?.ok === true || (journal && journal.resumeAt === undefined)
-        ? "completed"
-        : "stopped"; // early stop — resumable
+      : journal?.pending
+        ? "waiting" // parked on an ask node — needs an answer, not a retry
+        : handle?.result?.ok === true || (journal && journal.resumeAt === undefined)
+          ? "completed"
+          : "stopped"; // early stop — resumable
 
     return {
       runId,
@@ -153,6 +156,21 @@ export function buildEnsembleServer(root = process.cwd()): McpServer {
           }
         : {}),
       ...(handle?.result?.ok === false ? { reason: handle.result.reason } : {}),
+      // A waiting run is the one case where the next move is not "retry" but
+      // "answer" — so the question and the exact keys expected come back here.
+      ...(journal?.pending
+        ? {
+            waitingFor: {
+              node: journal.pending.node,
+              question: journal.pending.question,
+              answerKeys: journal.pending.outputs,
+            },
+            answerHint:
+              `answer with resume_run { runId: "${runId}", answers: { ` +
+              journal.pending.outputs.map((k) => `"${k}": <value>`).join(", ") +
+              ` } }`,
+          }
+        : {}),
       ...(status === "stopped" ? { resumable: true, resumeHint: `resume_run with runId "${runId}"` } : {}),
       ...(running && handle
         ? { recentActivity: handle.recent.map(eventLine).filter(Boolean).slice(-8) }
@@ -278,13 +296,17 @@ export function buildEnsembleServer(root = process.cwd()): McpServer {
     "resume_run",
     {
       description:
-        "Continue a stopped run from its checkpoint — skips everything already paid for; cost stays cumulative in the same run dir. Budget (if given) is the new TOTAL cap.",
+        "Continue a stopped OR waiting run. Skips everything already paid for; cost stays cumulative in the same run dir. If run_status shows `waitingFor`, pass `answers` with those exact keys — that is how you answer an ask node (you can answer it yourself, or relay a human's answer). Budget (if given) is the new TOTAL cap.",
       inputSchema: {
         runId: z.string(),
         budget: z.number().positive().optional().describe("New cumulative USD cap"),
+        answers: z
+          .record(z.unknown())
+          .optional()
+          .describe("State keys to inject, answering an ask node — use the keys from run_status.waitingFor.answerKeys"),
       },
     },
-    async ({ runId, budget }) => {
+    async ({ runId, budget, answers }) => {
       const handle = live.get(runId);
       if (handle && !handle.result) return failure(`run ${runId} is still running — stop_run first`);
 
@@ -302,15 +324,31 @@ export function buildEnsembleServer(root = process.cwd()): McpServer {
         return failure(`the scene this run came from is no longer valid: ${sceneProblems(err)}`);
       }
 
+      // Resuming a parked run without its answer would just park again on the
+      // same question — say so instead of burning a round trip.
+      const pending = resumeFrom.journal.pending;
+      if (pending) {
+        const supplied = answers ?? {};
+        const missing = pending.outputs.filter((k) => supplied[k] === undefined);
+        if (missing.length > 0) {
+          return failure(
+            `run ${runId} is waiting on "${pending.node}": ${pending.question} — ` +
+              `resume it with answers for: ${missing.join(", ")}`,
+          );
+        }
+      }
+
       const sceneChanged = hashScene(resumeFrom.journal.scene.file) !== resumeFrom.journal.scene.hash;
       await launch(scene, resumeFrom.journal.goal, {
         resumeFrom,
         ...(budget !== undefined ? { budget } : {}),
+        ...(answers ? { answers: answers as State } : {}),
       });
       return json({
         runId,
         resumed: true,
         at: resumeFrom.journal.resumeAt,
+        ...(pending ? { answered: pending.outputs } : {}),
         spentSoFar: resumeFrom.journal.totalCost,
         ...(sceneChanged ? { warning: "scene file changed since the run started — maxLoops counters are keyed by edge order and may no longer line up" } : {}),
         next: "poll run_status",

@@ -50,6 +50,12 @@ export interface RunOptions {
    * the same run directory, and keeps accumulating cost and node counts.
    */
   resumeFrom?: ResumeState;
+  /**
+   * State keys supplied from outside — how an `ask` node gets answered. Merged
+   * into the blackboard before the walk continues, so the ask node it was parked
+   * on finds its outputs already present and falls through.
+   */
+  answers?: State;
   /** Receives every run event. Omit for a silent run. */
   onEvent?: EventSink;
   /** Aborts the run; model nodes abort mid-stream, agent nodes between nodes. */
@@ -68,6 +74,21 @@ export interface NodeCost {
 export const JOURNAL_VERSION = 1;
 
 /**
+ * A run parked on an `ask` node, waiting to be answered.
+ *
+ * Durable by construction: it lives in the journal, so the answerer can take
+ * minutes or days, the process can die, and the question survives. Whether a
+ * human answers it in the viewer or an agent answers it with `resume_run` is
+ * not the engine's concern — both just supply the missing state keys.
+ */
+export interface PendingAsk {
+  node: string;
+  question: string;
+  /** State keys the answer must provide. */
+  outputs: string[];
+}
+
+/**
  * Everything the executor needs to pick a run back up — the graph position that
  * `state.json` alone cannot supply.
  *
@@ -83,6 +104,8 @@ export interface Journal {
   scene: { file: string; name: string; hash: string };
   goal: string;
   resumeAt?: string;
+  /** Set while the run is parked on an ask node. Cleared once answered. */
+  pending?: PendingAsk;
   /** Edge index → times taken, so `maxLoops` budgets survive the stop. */
   edgeLoops: Array<[number, number]>;
   nodeRuns: number;
@@ -137,6 +160,8 @@ export function readJournal(runDir: string): ResumeState {
   if (!journal.resumeAt) {
     throw new Error(`that run already reached its exit — there is nothing left to resume`);
   }
+  // A parked run stays resumable; whether the caller has the answer it needs is
+  // the caller's business — `journal.pending` tells them what is being asked.
 
   const statePath = join(dir, "state.json");
   const state = existsSync(statePath) ? (JSON.parse(readFileSync(statePath, "utf8")) as State) : {};
@@ -146,7 +171,19 @@ export function readJournal(runDir: string): ResumeState {
 
 export type RunResult =
   | { ok: true; state: State; runDir: string; totalCost: number; runId: string }
-  | { ok: false; reason: string; state: State; runDir: string; runId: string };
+  | {
+      ok: false;
+      reason: string;
+      state: State;
+      runDir: string;
+      runId: string;
+      /**
+       * Present when the run *paused* on an ask node rather than failed. Callers
+       * that treat every `ok: false` as an error would report a waiting run as
+       * broken, so check this first.
+       */
+      waiting?: PendingAsk;
+    };
 
 /** Stable, sortable, and filesystem-safe: 20260809-191245-researchflow */
 function runId(scene: Scene): string {
@@ -286,9 +323,43 @@ async function callOnce(
 async function runNode(
   ctx: NodeCallCtx,
   node: string,
-): Promise<{ values: State; result: NodeResult } | { error: string; result?: NodeResult }> {
+): Promise<
+  | { values: State; result: NodeResult }
+  | { error: string; result?: NodeResult }
+  | { pending: PendingAsk }
+> {
   const spec = ctx.scene.nodes[node];
   if (!spec) return { error: `no such node: ${node}` };
+
+  // An ask node is pure wait: it either finds its answer already in state (an
+  // answered resume) and falls through, or it parks the run.
+  if (runtimeOf(ctx.scene, spec) === "ask") {
+    const outputs = spec.outputs ?? [];
+    const missing = outputs.filter((key) => ctx.state[key] === undefined);
+    if (missing.length === 0) {
+      ctx.emit({ type: "node:start", node, model: "ask", skills: [] });
+      ctx.emit({
+        type: "node:end",
+        node,
+        ok: true,
+        text: outputs.map((k) => `${k}: ${String(ctx.state[k])}`).join("\n"),
+        providerID: "ask",
+        modelID: "ask",
+        cost: 0,
+        tokensIn: 0,
+        tokensOut: 0,
+        ms: 0,
+      });
+      return { values: {}, result: { text: "", modelID: "ask", providerID: "ask", cost: 0, tokensIn: 0, tokensOut: 0 } };
+    }
+    return {
+      pending: {
+        node,
+        question: spec.question ?? `Provide: ${missing.join(", ")}`,
+        outputs: missing,
+      },
+    };
+  }
 
   const model = spec.model ?? ctx.scene.defaults.model ?? "";
   const started = Date.now();
@@ -400,7 +471,8 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
   mkdirSync(runDir, { recursive: true });
 
   // Everything below picks up where the journal left off, or starts clean.
-  const state: State = resume ? { ...resume.state, goal } : { goal };
+  // `answers` land last so they satisfy the ask node the run was parked on.
+  const state: State = resume ? { ...resume.state, ...(opts.answers ?? {}), goal } : { goal, ...(opts.answers ?? {}) };
   let totalCost = resume?.journal.totalCost ?? 0;
   let nodeRuns = resume?.journal.nodeRuns ?? 0;
   const edgeLoops = new Map<number, number>(resume?.journal.edgeLoops ?? []);
@@ -439,6 +511,9 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
   // The target still owed execution. Kept in step with the cursor so that
   // whenever we checkpoint, the journal names exactly what to run next.
   let resumeAt: string | undefined = scene.entry;
+  // Set only while parked on an ask node; the journal carries it so the question
+  // outlives the process.
+  let pending: PendingAsk | undefined;
 
   const checkpoint = (stoppedBecause?: string): void => {
     writeFileSync(join(runDir, "state.json"), JSON.stringify(state, null, 2), "utf8");
@@ -457,6 +532,7 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
       scene: { file: scene.file, name: scene.name, hash: sceneHash },
       goal,
       ...(resumeAt !== undefined ? { resumeAt } : {}),
+      ...(pending !== undefined ? { pending } : {}),
       edgeLoops: [...edgeLoops],
       nodeRuns,
       totalCost,
@@ -520,7 +596,17 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
         members.map((member) => runNode({ ...ctx, state: snapshot }, member)),
       );
 
+      // A parked ask node stops the walk — but only after its siblings' work is
+      // banked below, so nothing already paid for is lost to the pause.
+      let parked: PendingAsk | undefined;
+
       for (const [index, outcome] of outcomes.entries()) {
+        if ("pending" in outcome) {
+          parked ??= outcome.pending;
+          // An ask node never ran, so it must not count against maxNodeRuns.
+          nodeRuns -= 1;
+          continue;
+        }
         if (outcome.result) {
           totalCost += outcome.result.cost;
           recordCost(members[index] ?? "?", outcome.result);
@@ -528,6 +614,27 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
         if ("error" in outcome) return fail(outcome.error);
         Object.assign(state, outcome.values);
       }
+
+      if (parked) {
+        // resumeAt already names this target, so answering and resuming re-enters
+        // here — and the ask node then finds its outputs present and falls through.
+        pending = parked;
+        checkpoint(`waiting for an answer to "${parked.question}"`);
+        emit({ type: "state", state: { ...state } });
+        emit({ type: "node:ask", node: parked.node, question: parked.question, outputs: parked.outputs });
+        emit({
+          type: "run:end",
+          ok: false,
+          reason: `waiting on "${parked.node}"`,
+          state,
+          totalCost,
+          nodeRuns,
+          ...(budget !== undefined ? { budget } : {}),
+          waiting: parked,
+        });
+        return { ok: false, reason: `waiting on "${parked.node}": ${parked.question}`, state, runDir, runId: id, waiting: parked };
+      }
+
       checkpoint();
       emit({ type: "state", state: { ...state } });
 

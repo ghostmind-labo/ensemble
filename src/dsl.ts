@@ -21,8 +21,11 @@ export type State = Record<string, unknown>;
  * - `"agent"`: our own tool-calling loop. Gets read-only built-in tools plus any
  *   MCP servers it allowlists, and loops until the model stops asking for tools.
  *   Pure do.
+ * - `"ask"`: no model call at all. The run **pauses** here until something outside
+ *   it supplies the node's `outputs` — a human in the viewer, or an agent calling
+ *   `resume_run` with answers. Pure wait.
  */
-export type NodeRuntime = "model" | "agent";
+export type NodeRuntime = "model" | "agent" | "ask";
 
 export interface NodeSpec {
   /** `openrouter/<vendor>/<model>`, e.g. "openrouter/anthropic/claude-sonnet-5". */
@@ -30,6 +33,11 @@ export interface NodeSpec {
   runtime?: NodeRuntime;
   /** System-style instruction for this node. */
   prompt?: string;
+  /**
+   * ask nodes only — what to ask whoever answers. Shown in the viewer and
+   * returned by `run_status`, so it must make sense with no other context.
+   */
+  question?: string;
   /** State keys injected into the node's prompt as context. */
   inputs?: string[];
   /** State keys harvested from the node's fenced json block. */

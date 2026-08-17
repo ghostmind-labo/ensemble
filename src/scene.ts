@@ -42,8 +42,9 @@ const identifier = z
 const nodeSchema = z
   .object({
     model: z.string().optional(),
-    runtime: z.enum(["model", "agent"]).optional(),
+    runtime: z.enum(["model", "agent", "ask"]).optional(),
     prompt: z.string().optional(),
+    question: z.string().optional(),
     inputs: z.array(z.string()).optional(),
     outputs: z.array(z.string()).optional(),
     skills: z.array(z.string()).optional(),
@@ -74,7 +75,7 @@ const sceneSchema = z
     defaults: z
       .object({
         model: z.string().optional(),
-        runtime: z.enum(["model", "agent"]).optional(),
+        runtime: z.enum(["model", "agent", "ask"]).optional(),
         tools: z.record(z.boolean()).optional(),
         temperature: z.number().min(0).max(2).optional(),
       })
@@ -103,7 +104,7 @@ export function resolveTarget(scene: Scene, target: string): string[] {
 }
 
 /** Effective runtime for a node, with scene default then "model" as fallback. */
-export function runtimeOf(scene: Scene, node: NodeSpec): "model" | "agent" {
+export function runtimeOf(scene: Scene, node: NodeSpec): "model" | "agent" | "ask" {
   return node.runtime ?? scene.defaults.runtime ?? "model";
 }
 
@@ -141,6 +142,28 @@ function checkReferences(scene: Scene, reg: Registry): string[] {
   }
 
   for (const [name, node] of Object.entries(scene.nodes)) {
+    const runtime = runtimeOf(scene, node);
+
+    // An ask node never calls a model — it waits for someone to supply its
+    // outputs — so a model is not required, and anything model-shaped is a slip.
+    if (runtime === "ask") {
+      if ((node.outputs ?? []).length === 0) {
+        problems.push(
+          `node "${name}" is runtime "ask" but declares no outputs — ` +
+            `an ask node exists to collect state keys, so it must name at least one`,
+        );
+      }
+      for (const field of ["skills", "mcp", "tools", "model", "prompt", "temperature", "maxTurns"] as const) {
+        if (node[field] !== undefined) {
+          problems.push(
+            `node "${name}" is runtime "ask" but declares ${field} — ` +
+              `ask nodes make no model call; use "question" for what to ask`,
+          );
+        }
+      }
+      continue;
+    }
+
     const model = node.model ?? scene.defaults.model;
     if (!model) {
       problems.push(`node "${name}" has no model and defaults.model is unset`);
@@ -148,7 +171,12 @@ function checkReferences(scene: Scene, reg: Registry): string[] {
       problems.push(`node "${name}" model "${model}" must be "<provider>/<model>"`);
     }
 
-    const runtime = runtimeOf(scene, node);
+    if (node.question !== undefined) {
+      problems.push(
+        `node "${name}" declares question but is runtime "${runtime}" — ` +
+          `question belongs to ask nodes; use prompt instead`,
+      );
+    }
 
     if (runtime === "model") {
       // A model node is a pure HTTP call — granting it skills/MCP/tools would
