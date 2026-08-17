@@ -5,9 +5,10 @@ import { runScene, readJournal, hashScene } from "./engine.ts";
 import { createTerminalReporter } from "./reporter.ts";
 import { toMermaid, toTerminal, toHtml } from "./view.ts";
 import { c, info, error, duration } from "./log.ts";
+import { packageVersion } from "./version.ts";
 
 const USAGE = `
-${c.bold("ensemble")} — multi-model agent ensembles
+${c.bold("ensemble")} ${c.dim(`v${packageVersion()}`)} — multi-model agent ensembles
 
 ${c.bold("Usage")}
   ensemble run <scene.ts> "<goal>"   Execute a scene against a goal
@@ -22,6 +23,7 @@ ${c.bold("Usage")}
   ensemble mcp login <server>          Authorize an MCP server that needs OAuth
   ensemble mcp logout <server>         Forget that server's stored tokens
   ensemble models [filter]             List models available through OpenRouter
+  ensemble version                     Print the installed version
 
 ${c.bold("Options")}
   --port <n>        Attach to an opencode server already on this port
@@ -33,7 +35,28 @@ ${c.bold("Options")}
   --mermaid         view: print Mermaid source instead of the terminal sketch
   --html [file]     view: write a standalone HTML page and print its path
   --no-open         serve: do not launch a browser
+  --version, -V     Print the installed version
   --help
+
+${c.bold("First time")}
+  1. export OPENROUTER_API_KEY=sk-or-...      ${c.dim("the only credential needed")}
+  2. write one file, my.mts:                  ${c.dim("no package.json, no install")}
+       import { scene } from "@ghostmind-dev/ensemble";
+       export default scene({
+         name: "ask",
+         defaults: { model: "openrouter/anthropic/claude-sonnet-5" },
+         nodes: { answer: { outputs: ["answer"] } },
+         entry: "answer", exit: "answer",
+       });
+  3. ensemble validate my.mts                 ${c.dim("free — catches mistakes")}
+  4. ensemble run my.mts "your goal" --budget 0.25
+
+${c.bold("Driving it from an AI agent")} ${c.dim("(Claude Code, or any MCP host)")}
+  claude mcp add ensemble -s user -- ensemble mcp serve
+
+  Registers ensemble's tools once, for every project: the agent starts runs,
+  polls status, peeks at state mid-run, stops and resumes them — no shell.
+  ${c.dim("Then just ask: \"build me a scene that…\" — see `ensemble mcp serve`.")}
 `.trim();
 
 async function cmdSkills(): Promise<number> {
@@ -469,12 +492,16 @@ async function cmdModels(filter: string | undefined): Promise<number> {
 }
 
 async function main(): Promise<number> {
-  const { values, positionals } = parseArgs({
-    args: process.argv.slice(2),
-    allowPositionals: true,
-    options: {
-      help: { type: "boolean", short: "h", default: false },
-      verbose: { type: "boolean", short: "v", default: false },
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args: process.argv.slice(2),
+      allowPositionals: true,
+      options: {
+        help: { type: "boolean", short: "h", default: false },
+        // -v is verbose (long-standing); -V is version, as is conventional.
+        version: { type: "boolean", short: "V", default: false },
+        verbose: { type: "boolean", short: "v", default: false },
       port: { type: "string" },
       "max-runs": { type: "string" },
       timeout: { type: "string" },
@@ -482,13 +509,27 @@ async function main(): Promise<number> {
       mermaid: { type: "boolean", default: false },
       // Optional value: `--html` alone picks a filename from the scene name.
       html: { type: "string" },
-      // node:util parseArgs has no --no-x negation, so it is its own flag.
-      "no-open": { type: "boolean", default: false },
-      logout: { type: "boolean", default: false },
-    },
-  });
+        // node:util parseArgs has no --no-x negation, so it is its own flag.
+        "no-open": { type: "boolean", default: false },
+        logout: { type: "boolean", default: false },
+      },
+    });
+  } catch (err) {
+    // An unknown flag is a typo, not a crash — parseArgs throws, and the raw
+    // stack trace tells the user nothing about what to do next.
+    error(`${err instanceof Error ? err.message.split(". To specify")[0] : String(err)}\n`);
+    info(USAGE);
+    return 2;
+  }
 
+  const { values, positionals } = parsed;
   const [command, ...rest] = positionals;
+
+  // Version is checked before anything else so it works with no command.
+  if (values.version || command === "version") {
+    info(packageVersion());
+    return 0;
+  }
 
   if (values.help || !command) {
     info(USAGE);
