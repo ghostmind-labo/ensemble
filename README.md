@@ -166,20 +166,22 @@ down after. Nothing runs in the background between sessions.
 
 ### Then per-folder, nothing to set up
 
-Runs are **cwd-relative**, so the folder you are in decides three things — with no
-per-project install, config file, or init step:
+Runs are **cwd-relative**, and everything a project owns lives under one folder — no
+per-project install and no init step:
 
 ```
 my-project/
-├── review.mts              ← your scene(s): just files, anywhere
-├── .ensemble/runs/…        ← run artifacts land here, created on first run
-├── ensemble.json           ← OPTIONAL: MCP servers for agent nodes
-└── .claude/skills/…        ← OPTIONAL: skills for agent nodes
+└── .ensemble/
+    ├── scenes/review.mts    ← your workflows
+    ├── ensemble.json        ← OPTIONAL: MCP servers for agent nodes
+    ├── .env                 ← OPTIONAL: secrets for that config (gitignore it)
+    └── runs/                ← run artifacts, created on first run
 ```
 
-So "a workflow per folder" is simply: **put a `.mts` file in it.** Drop `review.mts`
-in a repo and run it there — its `.ensemble/runs/` and any `ensemble.json` are that
-project's, while the tool itself stays global.
+So "a workflow per project" is simply: **put a `.mts` file in `.ensemble/scenes/`.**
+`ensemble serve` then finds it with no arguments, and `ensemble run <path>` accepts any
+path. A legacy `./ensemble.json` or `./scenes/` still loads, so older projects keep
+working — but new work goes under `.ensemble/`.
 
 ### Getting the plugin — the lowest-friction path
 

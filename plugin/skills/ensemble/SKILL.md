@@ -41,11 +41,28 @@ echo ${OPENROUTER_API_KEY:+set}                    # the ONLY required credentia
 
 - Not installed → `npm i -g @ghostmind-dev/ensemble`.
 - `OPENROUTER_API_KEY` unset → stop and ask the user; nothing runs without it.
-- **Name scenes `.mts`.** Then no package.json is needed — a directory containing only
-  `my.mts` works, and the `@ghostmind-dev/ensemble` import resolves against the global
-  install (a project-local install, if present, wins). Use `.ts` only where the
-  project already has `"type": "module"`.
 - Node ≥ 22.6. No other install, no subprocess, no external agent.
+
+### Where things go — everything under `.ensemble/`
+
+**Write new scenes to `.ensemble/scenes/<name>.mts` at the project root.** Do not
+scatter `.mts` files elsewhere; one folder is what makes a project's workflows
+discoverable and lets `ensemble serve` find them with no arguments.
+
+```
+my-project/
+└── .ensemble/
+    ├── scenes/review.mts       ← the workflows you author
+    ├── ensemble.json           ← MCP servers / sources (optional)
+    ├── .env                    ← secrets for that config (optional, gitignore it)
+    └── runs/                   ← run artifacts, created for you
+```
+
+`mkdir -p .ensemble/scenes` if it does not exist yet. **Name scenes `.mts`** — then no
+package.json is needed and the `@ghostmind-dev/ensemble` import resolves against the
+global install; use `.ts` only where the project already has `"type": "module"`.
+`ensemble run <path>` accepts any path, and a legacy `./ensemble.json` or `./scenes/`
+still works — but new work goes under `.ensemble/`.
 
 ## 1 · The scene format
 
@@ -195,9 +212,14 @@ How the server works, so its behaviour doesn't surprise you:
 
 - **No daemon, no port.** The MCP host spawns `ensemble mcp serve` on stdio per
   session and reaps it after. Several instances coexisting is normal and harmless.
-- **cwd-scoped.** The server sees the project it was spawned in: that directory's
-  `.ensemble/runs`, `ensemble.json`, and skills. `list_runs` returning `[]` usually
-  means "wrong project", not "no runs".
+- **cwd-scoped — this is how it knows your project.** The host spawns it with your
+  session's directory, so it reads that project's `.ensemble/` (runs, config, scenes)
+  with nothing to configure. `list_runs` reports the bound `project.root` and the
+  scenes it can see: check it when results look wrong, because `[]` usually means
+  "different project than you think", not "no runs".
+- **One project per server.** `run_scene` refuses a scene outside its project rather
+  than running it against the wrong config — use the MCP server (or CLI) in that
+  project instead.
 - **Everything reads the run directory** (`state/costs/journal.json`, checkpointed
   after every node) — so status/peek/resume work across instances and survive
   crashes. The one exception is **`stop_run`**: it needs the in-memory abort handle,
@@ -342,10 +364,11 @@ ensemble mcp       # servers CONNECTED (not just declared) + every tool they exp
   (`.claude/skills/`, `~/.claude/skills/`, `.opencode/`, `.agents/` variants). A
   node's `skills: ["name"]` inlines those files into its system prompt — that node's
   only, by construction.
-- **MCP servers**: four sources, first definition wins —
-  `./ensemble.json` → `./.mcp.json` (Claude Code's) →
-  `~/.config/ensemble/ensemble.json` → `~/.claude.json` (Claude Code's). Servers the
-  user already wired into Claude Code work with no reconfiguration.
+- **MCP servers**: five sources, first definition wins —
+  `.ensemble/ensemble.json` (**put yours here**) → `./ensemble.json` (legacy) →
+  `./.mcp.json` (Claude Code's) → `~/.config/ensemble/ensemble.json` →
+  `~/.claude.json` (Claude Code's). Servers the user already wired into Claude Code
+  work with no reconfiguration.
 - **Transports**: stdio, Streamable HTTP (incl. stateless), SSE auto-fallback.
 - **Auth**: none, header token, or **OAuth**: `ensemble mcp login <server>` opens the
   browser, catches the redirect, stores tokens in `~/.config/ensemble/auth.json`.
