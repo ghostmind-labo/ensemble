@@ -1,6 +1,6 @@
 ---
 name: ensemble
-description: "Author and run multi-model agent scenes with @ghostmind-dev/ensemble. Use when the user wants several AI models working together on a goal — a jury/second opinion from other vendors, a score-gated improve-until-good loop, a research→critique→write pipeline, or any multi-agent workflow where each node can be a different model (via OpenRouter) or a tool-using agent with MCP servers and scoped skills. Trigger on: 'ensemble', 'scene', 'multi-model', 'jury', 'ask several models', 'agent graph/workflow/team', or requests to build/modify/run a scene (.mts) file. Covers writing scenes, validating, running under a cost cap, resuming a stopped run, answering a scene that paused for human or agent approval (runtime: \"ask\"), operating runs through the ensemble MCP tools (run_scene/run_status/peek_state/stop_run/resume_run), watching live, reading results, and revising a scene based on what a run produced."
+description: "Author and run multi-model agent scenes with @ghostmind-dev/ensemble. Use when the user wants several AI models working together on a goal — a jury/second opinion from other vendors, a score-gated improve-until-good loop, a research→critique→write pipeline, or any multi-agent workflow where each node can be a different model (via OpenRouter) or a tool-using agent with MCP servers and scoped skills. Trigger on: 'ensemble', 'scene', 'multi-model', 'jury', 'ask several models', 'agent graph/workflow/team', or requests to build/modify/run a scene (.mts) file. Covers deciding whether a task needs a scene at all, writing scenes, validating, running under a cost cap, resuming a stopped run, answering a scene that paused for human or agent approval (runtime: \"ask\"), operating runs through the ensemble MCP tools (run_scene/run_status/peek_state/stop_run/resume_run), watching live, reading results, and revising a scene based on what a run produced."
 ---
 
 # ensemble
@@ -10,12 +10,29 @@ TypeScript file. Each node is either a direct OpenRouter model call (any vendor)
 tool-using agent that loops over MCP and built-in tools. Nodes share a state
 blackboard, wired by conditional edges that are plain TypeScript predicates.
 
-You — the model reading this — are the intended operator. The loop you own:
-**author a scene → `validate` (free) → `run` → read the run artifacts → revise the
-scene when the results say so.** Do not accept a weak result when a one-line change
-to a prompt, model, or threshold would fix it.
+You — the model reading this — are the intended operator AND the intended author.
+The loop you own: **author a scene → `validate` (free) → `run` cheap → read the run
+artifacts → revise the scene when the results say so.** Do not accept a weak result
+when a one-line change to a prompt, model, or threshold would fix it.
 
-## 0 · Check the setup (once per session)
+## 0 · Should this be a scene at all?
+
+Every scene costs real money on every run, so build one only when the shape of the
+work earns it. **One model answering one question is not a scene** — just answer it,
+or make one API call. A scene earns its cost when the task needs at least one of:
+
+- **independence** — several models answering blind, then compared (jury)
+- **a measurable gate** — work loops until a scored bar passes, not until it "feels done"
+- **parallel fan-out with a merge** — teams working concurrently, results synthesised
+- **tool work + synthesis** — an agent node gathers evidence, other nodes reason on it
+- **a durable pause** — a human or agent must approve mid-flow (`ask`)
+
+Right-size it: every node must **produce, judge, gate, or merge** — a node doing none
+of those is decoration; delete it. Prefer the smallest scene that exercises the
+mechanism (2–4 nodes), prove it on a cheap run, and only then widen. A 15-node
+council for a task a 2-node score-gate handles is inflation, not thoroughness.
+
+## 0.5 · Check the setup (once per session)
 
 ```bash
 which ensemble || npm ls @ghostmind-dev/ensemble   # global bin or local dep
@@ -75,6 +92,11 @@ export default scene({
 });
 ```
 
+Every `NodeSpec` field: `model`, `runtime` ("model" | "agent" | "ask"), `prompt`
+(system-style instruction), `question` (ask only), `inputs`, `outputs`, `skills`,
+`mcp`, `tools`, `maxTurns` (agent only, default 12), `temperature`, `description`.
+`defaults` may set `model`, `runtime`, `tools`, `temperature` scene-wide.
+
 ### How data flows (know this before authoring)
 
 Every node receives: the run's **goal**, plus the current value of each declared
@@ -83,6 +105,31 @@ each node's prompt telling it to end with a fenced json block containing exactly
 `outputs` keys; the engine parses that block into state (one automatic retry if the
 model gets it wrong, then the run fails loudly). A node with no `outputs` is legal —
 its reply is recorded but nothing is harvested.
+
+### How the walk moves (edge semantics — load-bearing)
+
+After a target completes, the engine scans `edges` **in array order and takes the
+FIRST edge that matches** (its `from` matches, its `when` holds, its `maxLoops` has
+budget left). Everything about gates follows from this:
+
+```ts
+edges: [
+  // loop-back FIRST: while the bar isn't met (and budget remains), revise…
+  { from: "judge", to: "writer",  when: (s) => Number(s["score"]) < 8, maxLoops: 3 },
+  // …otherwise fall through to the unconditional advance.
+  { from: "judge", to: "publish" },
+]
+```
+
+Swap those two lines and the loop-back is dead code — the unconditional edge always
+wins. When `maxLoops` is spent the conditional edge stops matching and the walk falls
+through to the next edge: that is the "proceed with the best we have" behaviour, by
+construction. Running out of matching edges at (or without) the `exit` is a clean
+finish; anywhere else it fails naming the stuck node.
+
+**Groups**: members run concurrently against the SAME state snapshot (none sees a
+sibling's output), then merge at a barrier. Edges from the group name fire once, after
+the merge.
 
 ### Rules that matter
 
@@ -144,6 +191,29 @@ The loop: start with a low budget → poll `run_status` → `peek_state` at the 
 work → stop if it's going sideways, resume with a higher cap only if it earned it.
 If status is **`waiting`**, the scene is asking a question — answer it (see §3).
 
+How the server works, so its behaviour doesn't surprise you:
+
+- **No daemon, no port.** The MCP host spawns `ensemble mcp serve` on stdio per
+  session and reaps it after. Several instances coexisting is normal and harmless.
+- **cwd-scoped.** The server sees the project it was spawned in: that directory's
+  `.ensemble/runs`, `ensemble.json`, and skills. `list_runs` returning `[]` usually
+  means "wrong project", not "no runs".
+- **Everything reads the run directory** (`state/costs/journal.json`, checkpointed
+  after every node) — so status/peek/resume work across instances and survive
+  crashes. The one exception is **`stop_run`**: it needs the in-memory abort handle,
+  so only the instance that started a run can stop it.
+- A run whose server process dies is not lost — it stops *resumably*, like every
+  other early stop.
+
+**Budget discipline** — the default posture, not an option:
+
+1. **Never start a run without a budget.** Exploring a new scene: `0.10–0.25`.
+   A proven scene doing real work: `0.50–1`. Let `ENSEMBLE_BUDGET` be the backstop.
+2. The cap is a **pause button**, not a failure: read the partial state, resume with
+   a higher total only if the work earned it. Never restart — resume.
+3. After any run, read `costs.json` before revising: fix the node that burned the
+   money (usually an agent node with too wide a job), not the one that's cheap.
+
 The CLI does the same jobs when there is a shell and no MCP host:
 
 ```bash
@@ -166,11 +236,10 @@ cat .ensemble/runs/<timestamp>-<scene>/journal.json # graph position — what re
 
 **A stopped run is never a dead end.** Budget spent, node failed, ctrl-C, timeout —
 `ensemble resume <run-dir>` continues from the checkpoint, skipping everything already
-paid for and writing into the same run dir (one cumulative `costs.json`). So the
-cheapest way to work an expensive scene is deliberately: `--budget` low, read the
-partial state, resume with a higher cap only if it earned it. Budgets apply to the
-*cumulative* total, `maxLoops` counters survive the stop, and editing the scene
-between attempts is allowed (resume warns that edge-keyed loop counters may shift).
+paid for and writing into the same run dir (one cumulative `costs.json`). Budgets
+apply to the *cumulative* total, `maxLoops` counters survive the stop, and editing the
+scene between attempts is allowed (resume warns that edge-keyed loop counters may
+shift).
 
 **Revise rather than accept.** Weak output → find the weak link in `state.json`
 (thin findings? gate never passing? judge too lenient?) and change the scene: a
@@ -229,6 +298,25 @@ approval: {
 Resuming **without** the answers parks again on the same question rather than
 skipping the gate — so a gate cannot be bypassed by retrying. CLI equivalent:
 `ensemble resume <run-dir> --answer verdict=approve --answer why="…"`.
+
+**Escalate-on-exception** — an ask node is an ordinary node, so route to it only when
+the run warrants a human. The same scene then runs unattended when routine and asks
+only when it matters:
+
+```ts
+{ from: "check", to: "approval", when: (s) => Number(s["risk"]) > 7 },
+{ from: "check", to: "publish" },     // low risk → nobody is asked
+{ from: "approval", to: "publish" },
+```
+
+**The pause test is presence, not usefulness.** An ask node parks only while its
+`outputs` keys are ABSENT from state — so an earlier node writing those keys makes
+the gate fall through silently, even with an empty value, and on a loop a key written
+once satisfies the gate forever. Use that deliberately (pre-seed `answers` on
+`run_scene` to run a gated scene non-interactively) — but for auto-approve-else-ask,
+prefer explicit routing as above with the checker writing its OWN key
+(`auto_verdict`), so skipping the human is visible in the graph, not a side effect of
+key naming.
 
 **Orchestrator + teams (council)** — composes the others at scale: one framing node
 writes `frame`/`constraints` that every later node reads (never re-litigated);
