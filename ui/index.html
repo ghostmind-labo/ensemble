@@ -47,7 +47,23 @@
   .scene b { font-weight: 600; font-size: 13px; }
   .scene span { font-size: 11px; color: var(--muted); }
   .scene.invalid b { color: var(--fail); }
-  .reg { padding: 10px 16px 16px; border-top: 1px solid var(--line); font-size: 11px; color: var(--muted); }
+  /* Registry: collapsed by default — a machine with 100 skills must not dump
+     them all into the sidebar. Each group opens on demand and scrolls. */
+  .reg { border-top: 1px solid var(--line); font-size: 11px; color: var(--muted); flex: none; }
+  .reg details { border-bottom: 1px solid var(--line); }
+  .reg details:last-child { border-bottom: none; }
+  .reg summary {
+    padding: 8px 16px; cursor: pointer; display: flex; align-items: center; gap: 6px;
+    font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted);
+    list-style: none; user-select: none;
+  }
+  .reg summary::-webkit-details-marker { display: none; }
+  .reg summary::before { content: "▸"; font-size: 9px; transition: transform .12s; }
+  .reg details[open] summary::before { transform: rotate(90deg); }
+  .reg summary:hover { background: var(--accent-soft); color: var(--accent); }
+  .reg .count { margin-left: auto; font-family: var(--mono); font-size: 10px; }
+  .reg .items { padding: 0 16px 10px; max-height: 168px; overflow-y: auto; }
+  .reg .warn { padding: 6px 16px 10px; color: var(--warn); }
   .chip {
     display: inline-block; padding: 1px 7px; margin: 2px 3px 0 0; border-radius: 999px;
     background: var(--accent-soft); color: var(--accent); font-family: var(--mono); font-size: 10px;
@@ -84,7 +100,12 @@
   button:disabled { opacity: .45; cursor: not-allowed; }
 
   .stage { position: relative; }
-  .stage svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+  /* Zoom scales ONE wrapper holding both the wires and the nodes, so their
+     relative geometry stays consistent and edges cannot drift from the cards.
+     Transforms do not affect layout, so .stage is sized explicitly in js —
+     otherwise a zoomed-in graph would have nothing to scroll to. */
+  #viewport { position: relative; transform-origin: 0 0; }
+  #viewport svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
   .layer { display: flex; gap: 26px; justify-content: center; margin-bottom: 46px; position: relative; z-index: 2; }
 
   .target { display: flex; gap: 12px; padding: 0; cursor: grab; }
@@ -131,6 +152,18 @@
     grid-area: console; border-top: 1px solid var(--line); background: var(--panel);
     display: grid; grid-template-columns: 1fr 320px; overflow: hidden;
   }
+  /* Collapsed console: only the tab strip stays, so the canvas gets the room
+     back and the panes are one click away rather than gone. */
+  body.console-collapsed { grid-template-rows: 1fr 33px; }
+  body.console-collapsed .pane,
+  body.console-collapsed .inspect { display: none; }
+  #zoombar { display: flex; align-items: center; gap: 2px; }
+  #zoombar button { padding: 6px 9px; font-family: var(--mono); }
+  #zoomlabel {
+    min-width: 42px; text-align: center; font-family: var(--mono); font-size: 11px;
+    color: var(--muted);
+  }
+  .iconbtn { padding: 6px 9px; }
   .log { overflow-y: auto; padding: 12px 16px; font-family: var(--mono); font-size: 11.5px; line-height: 1.6; }
   .log .ev { white-space: pre-wrap; word-break: break-word; }
   .log .h { color: var(--accent); font-weight: 700; margin-top: 8px; }
@@ -204,9 +237,18 @@
     <span id="spend" hidden></span>
     <button class="primary" id="run">Run</button>
     <button id="stop" disabled>Stop</button>
+    <span id="zoombar">
+      <button id="zoomout" title="Zoom out (⌘−)">−</button>
+      <span id="zoomlabel">100%</span>
+      <button id="zoomin" title="Zoom in (⌘+)">+</button>
+      <button id="zoomfit" title="Fit to window (⌘0)">fit</button>
+    </span>
+    <button class="iconbtn" id="togglebar" title="Hide/show the bottom panel (⌘\)">▾</button>
   </div>
   <div id="problems"></div>
-  <div class="stage" id="stage"><svg id="wires"></svg><div id="layers"></div></div>
+  <div class="stage" id="stage">
+    <div id="viewport"><svg id="wires"></svg><div id="layers"></div></div>
+  </div>
 </main>
 
 <footer>
@@ -242,7 +284,52 @@ const state = {
   spent: 0,            // running total for the ticker
   budget: null,        // USD cap of the current run, if any
   selected: null, running: false,
+  zoom: Number(localStorage.getItem("ensemble:zoom")) || 1,
 };
+
+// ---------------------------------------------------------------- zoom
+const ZOOM_MIN = 0.25, ZOOM_MAX = 2;
+const clampZoom = (z) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
+
+function applyZoom() {
+  const vp = $("viewport"), layers = $("layers");
+  vp.style.transform = `scale(${state.zoom})`;
+  // Transforms do not affect layout, so size the stage to the SCALED content or
+  // there is nothing to scroll to when zoomed in.
+  $("stage").style.width = `${layers.offsetWidth * state.zoom}px`;
+  $("stage").style.height = `${layers.offsetHeight * state.zoom}px`;
+  $("zoomlabel").textContent = `${Math.round(state.zoom * 100)}%`;
+  localStorage.setItem("ensemble:zoom", String(state.zoom));
+  requestAnimationFrame(wires);
+}
+
+/** Zooms about the centre of what you are looking at, not the top-left corner. */
+function setZoom(z) {
+  const main = document.querySelector("main");
+  const prev = state.zoom || 1;
+  const next = clampZoom(z);
+  if (next === prev) return;
+  // The point currently centred, in unscaled coordinates…
+  const cx = (main.scrollLeft + main.clientWidth / 2) / prev;
+  const cy = (main.scrollTop + main.clientHeight / 2) / prev;
+  state.zoom = next;
+  applyZoom();
+  // …put back under the centre at the new scale.
+  main.scrollLeft = cx * next - main.clientWidth / 2;
+  main.scrollTop = cy * next - main.clientHeight / 2;
+}
+
+/** Scale so the whole graph fits the visible canvas, never magnifying past 1:1. */
+function zoomToFit() {
+  const layers = $("layers"), main = document.querySelector("main");
+  if (!layers.offsetWidth || !layers.offsetHeight) return;
+  const padding = 48;
+  const fit = Math.min(
+    (main.clientWidth - padding) / layers.offsetWidth,
+    (main.clientHeight - padding) / layers.offsetHeight,
+  );
+  setZoom(Math.min(1, fit));
+}
 
 // ---------------------------------------------------------------- costs
 const usd = (n) => `$${n < 0.01 && n > 0 ? n.toFixed(4) : n.toFixed(2)}`;
@@ -288,11 +375,21 @@ async function loadScenes() {
 
 async function loadRegistry() {
   const r = await fetch("/api/registry").then((x) => x.json());
-  const skills = r.skills.map((s) => `<span class="chip">${esc(s.name)}</span>`).join("") || "<i>none</i>";
-  const mcp = r.mcp.map((s) => `<span class="chip">${esc(s.name)}</span>`).join("") || "<i>none</i>";
-  const warn = r.problems?.length
-    ? `<div style="margin-top:8px;color:var(--warn)">${r.problems.length} skipped</div>` : "";
-  $("registry").innerHTML = `<b>Skills</b><br>${skills}<br><b style="display:inline-block;margin-top:8px">MCP</b><br>${mcp}${warn}`;
+  // Collapsed, with counts on the summary: a machine can have 100 skills, and
+  // rendering them all open buries the scene list they sit under.
+  const group = (label, items) => `
+    <details>
+      <summary>${label}<span class="count">${items.length}</span></summary>
+      <div class="items">${
+        items.length
+          ? items.map((s) => `<span class="chip" title="${esc(s.source ?? s.type ?? "")}">${esc(s.name)}</span>`).join("")
+          : "<i>none</i>"
+      }</div>
+    </details>`;
+  $("registry").innerHTML =
+    group("Skills", r.skills ?? []) +
+    group("MCP", r.mcp ?? []) +
+    (r.problems?.length ? `<div class="warn">${r.problems.length} skipped</div>` : "");
 }
 
 async function select(file) {
@@ -378,7 +475,7 @@ function draw() {
   }
   applyOffsets();
   attachDrag();
-  requestAnimationFrame(wires);
+  applyZoom();          // re-sizes the stage for the new content, then draws wires
 }
 
 // ---------------------------------------------------------------- drag
@@ -406,9 +503,11 @@ function attachDrag() {
       const ox = down.clientX, oy = down.clientY;
       let moved = false;
 
+      // Offsets live in unscaled units, so pointer deltas are divided by the
+      // zoom — otherwise a node lags the cursor at <100% and outruns it above.
       const move = (m) => {
-        const dx = m.clientX - ox, dy = m.clientY - oy;
-        if (!moved && Math.hypot(dx, dy) < 4) return;   // click vs drag threshold
+        const dx = (m.clientX - ox) / (state.zoom || 1), dy = (m.clientY - oy) / (state.zoom || 1);
+        if (!moved && Math.hypot(m.clientX - ox, m.clientY - oy) < 4) return; // click vs drag
         moved = true;
         el.classList.add("dragging");
         el.style.transform = `translate(${start.x + dx}px, ${start.y + dy}px)`;
@@ -419,7 +518,7 @@ function attachDrag() {
         removeEventListener("mouseup", up);
         el.classList.remove("dragging");
         if (!moved) return;                              // was a click — let onclick run
-        const dx = u.clientX - ox, dy = u.clientY - oy;
+        const dx = (u.clientX - ox) / (state.zoom || 1), dy = (u.clientY - oy) / (state.zoom || 1);
         saved[name] = { x: start.x + dx, y: start.y + dy };
         localStorage.setItem(offsetsKey(), JSON.stringify(saved));
         // A real drag shouldn't also select — swallow the pending click once.
@@ -436,12 +535,21 @@ function attachDrag() {
 function wires() {
   if (!state.layout) return;
   const svg = $("wires");
-  const stage = $("stage").getBoundingClientRect();
+  // Measured against the VIEWPORT and divided by the zoom, so coordinates are in
+  // the same unscaled space the SVG draws in — the transform then scales paths
+  // and cards together and the edges stay attached at any zoom level.
+  const origin = $("viewport").getBoundingClientRect();
+  const z = state.zoom || 1;
   const box = (name) => {
     const el = document.querySelector(`[data-target="${CSS.escape(name)}"]`);
     if (!el) return null;
     const r = el.getBoundingClientRect();
-    return { x: r.left - stage.left, y: r.top - stage.top, w: r.width, h: r.height };
+    return {
+      x: (r.left - origin.left) / z,
+      y: (r.top - origin.top) / z,
+      w: r.width / z,
+      h: r.height / z,
+    };
   };
 
   const parts = [];
@@ -661,6 +769,46 @@ $("run").onclick = async () => {
 };
 $("stop").onclick = () => fetch("/api/stop", { method: "POST" });
 $("goal").addEventListener("keydown", (e) => { if (e.key === "Enter") $("run").click(); });
+
+// ---------------------------------------------------------------- zoom + layout
+$("zoomin").onclick = () => setZoom(state.zoom + 0.1);
+$("zoomout").onclick = () => setZoom(state.zoom - 0.1);
+$("zoomfit").onclick = zoomToFit;
+
+// Collapsing the console hands its 240px back to the canvas; the tab strip stays
+// so the panes are one click away rather than gone.
+function setConsole(collapsed) {
+  document.body.classList.toggle("console-collapsed", collapsed);
+  $("togglebar").textContent = collapsed ? "▴" : "▾";
+  localStorage.setItem("ensemble:console", collapsed ? "collapsed" : "open");
+  requestAnimationFrame(wires);
+}
+$("togglebar").onclick = () => setConsole(!document.body.classList.contains("console-collapsed"));
+// Clicking a tab while collapsed should reopen rather than do nothing visible.
+for (const t of document.querySelectorAll(".tab")) {
+  t.addEventListener("click", () => setConsole(false));
+}
+setConsole(localStorage.getItem("ensemble:console") === "collapsed");
+
+// ⌘/ctrl + scroll zooms, the convention every canvas app uses.
+document.querySelector("main").addEventListener(
+  "wheel",
+  (e) => {
+    if (!e.ctrlKey && !e.metaKey) return;
+    e.preventDefault();
+    setZoom(state.zoom - Math.sign(e.deltaY) * 0.08);
+  },
+  { passive: false },
+);
+
+addEventListener("keydown", (e) => {
+  const typing = /^(INPUT|TEXTAREA)$/.test(document.activeElement?.tagName ?? "");
+  if (typing || !(e.metaKey || e.ctrlKey)) return;
+  if (e.key === "=" || e.key === "+") { e.preventDefault(); setZoom(state.zoom + 0.1); }
+  else if (e.key === "-") { e.preventDefault(); setZoom(state.zoom - 0.1); }
+  else if (e.key === "0") { e.preventDefault(); zoomToFit(); }
+  else if (e.key === "\\") { e.preventDefault(); $("togglebar").click(); }
+});
 
 for (const t of document.querySelectorAll(".tab")) {
   t.onclick = () => {

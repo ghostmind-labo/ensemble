@@ -18,6 +18,7 @@ import type { McpHub, McpTool } from "../mcp.ts";
 import { BUILTIN_TOOLS, type BuiltinTool } from "../tools/builtin.ts";
 import type { Skill } from "../registry.ts";
 import { readFileSync } from "node:fs";
+import { missingKeyMessage } from "../credentials.ts";
 import { basename } from "node:path";
 
 export type { NodeResult };
@@ -105,7 +106,7 @@ function pruneOldToolResults(messages: Array<Record<string, unknown>>): void {
 
 function apiKey(): string {
   const key = process.env["OPENROUTER_API_KEY"];
-  if (!key) throw new Error("OPENROUTER_API_KEY is not set — ensemble calls OpenRouter directly.");
+  if (!key) throw new Error(missingKeyMessage());
   return key;
 }
 

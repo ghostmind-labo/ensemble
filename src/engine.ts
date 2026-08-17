@@ -31,6 +31,7 @@ import {
   detectLossyExtraction,
   type State,
 } from "./state.ts";
+import { loadKeyFiles } from "./credentials.ts";
 import type { EventSink, NodeMeta } from "./events.ts";
 
 export interface RunOptions {
@@ -449,6 +450,10 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
   const maxNodeRuns = opts.maxNodeRuns ?? 50;
   const timeoutMs = opts.timeoutMs ?? 20 * 60_000;
   const emit: EventSink = opts.onEvent ?? (() => {});
+
+  // An env file may hold the only copy of the key — read it before the first
+  // call, so a long-lived MCP server is not stuck with a stale environment.
+  loadKeyFiles();
 
   const registry = loadRegistry();
   const root = resolve(process.cwd());

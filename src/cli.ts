@@ -1,7 +1,8 @@
 import { parseArgs } from "node:util";
 import { existsSync } from "node:fs";
 import { loadRegistry } from "./registry.ts";
-import { loadScene, SceneError } from "./scene.ts";
+import { loadScene, SceneError, runtimeOf } from "./scene.ts";
+import { loadKeyFiles, hasApiKey, missingKeyMessage } from "./credentials.ts";
 import { runScene, readJournal, hashScene } from "./engine.ts";
 import { createTerminalReporter } from "./reporter.ts";
 import { toMermaid, toTerminal, toHtml } from "./view.ts";
@@ -117,6 +118,16 @@ async function cmdValidate(path: string | undefined): Promise<number> {
       `${c.green("valid")}  ${c.bold(scene.name)} — ${nodes} node(s), ` +
         `${groups} group(s), ${scene.edges.length} edge(s), entry ${c.cyan(scene.entry)}`,
     );
+
+    // The scene is well-formed but cannot run: validate is the free pre-flight,
+    // so a certain failure belongs here rather than after the first node spends.
+    loadKeyFiles();
+    const callers = Object.entries(scene.nodes).filter(([, n]) => runtimeOf(scene, n) !== "ask");
+    if (callers.length > 0 && !hasApiKey()) {
+      info("");
+      error(missingKeyMessage());
+      return 1;
+    }
     return 0;
   } catch (err) {
     if (err instanceof SceneError) {

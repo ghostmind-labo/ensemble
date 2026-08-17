@@ -36,11 +36,18 @@ council for a task a 2-node score-gate handles is inflation, not thoroughness.
 
 ```bash
 which ensemble || npm ls @ghostmind-dev/ensemble   # global bin or local dep
-echo ${OPENROUTER_API_KEY:+set}                    # the ONLY required credential
+ensemble validate <scene>                          # free, and now checks the key too
 ```
 
 - Not installed → `npm i -g @ghostmind-dev/ensemble`.
-- `OPENROUTER_API_KEY` unset → stop and ask the user; nothing runs without it.
+- **`OPENROUTER_API_KEY` is the only credential, and BOTH runtimes need it** — there
+  is no alternative provider path. `validate` (and `validate_scene`) report it as a
+  certain failure before anything spends, so you never learn this at run time.
+- It is read from the environment or, failing that, from `.ensemble/.env`,
+  `./.env`, `~/.config/ensemble/.env`, `~/.env` — a real env var always wins.
+  **Prefer a file when driving through MCP:** the server inherits the host's
+  environment at spawn, so a key exported later in some other terminal never
+  reaches it, while a file is re-read on every call.
 - Node ≥ 22.6. No other install, no subprocess, no external agent.
 
 ### Where things go — everything under `.ensemble/`
