@@ -1,6 +1,6 @@
 ---
-name: ensemble
 description: Author or run a multi-model agent scene with @ghostmind-dev/ensemble
+argument-hint: "[what the ensemble should do, or a scene file + goal]"
 ---
 
 Use the **ensemble** skill (bundled with this plugin) to handle this request.
