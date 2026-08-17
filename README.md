@@ -565,6 +565,28 @@ claude mcp add ensemble -s user -- ensemble mcp serve    # -s user = every proje
 There is **no daemon and no port**: the host spawns `ensemble mcp serve` on stdio
 when it needs it and reaps it afterwards.
 
+### The two servers are not the same shape
+
+`ensemble serve` (the browser viewer) and `ensemble mcp serve` (the agent interface)
+have deliberately opposite concurrency rules:
+
+| | `serve` — browser | `mcp serve` — agents |
+|---|---|---|
+| Transport | HTTP on a port (default 7777) | stdio, no port |
+| How many can run | **one per port** — a second is `EADDRINUSE` | **one per client session**, many is normal |
+| Concurrent runs | **one**; a second start gets `409 a run is already in progress` | **unlimited** — `run_scene` returns a runId and moves on |
+
+The viewer shows one canvas, so it runs one scene at a time. An agent wants to fan
+out, so nothing serializes it. Register the MCP server twice (say, the plugin *and* a
+hand-rolled `claude mcp add`) and you simply get two independent processes with
+duplicate tools — no election, no conflict.
+
+The only tool that is instance-bound is **`stop_run`**, which needs the in-memory
+abort handle of whichever process started the run; `run_status`, `peek_state`,
+`list_runs`, and `resume_run` all read the run directory, so any instance can answer
+for any run. That is worth knowing before you keep duplicate registrations: a run
+started on one server cannot be stopped from the other.
+
 Peek and status are reads of the checkpoint files, and stop is safe because resume
 exists — so the server holds nothing but an AbortController per live run. If it
 dies, in-flight runs die *resumably*: the same failure story as everywhere else.
