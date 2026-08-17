@@ -1,8 +1,11 @@
 {
   "mcpServers": {
     "ensemble": {
-      "command": "ensemble",
-      "args": ["mcp", "serve"]
+      "command": "sh",
+      "args": [
+        "-c",
+        "if command -v ensemble >/dev/null 2>&1; then exec ensemble mcp serve; else exec npx -y @ghostmind-dev/ensemble@latest mcp serve; fi"
+      ]
     }
   }
 }
