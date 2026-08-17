@@ -569,11 +569,26 @@ async function main(): Promise<number> {
       });
     case "serve": {
       const { serve } = await import("./serve.ts");
-      await serve({
-        port: num(values.port) ?? 7777,
-        scenesDir: rest[0] ?? "scenes",
-        open: !(values["no-open"] ?? false),
-      });
+      const port = num(values.port) ?? 7777;
+      try {
+        await serve({
+          port,
+          scenesDir: rest[0] ?? "scenes",
+          open: !(values["no-open"] ?? false),
+        });
+      } catch (err) {
+        // One viewer per port, so a second `serve` is a common, recoverable
+        // mistake — worth a sentence instead of a Node stack trace.
+        if ((err as { code?: string }).code === "EADDRINUSE") {
+          error(
+            `port ${port} is already in use — another \`ensemble serve\` is probably running.\n` +
+              `Open http://127.0.0.1:${port} to use it, or start this one elsewhere: ` +
+              `ensemble serve --port ${port + 1}`,
+          );
+          return 1;
+        }
+        throw err;
+      }
       return 0; // serve blocks until SIGINT
     }
     case "mcp": {
