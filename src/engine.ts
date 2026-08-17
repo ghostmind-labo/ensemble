@@ -14,8 +14,9 @@
  *
  * The engine only emits events; rendering lives in reporter.ts and serve.ts.
  */
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { join, resolve, basename } from "node:path";
 import type { Scene, NodeSpec } from "./scene.ts";
 import { resolveTarget, runtimeOf } from "./scene.ts";
 import { loadRegistry } from "./registry.ts";
@@ -43,6 +44,12 @@ export interface RunOptions {
    * protects every run on a machine, including ones started from the browser.
    */
   budget?: number;
+  /**
+   * Continue a previous run instead of starting one. Built by `readJournal()`
+   * from a run directory; the run resumes at the recorded target, writes into
+   * the same run directory, and keeps accumulating cost and node counts.
+   */
+  resumeFrom?: ResumeState;
   /** Receives every run event. Omit for a silent run. */
   onEvent?: EventSink;
   /** Aborts the run; model nodes abort mid-stream, agent nodes between nodes. */
@@ -57,6 +64,86 @@ export interface NodeCost {
   tokensOut: number;
 }
 
+/** Bumped when the journal's shape changes; an older file is refused, not guessed at. */
+export const JOURNAL_VERSION = 1;
+
+/**
+ * Everything the executor needs to pick a run back up — the graph position that
+ * `state.json` alone cannot supply.
+ *
+ * `resumeAt` is the target still owed execution: during a target it is that
+ * target (which re-runs whole, since its outputs never merged), and after one
+ * completes it is whatever the edges selected next. `undefined` means the run
+ * reached its exit and there is nothing to resume.
+ */
+export interface Journal {
+  version: number;
+  runId: string;
+  /** Absolute path to the scene, plus a hash so we can tell if it was edited. */
+  scene: { file: string; name: string; hash: string };
+  goal: string;
+  resumeAt?: string;
+  /** Edge index → times taken, so `maxLoops` budgets survive the stop. */
+  edgeLoops: Array<[number, number]>;
+  nodeRuns: number;
+  totalCost: number;
+  nodeCosts: Record<string, NodeCost>;
+  /** Why the run stopped, when it stopped early. */
+  stoppedBecause?: string;
+  updatedAt: string;
+}
+
+/** A journal plus the blackboard it belongs to — what `runScene` needs to continue. */
+export interface ResumeState {
+  journal: Journal;
+  state: State;
+  runDir: string;
+}
+
+/** Content hash of a scene file, so a resume can warn when the graph changed. */
+export function hashScene(file: string): string {
+  try {
+    return createHash("sha256").update(readFileSync(file, "utf8")).digest("hex").slice(0, 12);
+  } catch {
+    return "unknown";
+  }
+}
+
+/**
+ * Loads a run directory for resuming. Throws with an actionable message rather
+ * than returning something half-valid — a bad resume wastes real money.
+ */
+export function readJournal(runDir: string): ResumeState {
+  const dir = resolve(runDir);
+  const journalPath = join(dir, "journal.json");
+  if (!existsSync(journalPath)) {
+    throw new Error(
+      `no journal.json in ${runDir} — that run predates resumable runs, or is not a run directory`,
+    );
+  }
+
+  let journal: Journal;
+  try {
+    journal = JSON.parse(readFileSync(journalPath, "utf8")) as Journal;
+  } catch (err) {
+    throw new Error(`journal.json is unreadable: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  if (journal.version !== JOURNAL_VERSION) {
+    throw new Error(
+      `journal.json is version ${journal.version}, this build understands ${JOURNAL_VERSION}`,
+    );
+  }
+  if (!journal.resumeAt) {
+    throw new Error(`that run already reached its exit — there is nothing left to resume`);
+  }
+
+  const statePath = join(dir, "state.json");
+  const state = existsSync(statePath) ? (JSON.parse(readFileSync(statePath, "utf8")) as State) : {};
+
+  return { journal, state, runDir: dir };
+}
+
 export type RunResult =
   | { ok: true; state: State; runDir: string; totalCost: number; runId: string }
   | { ok: false; reason: string; state: State; runDir: string; runId: string };
@@ -69,6 +156,22 @@ function runId(scene: Scene): string {
     `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
     `-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}-${scene.name}`
   );
+}
+
+/**
+ * A free run directory for `id`.
+ *
+ * The id is second-granular, so two runs of one scene in the same second would
+ * otherwise share a directory and overwrite each other's artifacts — which now
+ * also means overwriting each other's journal.
+ */
+function freeRunDir(root: string, id: string): { id: string; dir: string } {
+  const base = join(root, ".ensemble", "runs");
+  for (let n = 1; ; n++) {
+    const candidate = n === 1 ? id : `${id}-${n}`;
+    const dir = join(base, candidate);
+    if (!existsSync(dir)) return { id: candidate, dir };
+  }
 }
 
 function buildPrompt(scene: Scene, node: string, goal: string, state: State): string {
@@ -288,15 +391,22 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
   );
   const servers = [...registry.mcp.values()].filter((s) => wantedServers.has(s.name));
 
-  const id = runId(scene);
-  const runDir = join(root, ".ensemble", "runs", id);
+  // Resuming reuses the previous run's directory and identity, so a resumed run
+  // leaves one continuous set of artifacts rather than a scattered trail.
+  const resume = opts.resumeFrom;
+  const { id, dir: runDir } = resume
+    ? { id: resume.journal.runId, dir: resume.runDir }
+    : freeRunDir(root, runId(scene));
   mkdirSync(runDir, { recursive: true });
 
-  const state: State = { goal };
-  let totalCost = 0;
-  let nodeRuns = 0;
-  const edgeLoops = new Map<number, number>();
+  // Everything below picks up where the journal left off, or starts clean.
+  const state: State = resume ? { ...resume.state, goal } : { goal };
+  let totalCost = resume?.journal.totalCost ?? 0;
+  let nodeRuns = resume?.journal.nodeRuns ?? 0;
+  const edgeLoops = new Map<number, number>(resume?.journal.edgeLoops ?? []);
+  // Wall clock is per-attempt, not cumulative: a resume gets a fresh timeout.
   const deadline = Date.now() + timeoutMs;
+  const sceneHash = hashScene(scene.file);
 
   // ENSEMBLE_BUDGET makes the cap a machine-wide default: exported once, it
   // covers every run, including ones started from the serve UI.
@@ -305,7 +415,7 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
 
   // Where the money went, node by node — written next to state.json so an
   // expensive run leaves an itemised receipt, not just a total.
-  const nodeCosts = new Map<string, NodeCost>();
+  const nodeCosts = new Map<string, NodeCost>(Object.entries(resume?.journal.nodeCosts ?? {}));
   const recordCost = (node: string, r: { cost: number; tokensIn: number; tokensOut: number }): void => {
     const entry = nodeCosts.get(node) ?? { runs: 0, cost: 0, tokensIn: 0, tokensOut: 0 };
     entry.runs += 1;
@@ -325,7 +435,12 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
   emit({ type: "run:start", runId: id, scene: scene.name, goal, nodes: nodeMeta });
 
   const hub = new ToolHub(root, servers);
-  const checkpoint = (): void => {
+
+  // The target still owed execution. Kept in step with the cursor so that
+  // whenever we checkpoint, the journal names exactly what to run next.
+  let resumeAt: string | undefined = scene.entry;
+
+  const checkpoint = (stoppedBecause?: string): void => {
     writeFileSync(join(runDir, "state.json"), JSON.stringify(state, null, 2), "utf8");
     writeFileSync(
       join(runDir, "costs.json"),
@@ -336,10 +451,24 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
       ),
       "utf8",
     );
+    const journal: Journal = {
+      version: JOURNAL_VERSION,
+      runId: id,
+      scene: { file: scene.file, name: scene.name, hash: sceneHash },
+      goal,
+      ...(resumeAt !== undefined ? { resumeAt } : {}),
+      edgeLoops: [...edgeLoops],
+      nodeRuns,
+      totalCost,
+      nodeCosts: Object.fromEntries(nodeCosts),
+      ...(stoppedBecause !== undefined ? { stoppedBecause } : {}),
+      updatedAt: new Date().toISOString(),
+    };
+    writeFileSync(join(runDir, "journal.json"), JSON.stringify(journal, null, 2), "utf8");
   };
 
   const fail = (reason: string): RunResult => {
-    checkpoint();
+    checkpoint(reason);
     emit({ type: "run:end", ok: false, reason, state, totalCost, nodeRuns, ...(budget !== undefined ? { budget } : {}) });
     return { ok: false, reason, state, runDir, runId: id };
   };
@@ -356,9 +485,22 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
   };
 
   try {
-    let cursor: string | undefined = scene.entry;
+    let cursor: string | undefined = resume?.journal.resumeAt ?? scene.entry;
+
+    // Resuming into an already-spent budget would burn a node before noticing,
+    // so it is caught here rather than after the first target completes.
+    if (budget !== undefined && totalCost >= budget) {
+      return fail(
+        `already at the budget: $${totalCost.toFixed(4)} spent of the $${budget} cap — ` +
+          `resume with a higher --budget to continue`,
+      );
+    }
 
     while (cursor) {
+      // Until this target's outputs merge it is still owed, so a stop here
+      // resumes by re-running it whole.
+      resumeAt = cursor;
+
       if (opts.signal?.aborted) return fail("run stopped");
       if (Date.now() > deadline) return fail(`wall-clock timeout after ${Math.round(timeoutMs / 60000)}m`);
 
@@ -388,15 +530,6 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
       }
       checkpoint();
       emit({ type: "state", state: { ...state } });
-
-      // The budget is a hard stop, not a warning: the run ends here with its
-      // state checkpointed, rather than starting work it was told not to afford.
-      if (budget !== undefined && totalCost >= budget) {
-        return fail(
-          `budget exhausted: spent $${totalCost.toFixed(4)} of the $${budget} cap — ` +
-            `state so far is checkpointed; raise with --budget or ENSEMBLE_BUDGET`,
-        );
-      }
 
       // Outgoing edges are consulted BEFORE the exit check, so a node can be both
       // the terminal node and a looping one. Terminating early here would make
@@ -436,10 +569,29 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
       if (!next) {
         // Running out of edges at the exit — or anywhere, when no exit is
         // declared — is the normal way a run finishes.
-        if (!scene.exit || cursor === scene.exit || members.includes(scene.exit)) break;
+        if (!scene.exit || cursor === scene.exit || members.includes(scene.exit)) {
+          resumeAt = undefined; // reached the exit: nothing is owed
+          break;
+        }
+        // Stuck instead: `resumeAt` still names this target, so fixing the
+        // scene's edges and resuming retries from here.
         return fail(
           `node "${cursor}" has no matching outgoing edge and is not the exit ("${scene.exit}"). ` +
             `State keys: ${Object.keys(state).join(", ")}`,
+        );
+      }
+
+      // The edge is taken: record the advanced position (and the loop counter it
+      // just consumed) before spending anything on the next target.
+      resumeAt = next;
+      checkpoint();
+
+      // The budget is a hard stop, not a warning: the run ends here with its
+      // position journalled, rather than starting work it was told not to afford.
+      if (budget !== undefined && totalCost >= budget) {
+        return fail(
+          `budget exhausted: spent $${totalCost.toFixed(4)} of the $${budget} cap — ` +
+            `resume with \`ensemble resume ${runDir} --budget <higher>\``,
         );
       }
 

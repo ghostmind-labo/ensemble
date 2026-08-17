@@ -27,8 +27,8 @@ export { loadRegistry } from "./registry.ts";
 export type { Registry, Skill, McpServer } from "./registry.ts";
 
 // --- execution --------------------------------------------------------------
-export { runScene } from "./engine.ts";
-export type { RunOptions, RunResult } from "./engine.ts";
+export { runScene, readJournal, hashScene, JOURNAL_VERSION } from "./engine.ts";
+export type { RunOptions, RunResult, Journal, ResumeState, NodeCost } from "./engine.ts";
 export { callAgent } from "./runtimes/agent.ts";
 export type { AgentCallRequest, ToolCallEvent } from "./runtimes/agent.ts";
 export { callModel } from "./runtimes/model.ts";

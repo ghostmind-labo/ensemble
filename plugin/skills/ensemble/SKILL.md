@@ -1,6 +1,6 @@
 ---
 name: ensemble
-description: "Author and run multi-model agent scenes with @ghostmind-dev/ensemble. Use when the user wants several AI models working together on a goal — a jury/second opinion from other vendors, a score-gated improve-until-good loop, a research→critique→write pipeline, or any multi-agent workflow where each node can be a different model (via OpenRouter) or a tool-using agent with MCP servers and scoped skills. Trigger on: 'ensemble', 'scene', 'multi-model', 'jury', 'ask several models', 'agent graph/workflow/team', or requests to build/modify/run a scene (.mts) file. Covers writing scenes, validating, running, watching live, reading results, and revising a scene based on what a run produced."
+description: "Author and run multi-model agent scenes with @ghostmind-dev/ensemble. Use when the user wants several AI models working together on a goal — a jury/second opinion from other vendors, a score-gated improve-until-good loop, a research→critique→write pipeline, or any multi-agent workflow where each node can be a different model (via OpenRouter) or a tool-using agent with MCP servers and scoped skills. Trigger on: 'ensemble', 'scene', 'multi-model', 'jury', 'ask several models', 'agent graph/workflow/team', or requests to build/modify/run a scene (.mts) file. Covers writing scenes, validating, running under a cost cap, resuming a stopped run, watching live, reading results, and revising a scene based on what a run produced."
 ---
 
 # ensemble
@@ -94,18 +94,23 @@ its reply is recorded but nothing is harvested.
   answers. Built-ins are read-only: `read_file`, `list_files`, `glob`, `grep`,
   `fetch_url`; there is **no bash/write/edit** by design. Disable one with
   `tools: { grep: false }`. Add MCP servers per node with `mcp: ["name"]`.
-- **Agent nodes cost real money.** Every prior tool result is resent each turn; a
-  vague job ("audit everything") compounds fast — a real example dropped $0.44 → $0.05
-  just by narrowing the prompt. Give agent nodes a narrow, bounded job.
+- **Agent nodes cost real money.** Recent tool results are resent each turn (results
+  older than 6 calls are auto-pruned to stubs); a vague job ("audit everything") still
+  compounds — a real example dropped $0.44 → $0.05 just by narrowing the prompt. Give
+  agent nodes a narrow, bounded job. On its final turn — `maxTurns` reached or the
+  cost cap crossed — an agent loses its tools and must answer from what it has: a
+  best-effort answer lands in state instead of a hard failure.
 - **Restate the output contract at the END of an agent node's prompt** ("after you
   finish using tools, your FINAL message must end with the required json block").
   Deep in a tool loop the model stays in "keep working" mode and will narrate instead.
 - **Conditions are real code**: `when: (s) => Number(s["score"]) < 8`. Wrap numeric
   comparisons in `Number()` — models sometimes emit `"7"` as a string. A throwing
   predicate fails the run naming the edge.
-- **`maxLoops` on every cycle.** Global rails: 50 node runs, 20 min wall clock
-  (`--max-runs` / `--timeout`). Running out of matching edges at (or without) the
-  exit is a clean finish; anywhere else it is an error naming the stuck node.
+- **`maxLoops` on every cycle.** Global rails: 50 node runs, 20 min wall clock, and
+  an optional hard cost cap (`--max-runs` / `--timeout` / `--budget 0.50`;
+  `ENSEMBLE_BUDGET` caps every run on the machine). Running out of matching edges at
+  (or without) the exit is a clean finish; anywhere else it is an error naming the
+  stuck node.
 - Two nodes in the same parallel group must not write the same output key
   (validation error — it would be a silent race).
 - **Cast asymmetrically**: cheap/fast models for volume work, one strong model at
@@ -114,18 +119,30 @@ its reply is recorded but nothing is harvested.
 ## 2 · The operating loop: validate → run → read → revise
 
 ```bash
-ensemble validate review.mts           # FREE — always run before spending
-ensemble run review.mts "<the goal>"   # per-node tokens · cost · time printed
-ensemble serve                         # browser: live canvas, streaming tokens,
-                                       # waiting indicators, state tab, source editor
+ensemble validate review.mts                        # FREE — always run before spending
+ensemble run review.mts "<the goal>" --budget 0.50  # hard cost cap — set one when iterating
+ensemble resume .ensemble/runs/<id> --budget 1.00   # continue a stopped run, don't restart
+ensemble serve                         # browser: live canvas, streaming tokens, spend
+                                       # ticker + Costs tab, state tab, source editor
 ```
 
-Read the artifacts after every run — this is how you decide what to change:
+A run prints a `cost by node` breakdown at the end (failed runs included). Read the
+artifacts after every run — this is how you decide what to change:
 
 ```bash
 cat .ensemble/runs/<timestamp>-<scene>/state.json   # the full blackboard
 cat .ensemble/runs/<timestamp>-<scene>/result.md    # every key rendered
+cat .ensemble/runs/<timestamp>-<scene>/costs.json   # per-node spend — who burned it
+cat .ensemble/runs/<timestamp>-<scene>/journal.json # graph position — what resume uses
 ```
+
+**A stopped run is never a dead end.** Budget spent, node failed, ctrl-C, timeout —
+`ensemble resume <run-dir>` continues from the checkpoint, skipping everything already
+paid for and writing into the same run dir (one cumulative `costs.json`). So the
+cheapest way to work an expensive scene is deliberately: `--budget` low, read the
+partial state, resume with a higher cap only if it earned it. Budgets apply to the
+*cumulative* total, `maxLoops` counters survive the stop, and editing the scene
+between attempts is allowed (resume warns that edge-keyed loop counters may shift).
 
 **Revise rather than accept.** Weak output → find the weak link in `state.json`
 (thin findings? gate never passing? judge too lenient?) and change the scene: a
@@ -138,6 +155,9 @@ Warnings to act on:
   content, not a summary").
 - `exceeded maxNodeRuns` — a cycle has no working exit; check the gate's state key
   is actually written by the node you think writes it.
+- `budget exhausted` — the run stopped at the cap, position journalled; read
+  `costs.json` for the burner, then either narrow that node's job or continue with
+  `ensemble resume <run-dir> --budget <higher>`. Never restart from scratch.
 
 ## 3 · Patterns to reach for
 
@@ -154,8 +174,16 @@ measured metric instead of an opinion.
 **Pipeline with rejection** — research → parallel review (critic + factchecker) →
 write, with `verdict === "reject"` looping back, capped by `maxLoops`.
 
+**Orchestrator + teams (council)** — composes the others at scale: one framing node
+writes `frame`/`constraints` that every later node reads (never re-litigated);
+parallel teams (recon → competing options → red-team) feed an adjudicator gate that
+loops the options team with `feedback` until a scored bar passes; a production team
+writes sections a publisher merges. Cast the money at the orchestration points
+(framer, gate, publisher), cheap models on the teams.
+
 Working examples with real run logs: `examples/` in the repo
-(`ghostmind-labo/ensemble`) — 01 jury, 02 score gate, 03 full stack (MCP + skills).
+(`ghostmind-labo/ensemble`) — 01 jury, 02 score gate, 03 full stack (MCP + skills),
+04 decision council (orchestrator, 4 teams, gate, 15 nodes).
 
 ## 4 · Skills and MCP (mostly zero-config)
 
@@ -208,10 +236,12 @@ has a specific, repeated complaint about agent-node behaviour — the default is
 ## 6 · Library use (embedding in code)
 
 ```ts
-import { loadScene, loadRegistry, runScene } from "@ghostmind-dev/ensemble";
+import { loadScene, loadRegistry, runScene, readJournal } from "@ghostmind-dev/ensemble";
 
 const scn = await loadScene("review.mts", loadRegistry());
 const result = await runScene(scn, goal, {
+  budget: 0.5,                 // optional hard cost cap (USD)
+  // resumeFrom: readJournal(".ensemble/runs/<id>"),   // continue a stopped run
   onEvent: (e) => {
     if (e.type === "node:delta") process.stdout.write(e.delta);  // live tokens
     if (e.type === "node:tool")  console.log("⚒", e.tool);       // agent tool calls
