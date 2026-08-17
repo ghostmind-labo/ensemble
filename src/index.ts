@@ -18,7 +18,11 @@
 
 // --- scenes -----------------------------------------------------------------
 export { scene } from "./dsl.ts";
-export type { SceneSpec } from "./dsl.ts";
+export type { SceneSpec, StateSchema, TypedState } from "./dsl.ts";
+// Re-exported so a scene can declare state shapes without its own node_modules:
+// the resolver hook only maps this package, so `import { z } from "zod"` would
+// fail in a bare directory. `import { scene, z } from "@ghostmind-dev/ensemble"`.
+export { z } from "zod";
 export { loadScene, validateSpec, SceneError, splitModel, resolveTarget, runtimeOf } from "./scene.ts";
 export type { Scene, NodeSpec, EdgeSpec } from "./scene.ts";
 

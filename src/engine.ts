@@ -217,7 +217,7 @@ function buildPrompt(scene: Scene, node: string, goal: string, state: State): st
   const sections = [`## Goal\n\n${goal}`];
   const context = renderInputs(state, spec.inputs ?? []);
   if (context) sections.push(context);
-  const contract = outputContract(spec.outputs ?? []);
+  const contract = outputContract(spec.outputs ?? [], scene.state);
   if (contract) sections.push(contract);
   return sections.join("\n\n");
 }
@@ -421,7 +421,7 @@ async function runNode(
       return { error: `node "${node}" failed: ${res.error}`, result: res };
     }
 
-    const extraction = extractOutputs(res.text, spec.outputs ?? []);
+    const extraction = extractOutputs(res.text, spec.outputs ?? [], ctx.scene.state);
 
     if (extraction.ok) {
       // The contract can be satisfied while still losing the substance — surface

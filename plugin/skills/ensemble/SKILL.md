@@ -1,6 +1,6 @@
 ---
 name: ensemble
-description: "Author and run multi-model agent scenes with @ghostmind-dev/ensemble. Use when the user wants several AI models working together on a goal — a jury/second opinion from other vendors, a score-gated improve-until-good loop, a research→critique→write pipeline, or any multi-agent workflow where each node can be a different model (via OpenRouter) or a tool-using agent with MCP servers and scoped skills. Trigger on: 'ensemble', 'scene', 'multi-model', 'jury', 'ask several models', 'agent graph/workflow/team', or requests to build/modify/run a scene (.mts) file. Covers deciding whether a task needs a scene at all, writing scenes, validating, running under a cost cap, resuming a stopped run, answering a scene that paused for human or agent approval (runtime: \"ask\"), operating runs through the ensemble MCP tools (run_scene/run_status/peek_state/stop_run/resume_run), watching live, reading results, and revising a scene based on what a run produced."
+description: "Build and operate multi-model agent scenes with @ghostmind-dev/ensemble — a workflow graph in one TypeScript file, where each node is a different model, a tool-using agent, or a pause for approval. Use when several models should work one goal together (jury, score-gated loop, research→critique→write pipeline), or to author, validate, run, watch, resume, or answer a scene. Trigger on: 'ensemble', 'scene', 'multi-model', 'jury', 'agent graph/workflow/team', or a .mts scene file."
 ---
 
 # ensemble
@@ -112,7 +112,56 @@ export default scene({
 Every `NodeSpec` field: `model`, `runtime` ("model" | "agent" | "ask"), `prompt`
 (system-style instruction), `question` (ask only), `inputs`, `outputs`, `skills`,
 `mcp`, `tools`, `maxTurns` (agent only, default 12), `temperature`, `description`.
-`defaults` may set `model`, `runtime`, `tools`, `temperature` scene-wide.
+Scene-level: `name`, `description`, `state` (zod shapes — see below), `defaults`
+(`model`/`runtime`/`tools`/`temperature`), `nodes`, `groups`, `edges`, `entry`, `exit`.
+
+### Typed state — pin the SHAPE of the blackboard (`state`)
+
+By default a node's `outputs` are checked for **presence only**: a node owing
+`score` can emit `score: "banana"` and it lands in state, so `s.score < 8` silently
+compares against a string. Declare `state` and the shape becomes enforced:
+
+```ts
+import { scene, z } from "@ghostmind-dev/ensemble";   // z is re-exported — do NOT import "zod"
+
+export default scene({
+  name: "review",
+  state: {                                  // the contract for the whole blackboard
+    findings: z.array(z.object({ file: z.string(), severity: z.enum(["low", "high"]) })),
+    score:    z.number().min(0).max(10),
+    verdict:  z.enum(["accept", "reject"]).describe("ship it or send it back"),
+  },
+  nodes: {
+    scanner: { outputs: ["findings"] },
+    judge:   { inputs: ["findings"], outputs: ["score", "verdict"] },
+  },
+  edges: [{ from: "judge", to: "writer", when: (s) => s.score >= 8 }],  // s is TYPED
+  entry: "scanner", exit: "writer",
+});
+```
+
+Three things you get, and they are why this is worth declaring:
+
+1. **The shape is shown to the model.** The auto-appended output contract renders
+   `"score": number (0-10)` and `"verdict": "accept" | "reject"` instead of `...`.
+   Compliance improves markedly just from being shown the shape.
+2. **Wrong shapes are rejected and self-correct.** A mismatch becomes the retry
+   reason, naming the exact path (`findings.0.severity: Invalid enum value…`), so the
+   model fixes it on the existing free retry instead of poisoning state. The value
+   stored is zod's *parsed* output, so coercions and `.default()` apply.
+3. **`when` predicates are typed.** `s.score >= 8` type-checks — no `Number(s["score"])`
+   guard, and a typo'd key is a compile error. This is the one place types beat prose.
+
+Rules: **use `z` from `@ghostmind-dev/ensemble`**, never `import { z } from "zod"` — a
+scene folder has no `node_modules`, so only this package resolves. `state` is
+**additive and optional**: keys with no schema behave exactly as before, so add it to
+an existing scene freely. Add `.describe("…")` for intent the type cannot carry — it
+is appended to the shape the model sees. Typed keys read as always-present for
+ergonomics, so gate on keys the upstream node actually wrote.
+
+**Schema the keys that gates and downstream nodes depend on** (scores, verdicts,
+enums, structured records). Prose keys — `findings` as a long write-up, `answer`,
+`notes` — are fine as plain strings; `z.string()` adds nothing there.
 
 ### How data flows (know this before authoring)
 
@@ -172,9 +221,10 @@ the merge.
 - **Restate the output contract at the END of an agent node's prompt** ("after you
   finish using tools, your FINAL message must end with the required json block").
   Deep in a tool loop the model stays in "keep working" mode and will narrate instead.
-- **Conditions are real code**: `when: (s) => Number(s["score"]) < 8`. Wrap numeric
-  comparisons in `Number()` — models sometimes emit `"7"` as a string. A throwing
-  predicate fails the run naming the edge.
+- **Conditions are real code**: `when: (s) => Number(s["score"]) < 8`. Without a
+  `state` schema, wrap numeric comparisons in `Number()` — models sometimes emit `"7"`
+  as a string. **With `z.number()` on that key the guard is unnecessary** and `s.score`
+  is typed. A throwing predicate fails the run naming the edge.
 - **`maxLoops` on every cycle.** Global rails: 50 node runs, 20 min wall clock, and
   an optional hard cost cap (`--max-runs` / `--timeout` / `--budget 0.50`;
   `ENSEMBLE_BUDGET` caps every run on the machine). Running out of matching edges at
