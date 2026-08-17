@@ -504,6 +504,39 @@ failures in a row fail the node loudly. An extraction that keeps <25% of a long
 reply raises a `node:lossy` warning — the model probably summarised its real answer
 away.
 
+## Human — or agent — in the loop
+
+A node can **stop the run and wait for an answer**. It makes no model call:
+
+```ts
+approval: {
+  runtime: "ask",
+  question: "Ship this draft? Reply approve or reject, and say why.",
+  inputs: ["draft"],              // context for whoever answers
+  outputs: ["verdict", "why"],    // the keys their answer must fill
+},
+```
+
+Then gate on the answer like any other state:
+`{ from: "approval", to: "publish", when: (s) => s["verdict"] === "approve" }`.
+
+The pause is **durable, not a held-open process**: the question goes into the
+journal, so the run can wait minutes or days, survive a reboot, and be answered by
+whoever is around —
+
+```bash
+ensemble resume .ensemble/runs/<id> --answer verdict=approve --answer why="reads well"
+```
+
+— or by the operating agent, with `resume_run { runId, answers: { … } }`. Whether a
+human or an agent answers is not the engine's concern; both just supply the missing
+state keys. `run_status` reports `waiting` with the question and the exact keys
+expected.
+
+**A gate cannot be bypassed by retrying.** Resuming without the answers parks again
+on the same question rather than falling through, and the ask node itself costs
+nothing — it is pure wait.
+
 ## Resumable runs
 
 A run that stops early — budget spent, node failed, ctrl-C, timeout — is not a dead
@@ -653,5 +686,5 @@ skills inlined from SKILL.md, function conditions, loop caps, parallel groups, t
 streaming, validate-before-save editing, hard cost budgets, resumable runs, and
 ensemble driving itself over MCP.
 
-Not built yet: the orchestrator node (dynamic routing), drag-and-drop editing, and an
-`ask` node that pauses a run for a human — or an agent — to answer before continuing.
+Not built yet: the orchestrator node (dynamic routing), drag-and-drop editing, and a
+machine-level run index with a single global viewer across projects.

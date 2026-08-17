@@ -55,6 +55,14 @@ export function createTerminalReporter(opts: { verbose: boolean }): EventSink {
         warn(`${event.node}: ${event.problem} — reprompting once`);
         break;
 
+      case "node:ask":
+        info(
+          `\n${c.cyan("⏸")} ${c.bold(c.magenta(event.node))} ${c.dim("needs an answer")}\n` +
+            indent(event.question, "   ") +
+            `\n${c.dim(`   expects: ${event.outputs.join(", ")}`)}`,
+        );
+        break;
+
       case "node:lossy":
         warnings.set(event.node, [
           ...(warnings.get(event.node) ?? []),

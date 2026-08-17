@@ -380,6 +380,18 @@ function report(
   started: number,
 ): number {
   if (!result.ok) {
+    // Parked on an ask node is not a failure — it is the scene working as
+    // designed, waiting on a human or an agent.
+    if (result.waiting) {
+      const { node, question, outputs } = result.waiting;
+      info(`\n${c.bold(c.cyan("⏸ waiting"))} ${c.dim(`on ${node}, after ${duration(Date.now() - started)}`)}`);
+      info(`\n${question}\n`);
+      info(c.dim("answer and continue:"));
+      info(
+        `  ensemble resume ${result.runDir} ` + outputs.map((k) => `--answer ${k}="…"`).join(" "),
+      );
+      return 0;
+    }
     error(result.reason);
     info(c.dim(`\nfailed after ${duration(Date.now() - started)}`));
     info(c.dim(`resume → ensemble resume ${result.runDir}`));
@@ -407,7 +419,7 @@ function report(
  */
 async function cmdResume(
   dir: string | undefined,
-  opts: { maxRuns?: number; timeout?: number; budget?: number; verbose: boolean },
+  opts: { maxRuns?: number; timeout?: number; budget?: number; answers?: string[]; verbose: boolean },
 ): Promise<number> {
   if (!dir) {
     error("resume needs a run directory: ensemble resume .ensemble/runs/<id>");
@@ -447,16 +459,43 @@ async function cmdResume(
     );
   }
 
+  // --answer key=value, repeatable. Everything after the first "=" is the value,
+  // so answers may contain "=" freely.
+  const answers: Record<string, unknown> = {};
+  for (const pair of opts.answers ?? []) {
+    const eq = pair.indexOf("=");
+    if (eq === -1) {
+      error(`--answer must be key=value, got "${pair}"`);
+      return 2;
+    }
+    answers[pair.slice(0, eq)] = pair.slice(eq + 1);
+  }
+
+  // A parked run needs its answer, or it parks again on the same question.
+  if (journal.pending) {
+    const missing = journal.pending.outputs.filter((k) => answers[k] === undefined);
+    if (missing.length > 0) {
+      error(
+        `this run is waiting on "${journal.pending.node}":\n\n  ${journal.pending.question}\n\n` +
+          `Answer it and resume:\n  ensemble resume ${dir} ` +
+          missing.map((k) => `--answer ${k}="…"`).join(" "),
+      );
+      return 1;
+    }
+  }
+
   info(
     `${c.bold("resuming")} ${c.bold(c.magenta(journal.scene.name))} ${c.dim("at")} ` +
       `${c.cyan(journal.resumeAt ?? "?")} ${c.dim(`· ${journal.nodeRuns} node run(s) already done`)}` +
       `${journal.totalCost > 0 ? c.dim(` · $${journal.totalCost.toFixed(4)} spent`) : ""}`,
   );
   if (journal.stoppedBecause) info(c.dim(`stopped because: ${journal.stoppedBecause}`));
+  if (Object.keys(answers).length > 0) info(c.dim(`answering: ${Object.keys(answers).join(", ")}`));
 
   const started = Date.now();
   const result = await runScene(scene, journal.goal, {
     resumeFrom,
+    ...(Object.keys(answers).length > 0 ? { answers } : {}),
     maxNodeRuns: opts.maxRuns,
     timeoutMs: opts.timeout ? opts.timeout * 60_000 : undefined,
     ...(opts.budget !== undefined ? { budget: opts.budget } : {}),
@@ -506,6 +545,8 @@ async function main(): Promise<number> {
       "max-runs": { type: "string" },
       timeout: { type: "string" },
       budget: { type: "string" },
+      // Repeatable: --answer key=value --answer other=value
+      answer: { type: "string", multiple: true },
       mermaid: { type: "boolean", default: false },
       // Optional value: `--html` alone picks a filename from the scene name.
       html: { type: "string" },
@@ -565,6 +606,7 @@ async function main(): Promise<number> {
         maxRuns: num(values["max-runs"]),
         timeout: num(values.timeout),
         budget: num(values.budget),
+        ...(values.answer ? { answers: values.answer } : {}),
         verbose: values.verbose ?? false,
       });
     case "serve": {

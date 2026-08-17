@@ -93,7 +93,9 @@ export function toTerminal(scene: Scene): string {
     const spec = scene.nodes[name];
     if (!spec) return;
     const model = shortModel(spec.model ?? scene.defaults.model ?? "?");
-    const tag = runtimeOf(scene, spec) === "agent" ? c.yellow("⛭agent") : c.dim("⚡model");
+    const runtime = runtimeOf(scene, spec);
+    const tag =
+      runtime === "agent" ? c.yellow("⛭agent") : runtime === "ask" ? c.cyan("⏸ask") : c.dim("⚡model");
     out.push(`${pad}${c.magenta(c.bold(name))} ${c.dim(model)} ${tag}`);
     if ((spec.skills ?? []).length > 0) out.push(`${pad}  ${c.dim("skills:")} ${c.cyan((spec.skills ?? []).join(", "))}`);
     if ((spec.mcp ?? []).length > 0) out.push(`${pad}  ${c.dim("mcp:")} ${c.cyan((spec.mcp ?? []).join(", "))}`);
@@ -141,7 +143,7 @@ export function toTerminal(scene: Scene): string {
 export interface LayoutNode {
   name: string;
   model: string;
-  runtime: "model" | "agent";
+  runtime: "model" | "agent" | "ask";
   skills: string[];
   mcp: string[];
   inputs: string[];

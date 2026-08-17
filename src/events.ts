@@ -10,8 +10,8 @@ import type { State } from "./state.ts";
 export interface NodeMeta {
   node: string;
   model: string;
-  /** "model" = direct OpenRouter call, "agent" = opencode. */
-  runtime: "model" | "agent";
+  /** "model" = one OpenRouter call, "agent" = the tool loop, "ask" = pauses for an answer. */
+  runtime: "model" | "agent" | "ask";
   skills: string[];
   mcp: string[];
 }
@@ -35,6 +35,8 @@ export type RunEvent =
     }
   /** The node's outputs look like a summary of a much longer reply. */
   | { type: "node:lossy"; node: string; extractedLength: number; replyLength: number }
+  /** An `ask` node parked the run — a human or an agent must answer to continue. */
+  | { type: "node:ask"; node: string; question: string; outputs: string[] }
   | {
       type: "node:end";
       node: string;
@@ -59,6 +61,8 @@ export type RunEvent =
       nodeRuns: number;
       /** The USD cap the run was under, when one was set. */
       budget?: number;
+      /** Set when the run paused on an ask node rather than failing. */
+      waiting?: { node: string; question: string; outputs: string[] };
     };
 
 export type EventSink = (event: RunEvent) => void;
