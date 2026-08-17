@@ -11,7 +11,32 @@
  * before a single token is spent.
  */
 
+import type { ZodTypeAny, TypeOf } from "zod";
+
 export type State = Record<string, unknown>;
+
+/**
+ * The shape contract for the blackboard: state key → zod schema.
+ *
+ * Why zod rather than a TypeScript type: a node's outputs arrive as JSON parsed
+ * from the model's reply, and TypeScript is erased at run time, so a type alone
+ * cannot reject `score: "banana"`. A schema does three jobs at once — it is
+ * rendered INTO the node's output contract (models comply far better when shown
+ * the shape), it validates what came back (a mismatch is fed to the model as the
+ * retry reason), and it carries the static type so `when` predicates are typed.
+ */
+export type StateSchema = Record<string, ZodTypeAny>;
+
+/**
+ * The blackboard as your schemas describe it.
+ *
+ * Schema'd keys are typed; the index signature keeps unschema'd keys usable, so
+ * adding `state` to an existing scene is never a breaking change. Note the keys
+ * are typed as always-present for ergonomics (`s.score < 8` rather than
+ * `s.score! < 8`) — at run time a key not yet written is `undefined`, so gate on
+ * keys the upstream node actually wrote.
+ */
+export type TypedState<S extends StateSchema> = { [K in keyof S]: TypeOf<S[K]> } & Record<string, unknown>;
 
 /**
  * Where a node executes.
@@ -54,21 +79,28 @@ export interface NodeSpec {
   temperature?: number;
 }
 
-export interface EdgeSpec {
+export interface EdgeSpec<S extends StateSchema = StateSchema> {
   from: string;
   to: string;
   /**
    * Real code, not a string. Evaluated against the state blackboard after `from`
-   * completes. Keep it a pure predicate — throwing fails the run.
+   * completes. Keep it a pure predicate — throwing fails the run. Declare `state`
+   * on the scene and this is typed: `(s) => s.score < 8`, no casts or guards.
    */
-  when?: (state: State) => boolean;
+  when?: (state: TypedState<S>) => boolean;
   /** How many times this edge may be taken before it stops matching. */
   maxLoops?: number;
 }
 
-export interface SceneSpec {
+export interface SceneSpec<S extends StateSchema = StateSchema> {
   name: string;
   description?: string;
+  /**
+   * Shape contract for the blackboard, shared by every node — the structure a
+   * node's `outputs` must respect. Optional and additive: keys with no schema
+   * behave exactly as before (presence-checked only).
+   */
+  state?: S;
   defaults?: {
     model?: string;
     runtime?: NodeRuntime;
@@ -78,12 +110,17 @@ export interface SceneSpec {
   nodes: Record<string, NodeSpec>;
   /** Named sets of nodes that run concurrently, with a fan-in barrier. */
   groups?: Record<string, string[]>;
-  edges?: EdgeSpec[];
+  edges?: Array<EdgeSpec<S>>;
   entry: string;
   exit?: string;
 }
 
-/** Identity with types — see module docs. */
-export function scene(spec: SceneSpec): SceneSpec {
+/**
+ * Identity with types — see module docs.
+ *
+ * The generic is inferred from `state`, which is what makes `when` predicates
+ * typed without any annotation at the call site.
+ */
+export function scene<S extends StateSchema = Record<string, never>>(spec: SceneSpec<S>): SceneSpec<S> {
   return spec;
 }

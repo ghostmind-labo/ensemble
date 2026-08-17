@@ -71,6 +71,41 @@ export default scene({
 });
 ```
 
+## Typed state: pin the shape of the blackboard
+
+`outputs` says *which* keys a node owes. `state` says what **shape** they must be —
+and because the values arrive as JSON from a model, that check has to exist at run
+time, which a TypeScript type alone cannot do:
+
+```ts
+import { scene, z } from "@ghostmind-dev/ensemble";   // z is re-exported for you
+
+export default scene({
+  name: "review",
+  state: {
+    findings: z.array(z.object({ file: z.string(), severity: z.enum(["low", "high"]) })),
+    score:    z.number().min(0).max(10),
+    verdict:  z.enum(["accept", "reject"]),
+  },
+  nodes: { scanner: { outputs: ["findings"] }, judge: { inputs: ["findings"], outputs: ["score", "verdict"] } },
+  edges: [{ from: "judge", to: "writer", when: (s) => s.score >= 8 }],   // s is typed
+  entry: "scanner", exit: "writer",
+});
+```
+
+One declaration does three jobs:
+
+- **The model is shown the shape.** The auto-generated output contract renders
+  `"score": number (0-10)`, not `"score": ...` — compliance improves from that alone.
+- **Wrong shapes self-correct.** A mismatch becomes the retry reason naming the exact
+  path (`findings.0.severity: …`), so the existing free retry fixes it instead of a
+  bad value poisoning state. What lands in state is zod's *parsed* value.
+- **`when` predicates are typed.** `s.score >= 8` type-checks; no `Number()` guard, and
+  a typo'd key is a compile error rather than a silent `undefined`.
+
+Entirely **additive**: keys with no schema behave exactly as before, so existing scenes
+are unaffected. Schema the keys gates depend on; leave prose keys as plain strings.
+
 Three things carry the design:
 
 - **`inputs` / `outputs` are the whole data-flow contract** — and the access-control

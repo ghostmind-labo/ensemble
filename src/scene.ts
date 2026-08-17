@@ -72,6 +72,11 @@ const sceneSchema = z
   .object({
     name: identifier,
     description: z.string().optional(),
+    // Zod schemas, passed through untouched: z.custom keeps the real object so
+    // safeParse still works (a validating proxy would wrap and break it).
+    state: z
+      .record(z.custom<unknown>((v) => typeof (v as { safeParse?: unknown })?.safeParse === "function", "must be a zod schema"))
+      .optional(),
     defaults: z
       .object({
         model: z.string().optional(),
