@@ -118,10 +118,12 @@ its reply is recorded but nothing is harvested.
 
 ## 2 · The operating loop: validate → run → read → revise
 
-**Prefer the MCP tools when they are available** (this plugin ships an `ensemble` MCP
-server; it also runs anywhere via `ensemble mcp serve`). They exist precisely for an
-agent operating runs: `run_scene` returns the runId **immediately** and the run
-continues in the background, so you keep working instead of blocking on a shell.
+**Prefer the MCP tools when they are available.** This plugin bundles the `ensemble`
+MCP server, so installing the plugin is all the setup there is — the tools may appear
+prefixed (`mcp__plugin_ensemble_ensemble__run_scene`) or bare, depending on how the
+server was registered. They exist precisely for an agent operating runs: `run_scene`
+returns the runId **immediately** and the run continues in the background, so you keep
+working instead of blocking on a shell.
 
 | Tool | Use |
 |---|---|

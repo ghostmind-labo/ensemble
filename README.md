@@ -181,19 +181,29 @@ So "a workflow per folder" is simply: **put a `.mts` file in it.** Drop `review.
 in a repo and run it there — its `.ensemble/runs/` and any `ensemble.json` are that
 project's, while the tool itself stays global.
 
-### Getting the plugin (optional, and the lowest-friction path)
+### Getting the plugin — the lowest-friction path
 
-The plugin bundles the **skill** — the operating manual that teaches your agent the
-scene format, the patterns, casting, and the budget/resume discipline — plus the MCP
-server registration. With it installed you skip the syntax entirely and just ask:
+The plugin bundles the **skill** (the operating manual that teaches your agent the
+scene format, the patterns, casting, and the budget/resume discipline) **and the MCP
+server**, wired up automatically. Two lines, and there is nothing else to configure:
+
+```
+/plugin marketplace add ghostmind-labo/ensemble
+/plugin install ensemble@ghostmind-ensemble
+```
+
+**No separate `npm i -g`, no `claude mcp add`.** The bundled server prefers an
+`ensemble` already on your PATH and otherwise falls back to `npx`, so it works on a
+machine with nothing installed — the first launch just pays a download.
+
+Then you skip the syntax entirely and ask for what you want:
 
 > *"Build me a scene where three models answer independently and a fourth picks the
 > best, then run it on this question with a $0.50 cap."*
 
-```bash
-/plugin marketplace add ghostmind-labo/ensemble
-/plugin install ensemble@ghostmind
-```
+> Already ran `claude mcp add ensemble` by hand? Drop it with
+> `claude mcp remove ensemble -s user` once the plugin is installed, or you will have
+> the same tools twice.
 
 **Skill and MCP are complements, not alternatives.** The skill is *knowledge* (how
 to write a good scene, what to do when a gate never passes); the MCP is *hands* (start,
@@ -541,9 +551,19 @@ Code, or an external agent framework — can operate runs without a shell:
 | `resume_run(runId, budget?)` | continue from the checkpoint, budget cumulative |
 | `list_runs()` | newest first, with resumability |
 
+Installing the plugin wires this up for you. To register it by hand instead — in
+Claude Code, or any other MCP host:
+
+```bash
+claude mcp add ensemble -s user -- ensemble mcp serve    # -s user = every project
+```
+
 ```json
 { "mcpServers": { "ensemble": { "command": "ensemble", "args": ["mcp", "serve"] } } }
 ```
+
+There is **no daemon and no port**: the host spawns `ensemble mcp serve` on stdio
+when it needs it and reaps it afterwards.
 
 Peek and status are reads of the checkpoint files, and stop is safe because resume
 exists — so the server holds nothing but an AbortController per live run. If it
@@ -605,8 +625,11 @@ promotion is a deliberate step.
 
 ## Status
 
-v0.2 — **fully self-contained**; the opencode dependency is gone. Verified: per-node
+v0.7 — **fully self-contained**; the opencode dependency is gone. Verified: per-node
 cross-vendor routing, the agent loop calling built-in *and* MCP tools until done,
 skills inlined from SKILL.md, function conditions, loop caps, parallel groups, token
-streaming, validate-before-save editing. Not built yet: the orchestrator node (dynamic
-routing) and drag-and-drop editing.
+streaming, validate-before-save editing, hard cost budgets, resumable runs, and
+ensemble driving itself over MCP.
+
+Not built yet: the orchestrator node (dynamic routing), drag-and-drop editing, and an
+`ask` node that pauses a run for a human — or an agent — to answer before continuing.
