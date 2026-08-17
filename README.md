@@ -445,6 +445,31 @@ when the file's hash changed, because loop counters are keyed by edge order.
 `costs.json` (per-node receipt), `journal.json` (graph position, for `resume`), and
 `result.md` (every key rendered, on completion).
 
+## Ensemble as an MCP server
+
+The primary consumer of ensemble is often another agent. `ensemble mcp serve`
+exposes the whole run lifecycle as MCP tools over stdio, so any MCP host — Claude
+Code, or an external agent framework — can operate runs without a shell:
+
+| Tool | Behaviour |
+|---|---|
+| `validate_scene` | the free pre-flight check |
+| `run_scene(file, goal, budget?)` | starts the run, returns the runId **immediately** |
+| `run_status(runId)` | running/stopped/completed · graph position · spend · recent activity |
+| `peek_state(runId, keys?)` | the blackboard mid-run, values clipped for context safety |
+| `stop_run(runId)` | abort — safe, because the position is journalled and resumable |
+| `resume_run(runId, budget?)` | continue from the checkpoint, budget cumulative |
+| `list_runs()` | newest first, with resumability |
+
+```json
+{ "mcpServers": { "ensemble": { "command": "ensemble", "args": ["mcp", "serve"] } } }
+```
+
+Peek and status are reads of the checkpoint files, and stop is safe because resume
+exists — so the server holds nothing but an AbortController per live run. If it
+dies, in-flight runs die *resumably*: the same failure story as everywhere else.
+Programmatic embedding gets the same thing via `buildEnsembleServer()`.
+
 ## Using it as a library
 
 ```ts

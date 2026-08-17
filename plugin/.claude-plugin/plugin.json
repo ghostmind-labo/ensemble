@@ -1,6 +1,6 @@
 {
   "name": "ensemble",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Author, run, observe, and revise multi-model agent scenes with @ghostmind-dev/ensemble.",
   "author": {
     "name": "ghostmind",

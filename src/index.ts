@@ -53,3 +53,6 @@ export type { Layout, LayoutNode, LayoutTarget } from "./view.ts";
 // --- local server -----------------------------------------------------------
 export { serve } from "./serve.ts";
 export type { ServeOptions } from "./serve.ts";
+
+// --- ensemble as an MCP server ----------------------------------------------
+export { buildEnsembleServer, serveMcpStdio } from "./mcp-serve.ts";

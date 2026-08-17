@@ -1,6 +1,6 @@
 ---
 name: ensemble
-description: "Author and run multi-model agent scenes with @ghostmind-dev/ensemble. Use when the user wants several AI models working together on a goal — a jury/second opinion from other vendors, a score-gated improve-until-good loop, a research→critique→write pipeline, or any multi-agent workflow where each node can be a different model (via OpenRouter) or a tool-using agent with MCP servers and scoped skills. Trigger on: 'ensemble', 'scene', 'multi-model', 'jury', 'ask several models', 'agent graph/workflow/team', or requests to build/modify/run a scene (.mts) file. Covers writing scenes, validating, running under a cost cap, resuming a stopped run, watching live, reading results, and revising a scene based on what a run produced."
+description: "Author and run multi-model agent scenes with @ghostmind-dev/ensemble. Use when the user wants several AI models working together on a goal — a jury/second opinion from other vendors, a score-gated improve-until-good loop, a research→critique→write pipeline, or any multi-agent workflow where each node can be a different model (via OpenRouter) or a tool-using agent with MCP servers and scoped skills. Trigger on: 'ensemble', 'scene', 'multi-model', 'jury', 'ask several models', 'agent graph/workflow/team', or requests to build/modify/run a scene (.mts) file. Covers writing scenes, validating, running under a cost cap, resuming a stopped run, operating runs through the ensemble MCP tools (run_scene/run_status/peek_state/stop_run/resume_run), watching live, reading results, and revising a scene based on what a run produced."
 ---
 
 # ensemble
@@ -117,6 +117,26 @@ its reply is recorded but nothing is harvested.
   the gate or synthesis step. `ensemble models [filter]` lists what's reachable.
 
 ## 2 · The operating loop: validate → run → read → revise
+
+**Prefer the MCP tools when they are available** (this plugin ships an `ensemble` MCP
+server; it also runs anywhere via `ensemble mcp serve`). They exist precisely for an
+agent operating runs: `run_scene` returns the runId **immediately** and the run
+continues in the background, so you keep working instead of blocking on a shell.
+
+| Tool | Use |
+|---|---|
+| `validate_scene` | free pre-flight — always before spending |
+| `run_scene(file, goal, budget?)` | async start → runId |
+| `run_status(runId)` | running/stopped/completed · position · spend · recent activity |
+| `peek_state(runId, keys?)` | read the blackboard mid-run (clipped values) |
+| `stop_run(runId)` | abort safely — position journalled, resumable |
+| `resume_run(runId, budget?)` | continue from the checkpoint, cumulative budget |
+| `list_runs()` | what exists, what's resumable |
+
+The loop: start with a low budget → poll `run_status` → `peek_state` at the partial
+work → stop if it's going sideways, resume with a higher cap only if it earned it.
+
+The CLI does the same jobs when there is a shell and no MCP host:
 
 ```bash
 ensemble validate review.mts                        # FREE — always run before spending

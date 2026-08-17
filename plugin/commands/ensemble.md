@@ -10,6 +10,8 @@ arguments (if any): $ARGUMENTS
 
 Follow the skill's workflow:
 
+0. If the `ensemble` MCP tools are available (run_scene, run_status, …), prefer them
+   over the CLI — runs start async and can be peeked, stopped, and resumed as tools.
 1. Check setup (`ensemble` binary or local install, `OPENROUTER_API_KEY`).
 2. If they're describing a workflow to build: author a scene file (name it `.mts` — no package.json needed),
    choosing the right pattern (jury, score gate, pipeline) and casting models

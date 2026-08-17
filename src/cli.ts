@@ -17,6 +17,8 @@ ${c.bold("Usage")}
   ensemble validate <scene.ts>       Check a scene without running it
   ensemble skills                      List the skill + MCP registry (from config)
   ensemble mcp                         Connect MCP servers and list their tools
+  ensemble mcp serve                   Expose ensemble AS an MCP server (stdio) —
+                                       run/status/peek/stop/resume tools for agents
   ensemble mcp login <server>          Authorize an MCP server that needs OAuth
   ensemble mcp logout <server>         Forget that server's stored tokens
   ensemble models [filter]             List models available through OpenRouter
@@ -539,6 +541,12 @@ async function main(): Promise<number> {
       if (sub === "login") return cmdLogin(rest[1], { logout: false });
       if (sub === "logout") return cmdLogin(rest[1], { logout: true });
       if (sub === "auth") return cmdLogin(rest[1], { logout: false });
+      if (sub === "serve") {
+        // stdio MCP: stdout belongs to the protocol; this call never returns.
+        const { serveMcpStdio } = await import("./mcp-serve.ts");
+        await serveMcpStdio();
+        return 0;
+      }
       return cmdMcp();
     }
     case "models":
@@ -564,7 +572,8 @@ function finish(code: number, keepAlive: boolean): void {
   else process.stdout.once("drain", done);
 }
 
-const isServe = process.argv[2] === "serve";
+const isServe =
+  process.argv[2] === "serve" || (process.argv[2] === "mcp" && process.argv[3] === "serve");
 
 main()
   .then((code) => finish(code, isServe))
