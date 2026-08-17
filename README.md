@@ -134,6 +134,79 @@ ensemble mcp           # MCP servers, CONNECTED, with their tools
 ensemble models gpt    # models you can reach
 ```
 
+## Two ways to drive it — pick one, or use both
+
+Ensemble is one engine with two front doors. **Same scenes, same runs, same run
+directory** — they differ only in who is holding the wheel.
+
+| | **CLI** | **MCP tools** |
+|---|---|---|
+| For | you, at a terminal | an AI agent, with or without a shell |
+| Start a run | `ensemble run …` — **blocks** until done | `run_scene` — returns a runId **instantly** |
+| Watch it | terminal output, or `ensemble serve` | `run_status` / `peek_state`, polled |
+| Stop it | ctrl-C | `stop_run` |
+| Continue | `ensemble resume <dir>` | `resume_run` |
+
+The rule of thumb: **if a human is watching, use the CLI; if an agent is deciding,
+use the MCP.** The CLI blocks, which is fine when you are sitting there and wrong
+when an agent needs to do other work meanwhile.
+
+### Installing it once, for every project
+
+The MCP server is **global, not per-project**. You register it a single time:
+
+```bash
+npm i -g @ghostmind-dev/ensemble
+claude mcp add ensemble -s user -- ensemble mcp serve   # -s user = all projects
+```
+
+`-s user` is what makes it global. There is **no daemon to start and no port** —
+your MCP host launches `ensemble mcp serve` on stdio when it needs it and shuts it
+down after. Nothing runs in the background between sessions.
+
+### Then per-folder, nothing to set up
+
+Runs are **cwd-relative**, so the folder you are in decides three things — with no
+per-project install, config file, or init step:
+
+```
+my-project/
+├── review.mts              ← your scene(s): just files, anywhere
+├── .ensemble/runs/…        ← run artifacts land here, created on first run
+├── ensemble.json           ← OPTIONAL: MCP servers for agent nodes
+└── .claude/skills/…        ← OPTIONAL: skills for agent nodes
+```
+
+So "a workflow per folder" is simply: **put a `.mts` file in it.** Drop `review.mts`
+in a repo and run it there — its `.ensemble/runs/` and any `ensemble.json` are that
+project's, while the tool itself stays global.
+
+### Getting the plugin (optional, and the lowest-friction path)
+
+The plugin bundles the **skill** — the operating manual that teaches your agent the
+scene format, the patterns, casting, and the budget/resume discipline — plus the MCP
+server registration. With it installed you skip the syntax entirely and just ask:
+
+> *"Build me a scene where three models answer independently and a fourth picks the
+> best, then run it on this question with a $0.50 cap."*
+
+```bash
+/plugin marketplace add ghostmind-labo/ensemble
+/plugin install ensemble@ghostmind
+```
+
+**Skill and MCP are complements, not alternatives.** The skill is *knowledge* (how
+to write a good scene, what to do when a gate never passes); the MCP is *hands* (start,
+watch, stop, resume). The skill even tells the agent to prefer the MCP tools when
+they are present. Use both — that is the intended setup.
+
+Rough guide to what you need:
+
+- **Just you, terminal** → global install + API key. Done.
+- **Agent writes and runs scenes for you** → add the plugin (skill + MCP).
+- **Agent in another host / no shell** → `claude mcp add …` (or point any MCP host at
+  `ensemble mcp serve`).
+
 ## Where skills and MCP servers live
 
 **You probably don't need to configure anything.** Both registries are inherited from
@@ -311,14 +384,21 @@ Name scenes `.mts` and nothing else is needed. (`.ts` also works when the neares
 ## Commands
 
 ```bash
-ensemble run <scene.mts> "<goal>"     # execute a scene
+ensemble run <scene.mts> "<goal>"     # execute a scene (--budget caps the spend)
+ensemble resume <run-dir>            # continue a stopped run from its checkpoint
 ensemble serve [scenes-dir]          # live viewer + editor in the browser
 ensemble view <scene.mts>             # draw it (--mermaid, --html[=file])
 ensemble validate <scene.mts>         # check it without spending tokens
 ensemble skills                      # list the skill + MCP registry (from config)
 ensemble mcp                         # connect MCP servers and list their tools
+ensemble mcp serve                   # expose ensemble AS an MCP server (for agents)
 ensemble models [filter]             # list models available through OpenRouter
+ensemble version                     # installed version (also --version / -V)
 ```
+
+`ensemble --help` prints a **First time** walkthrough and the one-line command that
+wires ensemble into an AI agent — the tool explains itself, so this README is not
+the only place the setup lives.
 
 `validate` catches unknown skills, edges to missing nodes, unreachable exits,
 parallel output collisions, and skills declared on model nodes — in milliseconds,

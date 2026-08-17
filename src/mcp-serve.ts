@@ -17,13 +17,13 @@
  */
 import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { createRequire } from "node:module";
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { loadRegistry } from "./registry.ts";
 import { loadScene, SceneError } from "./scene.ts";
 import { runScene, readJournal, hashScene, type Journal, type RunResult } from "./engine.ts";
+import { packageVersion } from "./version.ts";
 import type { RunEvent } from "./events.ts";
 import type { State } from "./state.ts";
 
@@ -88,14 +88,7 @@ export function buildEnsembleServer(root = process.cwd()): McpServer {
   const runsDir = join(cwd, ".ensemble", "runs");
   const live = new Map<string, LiveRun>();
 
-  const version = (() => {
-    try {
-      return (createRequire(import.meta.url)("../package.json") as { version: string }).version;
-    } catch {
-      return "0.0.0";
-    }
-  })();
-  const server = new McpServer({ name: "ensemble", version });
+  const server = new McpServer({ name: "ensemble", version: packageVersion() });
 
   /**
    * Launches a (fresh or resumed) run without awaiting it, returning as soon as
