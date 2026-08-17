@@ -70,10 +70,13 @@
   }
 
   /* ---------- canvas ---------- */
-  main { grid-area: canvas; overflow: auto; position: relative; padding: 20px 24px 28px; }
+  /* Toolbar is OUTSIDE the scroller, so it cannot drift sideways when a zoomed
+     graph is panned; only #canvas scrolls. */
+  main { grid-area: canvas; display: flex; flex-direction: column; overflow: hidden; position: relative; }
+  #canvas { flex: 1; overflow: auto; position: relative; padding: 0 24px 28px; }
   .toolbar {
-    position: sticky; top: 0; z-index: 5; display: flex; gap: 8px; align-items: center;
-    padding-bottom: 14px; background: linear-gradient(var(--bg) 72%, transparent);
+    flex: none; z-index: 5; display: flex; gap: 8px; align-items: center;
+    padding: 20px 24px 14px; background: var(--bg);
   }
   .toolbar input[type=text] {
     flex: 1; padding: 8px 11px; border: 1px solid var(--line); border-radius: 8px;
@@ -105,6 +108,16 @@
      Transforms do not affect layout, so .stage is sized explicitly in js —
      otherwise a zoomed-in graph would have nothing to scroll to. */
   #viewport { position: relative; transform-origin: 0 0; }
+  /* Empty canvas is grabbable, so a zoomed-in graph can be panned by dragging
+     rather than hunting for scrollbars. Nodes keep their own cursors. */
+  /* Shrink-to-fit + auto margins: the graph sits centred when it is smaller than
+     the viewport (instead of hugging the left) and pans when it is larger. */
+  #layers { width: max-content; }
+  .stage { cursor: grab; }
+  #canvas.panning, #canvas.panning .stage { cursor: grabbing; }
+  /* A pan that crosses a node would otherwise select its text mid-drag. */
+  #canvas.panning, #canvas.panning * { user-select: none; }
+  #canvas.panning .node { pointer-events: none; }
   #viewport svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
   .layer { display: flex; gap: 26px; justify-content: center; margin-bottom: 46px; position: relative; z-index: 2; }
 
@@ -185,6 +198,14 @@
          border-radius: 7px 7px 0 0; cursor: pointer; }
   .tab.active { color: var(--fg); background: var(--accent-soft); font-weight: 600; }
   #savemsg { margin-left: auto; font-size: 11px; padding-right: 8px; }
+  /* The panel's own hide/show control — where you reach for it, rather than only
+     in the toolbar at the far top-right. Stays visible when collapsed. */
+  .bartoggle {
+    border: none; background: none; color: var(--muted); font-size: 13px;
+    padding: 4px 12px 6px; cursor: pointer; margin-left: auto;
+  }
+  #savemsg:not(:empty) ~ .bartoggle { margin-left: 0; }
+  .bartoggle:hover { color: var(--accent); background: var(--accent-soft); }
   .pane { display: none; overflow-y: auto; flex: 1; }
   .pane.active { display: block; }
   .pane.src.active { display: flex; flex-direction: column; }
@@ -245,9 +266,11 @@
     </span>
     <button class="iconbtn" id="togglebar" title="Hide/show the bottom panel (⌘\)">▾</button>
   </div>
-  <div id="problems"></div>
-  <div class="stage" id="stage">
-    <div id="viewport"><svg id="wires"></svg><div id="layers"></div></div>
+  <div id="canvas">
+    <div id="problems"></div>
+    <div class="stage" id="stage">
+      <div id="viewport"><svg id="wires"></svg><div id="layers"></div></div>
+    </div>
   </div>
 </main>
 
@@ -259,6 +282,7 @@
       <button class="tab" data-tab="costs">Costs</button>
       <button class="tab" data-tab="source">Source</button>
       <span id="savemsg"></span>
+      <button id="barToggle" class="bartoggle" title="Hide/show this panel (⌘\)">▾</button>
     </div>
     <div class="log pane active" id="log"><div class="empty">Run a scene to see live output.</div></div>
     <div class="pane" id="state"><div class="empty">State appears here as nodes complete.</div></div>
@@ -289,23 +313,41 @@ const state = {
 
 // ---------------------------------------------------------------- zoom
 const ZOOM_MIN = 0.25, ZOOM_MAX = 2;
-const clampZoom = (z) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
+const clampZoom = (z) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(z * 100) / 100));
 
 function applyZoom() {
-  const vp = $("viewport"), layers = $("layers");
-  vp.style.transform = `scale(${state.zoom})`;
+  const vp = $("viewport"), layers = $("layers"), stage = $("stage"), canvas = $("canvas");
   // Transforms do not affect layout, so size the stage to the SCALED content or
   // there is nothing to scroll to when zoomed in.
-  $("stage").style.width = `${layers.offsetWidth * state.zoom}px`;
-  $("stage").style.height = `${layers.offsetHeight * state.zoom}px`;
+  // Free space you can pan INTO on all four sides, sized from the viewport so the
+  // graph can be dragged right off any edge. Clamping to the graph's bounding box
+  // is what made the canvas feel stuck.
+  const padX = state.padX = Math.round(canvas.clientWidth * 0.9);
+  const padY = state.padY = Math.round(canvas.clientHeight * 0.9);
+  const w = layers.offsetWidth * state.zoom + padX * 2;
+  stage.style.width = `${w}px`;
+  stage.style.height = `${layers.offsetHeight * state.zoom + padY * 2}px`;
+  vp.style.transform = `translate(${padX}px, ${padY}px) scale(${state.zoom})`;
+  // Centre ONLY while it fits. `margin: auto` would centre an overflowing graph
+  // too, and a scroll container cannot scroll past zero — so its left half would
+  // be permanently unreachable. Explicit slack keeps left at 0 when it overflows.
+  stage.style.marginLeft = `${Math.max(0, (canvas.clientWidth - w) / 2)}px`;
   $("zoomlabel").textContent = `${Math.round(state.zoom * 100)}%`;
   localStorage.setItem("ensemble:zoom", String(state.zoom));
   requestAnimationFrame(wires);
 }
 
 /** Zooms about the centre of what you are looking at, not the top-left corner. */
+/** Puts the graph itself in the middle of the viewport, past the surrounding pad. */
+function centerGraph() {
+  const canvas = $("canvas"), layers = $("layers");
+  const gw = layers.offsetWidth * state.zoom, gh = layers.offsetHeight * state.zoom;
+  canvas.scrollLeft = (state.padX ?? 0) + gw / 2 - canvas.clientWidth / 2;
+  canvas.scrollTop = (state.padY ?? 0) + gh / 2 - canvas.clientHeight / 2;
+}
+
 function setZoom(z) {
-  const main = document.querySelector("main");
+  const main = $("canvas");
   const prev = state.zoom || 1;
   const next = clampZoom(z);
   if (next === prev) return;
@@ -321,7 +363,7 @@ function setZoom(z) {
 
 /** Scale so the whole graph fits the visible canvas, never magnifying past 1:1. */
 function zoomToFit() {
-  const layers = $("layers"), main = document.querySelector("main");
+  const layers = $("layers"), main = $("canvas");
   if (!layers.offsetWidth || !layers.offsetHeight) return;
   const padding = 48;
   const fit = Math.min(
@@ -329,6 +371,7 @@ function zoomToFit() {
     (main.clientHeight - padding) / layers.offsetHeight,
   );
   setZoom(Math.min(1, fit));
+  centerGraph();
 }
 
 // ---------------------------------------------------------------- costs
@@ -476,6 +519,7 @@ function draw() {
   applyOffsets();
   attachDrag();
   applyZoom();          // re-sizes the stage for the new content, then draws wires
+  centerGraph();        // …and start looking at the graph, not the surrounding pad
 }
 
 // ---------------------------------------------------------------- drag
@@ -771,19 +815,57 @@ $("stop").onclick = () => fetch("/api/stop", { method: "POST" });
 $("goal").addEventListener("keydown", (e) => { if (e.key === "Enter") $("run").click(); });
 
 // ---------------------------------------------------------------- zoom + layout
-$("zoomin").onclick = () => setZoom(state.zoom + 0.1);
-$("zoomout").onclick = () => setZoom(state.zoom - 0.1);
+const STEP = 1.15;
+$("zoomin").onclick = () => setZoom(state.zoom * STEP);
+$("zoomout").onclick = () => setZoom(state.zoom / STEP);
 $("zoomfit").onclick = zoomToFit;
 
 // Collapsing the console hands its 240px back to the canvas; the tab strip stays
 // so the panes are one click away rather than gone.
 function setConsole(collapsed) {
   document.body.classList.toggle("console-collapsed", collapsed);
+  // Both controls point the same way: ▴ reopens, ▾ hides.
   $("togglebar").textContent = collapsed ? "▴" : "▾";
+  $("barToggle").textContent = collapsed ? "▴" : "▾";
   localStorage.setItem("ensemble:console", collapsed ? "collapsed" : "open");
   requestAnimationFrame(wires);
 }
-$("togglebar").onclick = () => setConsole(!document.body.classList.contains("console-collapsed"));
+const toggleConsole = () => setConsole(!document.body.classList.contains("console-collapsed"));
+$("togglebar").onclick = toggleConsole;
+$("barToggle").onclick = (e) => { e.stopPropagation(); toggleConsole(); };
+
+// Drag empty canvas to pan — the only way to move a zoomed-in graph left/right
+// without reaching for a scrollbar. Node drags own their own mousedown, so this
+// bails out on anything inside a target.
+(() => {
+  const main = $("canvas");
+  main.addEventListener("mousedown", (down) => {
+    if (down.button !== 0) return;
+    if (down.target.closest("[data-target]") || down.target.closest(".toolbar")) return;
+
+    down.preventDefault();   // suppress the native text-selection drag
+    const sx = main.scrollLeft, sy = main.scrollTop;
+    const ox = down.clientX, oy = down.clientY;
+    let moved = false;
+
+    const move = (m) => {
+      const dx = m.clientX - ox, dy = m.clientY - oy;
+      if (!moved && Math.hypot(dx, dy) < 3) return;   // let a plain click stay a click
+      moved = true;
+      main.classList.add("panning");
+      // Content follows the cursor, so the scroll offset moves against it.
+      main.scrollLeft = sx - dx;
+      main.scrollTop = sy - dy;
+    };
+    const up = () => {
+      removeEventListener("mousemove", move);
+      removeEventListener("mouseup", up);
+      main.classList.remove("panning");
+    };
+    addEventListener("mousemove", move);
+    addEventListener("mouseup", up);
+  });
+})();
 // Clicking a tab while collapsed should reopen rather than do nothing visible.
 for (const t of document.querySelectorAll(".tab")) {
   t.addEventListener("click", () => setConsole(false));
@@ -791,12 +873,13 @@ for (const t of document.querySelectorAll(".tab")) {
 setConsole(localStorage.getItem("ensemble:console") === "collapsed");
 
 // ⌘/ctrl + scroll zooms, the convention every canvas app uses.
-document.querySelector("main").addEventListener(
+$("canvas").addEventListener(
   "wheel",
   (e) => {
     if (!e.ctrlKey && !e.metaKey) return;
     e.preventDefault();
-    setZoom(state.zoom - Math.sign(e.deltaY) * 0.08);
+    const factor = Math.exp(-Math.max(-40, Math.min(40, e.deltaY)) * 0.0035);
+    setZoom(state.zoom * factor);
   },
   { passive: false },
 );
@@ -804,8 +887,8 @@ document.querySelector("main").addEventListener(
 addEventListener("keydown", (e) => {
   const typing = /^(INPUT|TEXTAREA)$/.test(document.activeElement?.tagName ?? "");
   if (typing || !(e.metaKey || e.ctrlKey)) return;
-  if (e.key === "=" || e.key === "+") { e.preventDefault(); setZoom(state.zoom + 0.1); }
-  else if (e.key === "-") { e.preventDefault(); setZoom(state.zoom - 0.1); }
+  if (e.key === "=" || e.key === "+") { e.preventDefault(); setZoom(state.zoom * STEP); }
+  else if (e.key === "-") { e.preventDefault(); setZoom(state.zoom / STEP); }
   else if (e.key === "0") { e.preventDefault(); zoomToFit(); }
   else if (e.key === "\\") { e.preventDefault(); $("togglebar").click(); }
 });

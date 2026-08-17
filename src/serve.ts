@@ -346,7 +346,10 @@ export async function serve(opts: ServeOptions): Promise<void> {
 
   const address = server.address();
   const port = typeof address === "object" && address ? address.port : opts.port;
-  const href = `http://127.0.0.1:${port}`;
+  // Bound to the loopback interface, but shown and opened as `localhost`: it is
+  // what people expect to see, and it keeps browser storage (the saved node
+  // positions and zoom) under one origin instead of splitting it per spelling.
+  const href = `http://localhost:${port}`;
 
   info(`${c.bold("ensemble serve")} ${c.dim("·")} ${c.cyan(href)}`);
   info(c.dim(`scenes: ${scenesDir}`));
