@@ -1,4 +1,5 @@
 import { parseArgs } from "node:util";
+import { existsSync } from "node:fs";
 import { loadRegistry } from "./registry.ts";
 import { loadScene, SceneError } from "./scene.ts";
 import { runScene, readJournal, hashScene } from "./engine.ts";
@@ -26,7 +27,8 @@ ${c.bold("Usage")}
   ensemble version                     Print the installed version
 
 ${c.bold("Options")}
-  --port <n>        Attach to an opencode server already on this port
+  --port <n>        serve: port to listen on (default 7777) — give each project
+                    its own port to watch several at once
   --max-runs <n>    Global node-execution cap (default 50)
   --timeout <min>   Wall-clock limit in minutes (default 20)
   --budget <usd>    Hard cost cap for the run, e.g. --budget 0.50
@@ -38,9 +40,14 @@ ${c.bold("Options")}
   --version, -V     Print the installed version
   --help
 
+${c.bold("Where scenes live")}
+  .ensemble/scenes/*.mts     ${c.dim("the convention — everything ensemble in one place")}
+  .ensemble/runs/            ${c.dim("run artifacts, created for you")}
+  ${c.dim("`ensemble run <path>` accepts any path; `serve` defaults to .ensemble/scenes")}
+
 ${c.bold("First time")}
   1. export OPENROUTER_API_KEY=sk-or-...      ${c.dim("the only credential needed")}
-  2. write one file, my.mts:                  ${c.dim("no package.json, no install")}
+  2. write .ensemble/scenes/my.mts:           ${c.dim("no package.json, no install")}
        import { scene } from "@ghostmind-dev/ensemble";
        export default scene({
          name: "ask",
@@ -48,8 +55,8 @@ ${c.bold("First time")}
          nodes: { answer: { outputs: ["answer"] } },
          entry: "answer", exit: "answer",
        });
-  3. ensemble validate my.mts                 ${c.dim("free — catches mistakes")}
-  4. ensemble run my.mts "your goal" --budget 0.25
+  3. ensemble validate .ensemble/scenes/my.mts        ${c.dim("free — catches mistakes")}
+  4. ensemble run .ensemble/scenes/my.mts "goal" --budget 0.25
 
 ${c.bold("Driving it from an AI agent")} ${c.dim("(Claude Code, or any MCP host)")}
   claude mcp add ensemble -s user -- ensemble mcp serve
@@ -336,7 +343,7 @@ async function cmdView(
 async function cmdRun(
   path: string | undefined,
   goal: string | undefined,
-  opts: { port?: number; maxRuns?: number; timeout?: number; budget?: number; verbose: boolean },
+  opts: { maxRuns?: number; timeout?: number; budget?: number; verbose: boolean },
 ): Promise<number> {
   if (!path || !goal) {
     error('run needs a scene and a goal: ensemble run <scene.ts> "<goal>"');
@@ -359,7 +366,6 @@ async function cmdRun(
 
   const started = Date.now();
   const result = await runScene(scene, goal, {
-    port: opts.port,
     maxNodeRuns: opts.maxRuns,
     timeoutMs: opts.timeout ? opts.timeout * 60_000 : undefined,
     ...(opts.budget !== undefined ? { budget: opts.budget } : {}),
@@ -595,7 +601,6 @@ async function main(): Promise<number> {
       });
     case "run":
       return cmdRun(rest[0], rest[1], {
-        port: num(values.port),
         maxRuns: num(values["max-runs"]),
         timeout: num(values.timeout),
         budget: num(values.budget),
@@ -612,10 +617,33 @@ async function main(): Promise<number> {
     case "serve": {
       const { serve } = await import("./serve.ts");
       const port = num(values.port) ?? 7777;
+      // Convention is `.ensemble/scenes`; `./scenes` is honoured when a project
+      // already uses it. An explicit argument always wins.
+      const defaultScenesDir = (): string | undefined => {
+        if (existsSync(".ensemble/scenes")) return ".ensemble/scenes";
+        if (existsSync("scenes")) return "scenes"; // legacy layout
+        return undefined;
+      };
+
+      const dir = rest[0] ?? defaultScenesDir();
+      if (!dir) {
+        // Serving a directory with no scenes is a silent dead end — the browser
+        // shows an empty list and nothing explains why.
+        error(
+          `no scenes here — run \`ensemble serve\` from a project root that has an ` +
+            `.ensemble/ folder.\n\n` +
+            `Expected layout:\n` +
+            `  .ensemble/scenes/*.mts   your workflows\n` +
+            `  .ensemble/runs/          run artifacts (created for you)\n\n` +
+            `Start one:  mkdir -p .ensemble/scenes\n` +
+            `Or point at a folder:  ensemble serve <dir>`,
+        );
+        return 1;
+      }
       try {
         await serve({
           port,
-          scenesDir: rest[0] ?? "scenes",
+          scenesDir: dir,
           open: !(values["no-open"] ?? false),
         });
       } catch (err) {

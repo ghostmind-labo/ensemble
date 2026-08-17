@@ -73,10 +73,11 @@ const DEFAULT_SOURCES: Sources = {
 
 function readSources(cwd: string): Sources {
   const merged = { ...DEFAULT_SOURCES };
-  // Project config wins; global fills any gaps.
+  // Later entries win, so project beats global and the convention beats legacy.
   for (const file of [
     join(homedir(), ".config", "ensemble", "ensemble.json"),
     join(cwd, "ensemble.json"),
+    join(cwd, ".ensemble", "ensemble.json"),
   ]) {
     const config = readJson(file);
     const raw = config?.["sources"];
@@ -195,12 +196,17 @@ function collectSkills(cwd: string, sources: Sources): { skills: Map<string, Ski
 }
 
 /**
- * MCP servers, gathered from four places in precedence order:
+ * MCP servers, gathered from five places in precedence order:
  *
- *   1. ./ensemble.json                    (this project, ours)
- *   2. ./.mcp.json                        (this project, Claude Code's format)
- *   3. ~/.config/ensemble/ensemble.json   (global, ours)
- *   4. ~/.claude.json → mcpServers        (global, Claude Code's)
+ *   1. ./.ensemble/ensemble.json          (this project, ours — the convention)
+ *   2. ./ensemble.json                    (this project, ours — legacy location)
+ *   3. ./.mcp.json                        (this project, Claude Code's format)
+ *   4. ~/.config/ensemble/ensemble.json   (global, ours)
+ *   5. ~/.claude.json → mcpServers        (global, Claude Code's)
+ *
+ * Everything a project owns lives under `.ensemble/` — scenes, runs, and config —
+ * so `.ensemble/ensemble.json` is the place to put it. The bare `./ensemble.json`
+ * still loads so existing projects keep working.
  *
  * Reading Claude Code's config is deliberate: a user who already wired up MCP
  * servers there should not have to re-declare them. The two formats differ
@@ -254,8 +260,10 @@ let envLoaded = false;
 function loadDotEnv(cwd: string): void {
   if (envLoaded) return;
   envLoaded = true;
-  const file = join(cwd, ".env");
-  if (!existsSync(file)) return;
+  // Beside the config either way: `.ensemble/.env` for the convention layout,
+  // `./.env` for the legacy one.
+  const file = [join(cwd, ".ensemble", ".env"), join(cwd, ".env")].find((f) => existsSync(f));
+  if (!file) return;
   try {
     const before = { ...process.env };
     process.loadEnvFile(file);
@@ -314,6 +322,7 @@ function readJson(file: string): Record<string, unknown> | undefined {
 function collectMcp(cwd: string, sources: Sources): { mcp: Map<string, McpServer>; configPath?: string } {
   const home = homedir();
   const files: Array<{ file: string; key: string; label: string }> = [
+    { file: join(cwd, ".ensemble", "ensemble.json"), key: "mcp", label: "project:.ensemble/ensemble.json" },
     { file: join(cwd, "ensemble.json"), key: "mcp", label: "project:ensemble.json" },
     { file: join(cwd, ".mcp.json"), key: "mcpServers", label: "project:.mcp.json" },
     { file: join(home, ".config", "ensemble", "ensemble.json"), key: "mcp", label: "global:ensemble.json" },

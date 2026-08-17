@@ -216,6 +216,22 @@ export function buildEnsembleServer(root = process.cwd()): McpServer {
       },
     },
     async ({ file, goal, budget }) => {
+      // This server is scoped to the project it was spawned in (its cwd): that is
+      // where runs land and where ensemble.json / skills are read from. Running a
+      // scene from a DIFFERENT project would silently use the wrong config and
+      // give agent nodes the wrong filesystem root, so refuse instead.
+      const target = resolve(file);
+      if (!target.startsWith(`${cwd}/`) && target !== cwd) {
+        return failure(
+          `that scene is outside this server's project.\n` +
+            `  scene:   ${target}\n` +
+            `  project: ${cwd}\n\n` +
+            `Runs, ensemble.json, and agent-node file access are all resolved from the ` +
+            `project, so running it here would use the wrong ones. Use the ensemble MCP ` +
+            `server (or CLI) in that project instead.`,
+        );
+      }
+
       let scene;
       try {
         scene = await loadScene(file, loadRegistry());
@@ -359,14 +375,23 @@ export function buildEnsembleServer(root = process.cwd()): McpServer {
   server.registerTool(
     "list_runs",
     {
-      description: "List runs in this project, newest first: status, scene, spend, and whether each is resumable.",
+      description:
+        "List runs in this project, newest first: status, scene, spend, and whether each is resumable. Also reports which project this server is bound to — an empty list usually means the server is scoped to a different project than you expect.",
       inputSchema: { limit: z.number().int().positive().optional().describe("Max runs to return (default 10)") },
     },
     async ({ limit }) => {
-      if (!existsSync(runsDir)) return json({ runs: [] });
+      const scenesDir = join(cwd, ".ensemble", "scenes");
+      const project = {
+        root: cwd,
+        scenesDir: existsSync(scenesDir) ? scenesDir : undefined,
+        scenes: existsSync(scenesDir)
+          ? readdirSync(scenesDir).filter((f) => f.endsWith(".mts") || f.endsWith(".ts"))
+          : [],
+      };
+      if (!existsSync(runsDir)) return json({ project, runs: [] });
       const ids = readdirSync(runsDir).sort().reverse().slice(0, limit ?? 10);
       const runs = ids.map((id) => statusOf(id)).filter(Boolean);
-      return json({ runs });
+      return json({ project, runs });
     },
   );
 

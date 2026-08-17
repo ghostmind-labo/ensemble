@@ -34,7 +34,6 @@ import {
 import type { EventSink, NodeMeta } from "./events.ts";
 
 export interface RunOptions {
-  port?: number;
   maxNodeRuns?: number;
   timeoutMs?: number;
   /**
