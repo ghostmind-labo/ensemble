@@ -32,6 +32,7 @@ import {
   type State,
 } from "./state.ts";
 import { loadKeyFiles } from "./credentials.ts";
+import { recordRun } from "./index-file.ts";
 import type { EventSink, NodeMeta } from "./events.ts";
 
 export interface RunOptions {
@@ -508,6 +509,17 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
     skills: spec.skills ?? [],
     mcp: spec.mcp ?? [],
   }));
+  // One line in the machine-level index so a single viewer can find this run
+  // wherever it was started from. Resumes reuse the id, so the reader dedupes.
+  recordRun({
+    runId: id,
+    runDir,
+    project: root,
+    scene: scene.name,
+    sceneFile: scene.file,
+    startedAt: new Date().toISOString(),
+  });
+
   emit({ type: "run:start", runId: id, scene: scene.name, goal, nodes: nodeMeta });
 
   const hub = new ToolHub(root, servers);

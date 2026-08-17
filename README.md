@@ -599,6 +599,20 @@ says so immediately instead of burning a node first.
 Editing the scene between attempts is allowed, and often the point: a resume warns
 when the file's hash changed, because loop counters are keyed by edge order.
 
+## Seeing every run: one viewer, all projects
+
+Runs land in the project they belong to, but each one also appends a pointer line to
+`~/.ensemble/index.jsonl`. `ensemble serve`'s **Runs** tab reads that, so a viewer
+started in *any* project lists every run on the machine — grouped project → scene →
+run, with status, spend, and whatever a paused run is waiting for. Click one to read
+its journal and state.
+
+That closes the gap where a run an agent started over MCP was invisible to the
+browser: the viewer no longer shows only its own runs, it reads the journals, which
+are written after every node. Append-only JSONL because several runners write at
+once; the reader assembles the tree and drops entries whose directory is gone. The
+index is pure discovery — delete it and it refills.
+
 ## Run artifacts
 
 `.ensemble/runs/<timestamp>-<scene>/` — `state.json` (checkpointed blackboard),

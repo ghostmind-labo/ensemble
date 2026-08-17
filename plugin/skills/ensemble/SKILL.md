@@ -311,7 +311,12 @@ cat .ensemble/runs/<timestamp>-<scene>/state.json   # the full blackboard
 cat .ensemble/runs/<timestamp>-<scene>/result.md    # every key rendered
 cat .ensemble/runs/<timestamp>-<scene>/costs.json   # per-node spend — who burned it
 cat .ensemble/runs/<timestamp>-<scene>/journal.json # graph position — what resume uses
+cat ~/.ensemble/index.jsonl                         # every run on this machine, any project
 ```
+
+`ensemble serve` has a **Runs** tab that reads that index, so runs you started over
+MCP — in this project or any other — are visible there, live, with status, spend, and
+a pending question if one is waiting. Click a run for its journal and state.
 
 **A stopped run is never a dead end.** Budget spent, node failed, ctrl-C, timeout —
 `ensemble resume <run-dir>` continues from the checkpoint, skipping everything already

@@ -230,6 +230,29 @@
             border: 1px solid var(--fail); color: var(--fail); font-size: 12px; margin-bottom: 14px; }
   .banner ul { margin: 6px 0 0; padding-left: 18px; }
 
+  /* ---------- runs tab ---------- */
+  #runs { padding: 10px 16px; font-size: 12px; }
+  #runs .proj { margin-bottom: 12px; }
+  #runs .projname { font-family: var(--mono); font-size: 10.5px; color: var(--muted); }
+  #runs .projname b { color: var(--fg); font-size: 12px; margin-right: 6px;
+                      text-transform: uppercase; letter-spacing: .06em; }
+  #runs .sc { margin: 4px 0 0 10px; }
+  #runs .scname { font-family: var(--mono); font-size: 11px; color: var(--accent); }
+  #runs .run {
+    display: grid; grid-template-columns: 74px 1fr 130px 70px; gap: 8px; align-items: center;
+    padding: 3px 0 3px 10px; font-family: var(--mono); font-size: 11px; cursor: pointer;
+    border-left: 2px solid transparent;
+  }
+  #runs .run:hover { background: var(--accent-soft); border-left-color: var(--accent); }
+  #runs .st { text-transform: uppercase; font-size: 9.5px; letter-spacing: .05em; }
+  #runs .st.completed { color: var(--ok); }
+  #runs .st.waiting   { color: var(--warn); }
+  #runs .st.stopped   { color: var(--fail); }
+  #runs .st.unknown   { color: var(--muted); }
+  #runs .rid { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #runs .meta { color: var(--muted); text-align: right; }
+  #runs .q { color: var(--warn); }
+
   /* ---------- costs tab ---------- */
   #costs { padding: 12px 16px; font-family: var(--mono); font-size: 11.5px; }
   .crow { display: grid; grid-template-columns: minmax(90px, 160px) 1fr 150px; gap: 10px;
@@ -280,6 +303,7 @@
       <button class="tab active" data-tab="log">Log</button>
       <button class="tab" data-tab="state">State</button>
       <button class="tab" data-tab="costs">Costs</button>
+      <button class="tab" data-tab="runs">Runs</button>
       <button class="tab" data-tab="source">Source</button>
       <span id="savemsg"></span>
       <button id="barToggle" class="bartoggle" title="Hide/show this panel (⌘\)">▾</button>
@@ -287,6 +311,7 @@
     <div class="log pane active" id="log"><div class="empty">Run a scene to see live output.</div></div>
     <div class="pane" id="state"><div class="empty">State appears here as nodes complete.</div></div>
     <div class="pane" id="costs"><div class="empty">Per-node spend appears here as nodes complete.</div></div>
+    <div class="pane" id="runs"><div class="empty">Loading runs…</div></div>
     <div class="pane src" id="source">
       <textarea id="srctext" spellcheck="false"></textarea>
       <div class="srcbar">
@@ -433,6 +458,67 @@ async function loadRegistry() {
     group("Skills", r.skills ?? []) +
     group("MCP", r.mcp ?? []) +
     (r.problems?.length ? `<div class="warn">${r.problems.length} skipped</div>` : "");
+}
+
+// ---------------------------------------------------------------- runs
+// Read from the machine-level index, so runs an AGENT started over MCP — or the
+// CLI, in another project entirely — show up here, not just this tab's own runs.
+async function loadRuns() {
+  const pane = $("runs");
+  try {
+    const r = await fetch("/api/runs").then((x) => x.json());
+    const projects = r.projects ?? [];
+    if (projects.length === 0) {
+      pane.innerHTML = '<div class="empty">No runs yet on this machine.</div>';
+      return;
+    }
+    pane.innerHTML = projects.map((p) => `
+      <div class="proj">
+        <div class="projname"><b>${esc(p.label)}</b> ${esc(p.project)}${
+          p.project === r.thisProject ? ' <span style="color:var(--accent)">· this project</span>' : ""
+        }</div>
+        ${p.scenes.map((s) => `
+          <div class="sc">
+            <div class="scname">${esc(s.scene)}</div>
+            ${s.runs.map((run) => `
+              <div class="run" data-run="${esc(run.runId)}" title="${esc(run.runDir)}">
+                <span class="st ${esc(run.status)}">${esc(run.status)}</span>
+                <span class="rid">${esc(run.runId)}${
+                  run.waitingFor ? ` <span class="q">· ${esc(run.waitingFor.question)}</span>` : ""
+                }</span>
+                <span class="meta">${run.nodeRuns} node · ${usd(run.totalCost ?? 0)}</span>
+                <span class="meta">${run.status === "stopped" || run.status === "waiting" ? "resumable" : ""}</span>
+              </div>`).join("")}
+          </div>`).join("")}
+      </div>`).join("");
+
+    for (const el of pane.querySelectorAll(".run")) {
+      el.onclick = () => showRun(el.dataset.run);
+    }
+  } catch {
+    pane.innerHTML = '<div class="empty">Could not read the run index.</div>';
+  }
+}
+
+/** Loads one run's journal/state/costs into the inspector panel. */
+async function showRun(runId) {
+  const box = $("inspect");
+  box.innerHTML = '<div class="empty">Loading…</div>';
+  const d = await fetch(`/api/run-detail?id=${encodeURIComponent(runId)}`).then((x) => x.json());
+  if (d.error) { box.innerHTML = `<div class="empty">${esc(d.error)}</div>`; return; }
+  const j = d.journal ?? {};
+  const row = (k, v) => (v || v === 0 ? `<dt>${k}</dt><dd>${esc(v)}</dd>` : "");
+  box.innerHTML = `<h3>${esc(runId)}</h3><dl>
+    ${row("scene", j.scene?.name)}
+    ${row("goal", j.goal)}
+    ${row("position", j.resumeAt ?? "exit")}
+    ${row("node runs", j.nodeRuns)}
+    ${row("cost", usd(j.totalCost ?? 0))}
+    ${row("stopped because", j.stoppedBecause)}
+    ${j.pending ? row("waiting for", `${j.pending.node}: ${j.pending.question}`) : ""}
+    ${row("dir", d.runDir)}
+  </dl>
+  ${d.state ? `<dt style="font-size:10px;text-transform:uppercase;color:var(--muted);margin-top:10px">state</dt><pre>${esc(JSON.stringify(d.state, null, 2))}</pre>` : ""}`;
 }
 
 async function select(file) {
@@ -778,6 +864,7 @@ function onEvent(e) {
         const under = state.budget ? ` of ${usd(state.budget)} budget` : "";
         log(`✓ done · ${e.nodeRuns} node runs · $${e.totalCost.toFixed(4)}${under}`, "g h");
       } else log(`✗ ${esc(e.reason ?? "failed")}`, "r h");
+      loadRuns();   // the index just gained/changed an entry
       requestAnimationFrame(wires);
       break;
   }
@@ -868,7 +955,10 @@ $("barToggle").onclick = (e) => { e.stopPropagation(); toggleConsole(); };
 })();
 // Clicking a tab while collapsed should reopen rather than do nothing visible.
 for (const t of document.querySelectorAll(".tab")) {
-  t.addEventListener("click", () => setConsole(false));
+  t.addEventListener("click", () => {
+    setConsole(false);
+    if (t.dataset.tab === "runs") loadRuns();   // always fresh — other processes write it
+  });
 }
 setConsole(localStorage.getItem("ensemble:console") === "collapsed");
 
@@ -924,7 +1014,7 @@ function esc(s) {
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
 }
 
-loadScenes(); loadRegistry(); connect();
+loadScenes(); loadRegistry(); loadRuns(); connect();
 </script>
 </body>
 </html>
