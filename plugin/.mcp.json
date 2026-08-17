@@ -5,7 +5,10 @@
       "args": [
         "-c",
         "if command -v ensemble >/dev/null 2>&1; then exec ensemble mcp serve; else exec npx -y @ghostmind-dev/ensemble@latest mcp serve; fi"
-      ]
+      ],
+      "env": {
+        "OPENROUTER_API_KEY": "${OPENROUTER_API_KEY:-}"
+      }
     }
   }
 }

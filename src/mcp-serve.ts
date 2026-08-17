@@ -24,6 +24,7 @@ import { loadRegistry } from "./registry.ts";
 import { loadScene, SceneError } from "./scene.ts";
 import { runScene, readJournal, hashScene, type Journal, type RunResult } from "./engine.ts";
 import { packageVersion } from "./version.ts";
+import { loadKeyFiles, hasApiKey, missingKeyMessage } from "./credentials.ts";
 import type { RunEvent } from "./events.ts";
 import type { State } from "./state.ts";
 
@@ -189,8 +190,10 @@ export function buildEnsembleServer(root = process.cwd()): McpServer {
     async ({ file }) => {
       try {
         const scene = await loadScene(file, loadRegistry());
+        loadKeyFiles(cwd);
         return json({
           valid: true,
+          ...(hasApiKey() ? {} : { cannotRun: missingKeyMessage("mcp") }),
           name: scene.name,
           nodes: Object.keys(scene.nodes).length,
           groups: Object.keys(scene.groups).length,
@@ -231,6 +234,11 @@ export function buildEnsembleServer(root = process.cwd()): McpServer {
             `server (or CLI) in that project instead.`,
         );
       }
+
+      // Re-read env files each call: this server is long-lived, so a key added
+      // after it was spawned must still be picked up rather than failing forever.
+      loadKeyFiles(cwd);
+      if (!hasApiKey()) return failure(missingKeyMessage("mcp"));
 
       let scene;
       try {

@@ -30,16 +30,13 @@ export interface ModelCallRequest {
   signal?: AbortSignal;
 }
 
+import { missingKeyMessage } from "../credentials.ts";
+
 const ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
 
 function apiKey(): string {
   const key = process.env["OPENROUTER_API_KEY"];
-  if (!key) {
-    throw new Error(
-      "OPENROUTER_API_KEY is not set — runtime \"model\" calls OpenRouter directly and needs it. " +
-        "Export it, or switch the node to runtime: \"agent\" to go through opencode.",
-    );
-  }
+  if (!key) throw new Error(missingKeyMessage());
   return key;
 }
 
