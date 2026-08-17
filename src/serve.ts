@@ -13,10 +13,20 @@ import { loadRegistry } from "./registry.ts";
 import { loadScene, SceneError } from "./scene.ts";
 import { toLayout, toMermaid } from "./view.ts";
 import { runScene } from "./engine.ts";
+import { readIndex, projectLabel } from "./index-file.ts";
 import type { RunEvent } from "./events.ts";
 import { c, info, error } from "./log.ts";
 
 const UI_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "ui");
+
+/** Reads a run artifact, tolerating an absent or half-written file. */
+function readJson<T>(file: string): T | undefined {
+  try {
+    return JSON.parse(readFileSync(file, "utf8")) as T;
+  } catch {
+    return undefined;
+  }
+}
 
 interface Client {
   res: ServerResponse;
@@ -209,6 +219,88 @@ export async function serve(opts: ServeOptions): Promise<void> {
             mcp: [...registry.mcp.values()],
             problems: registry.problems,
             configPath: registry.configPath,
+          });
+          return;
+        }
+
+        // ---- every run on this machine, from the index ----
+        //
+        // Read from the run directories rather than from this process's memory,
+        // so runs started by the CLI or by an agent over MCP are visible here —
+        // including while they are still going, since journals are written after
+        // every node.
+        if (req.method === "GET" && path === "/api/runs") {
+          const entries = readIndex();
+          const projects = new Map<string, { project: string; label: string; scenes: Map<string, unknown[]> }>();
+
+          for (const entry of entries) {
+            const journal = readJson<{
+              resumeAt?: string;
+              pending?: { node: string; question: string; outputs: string[] };
+              nodeRuns?: number;
+              totalCost?: number;
+              stoppedBecause?: string;
+              updatedAt?: string;
+            }>(join(entry.runDir, "journal.json"));
+
+            const status = !journal
+              ? "unknown"
+              : journal.pending
+                ? "waiting"
+                : journal.resumeAt === undefined
+                  ? "completed"
+                  : "stopped";
+
+            const group =
+              projects.get(entry.project) ??
+              { project: entry.project, label: projectLabel(entry.project), scenes: new Map() };
+            projects.set(entry.project, group);
+
+            const key = basename(entry.sceneFile || entry.scene);
+            const runs = group.scenes.get(key) ?? [];
+            runs.push({
+              runId: entry.runId,
+              runDir: entry.runDir,
+              scene: entry.scene,
+              sceneFile: entry.sceneFile,
+              startedAt: entry.startedAt,
+              status,
+              nodeRuns: journal?.nodeRuns ?? 0,
+              totalCost: journal?.totalCost ?? 0,
+              ...(journal?.pending ? { waitingFor: journal.pending } : {}),
+              ...(journal?.stoppedBecause ? { stoppedBecause: journal.stoppedBecause } : {}),
+              ...(journal?.updatedAt ? { updatedAt: journal.updatedAt } : {}),
+            });
+            group.scenes.set(key, runs);
+          }
+
+          json(res, 200, {
+            thisProject: root,
+            projects: [...projects.values()].map((g) => ({
+              project: g.project,
+              label: g.label,
+              scenes: [...g.scenes.entries()].map(([scene, runs]) => ({ scene, runs })),
+            })),
+          });
+          return;
+        }
+
+        // ---- one run's full detail, for the inspector ----
+        if (req.method === "GET" && path === "/api/run-detail") {
+          const runId = url.searchParams.get("id") ?? "";
+          const entry = readIndex().find((e) => e.runId === runId);
+          if (!entry) {
+            json(res, 404, { error: `no indexed run ${runId}` });
+            return;
+          }
+          json(res, 200, {
+            runId,
+            runDir: entry.runDir,
+            project: entry.project,
+            sceneFile: entry.sceneFile,
+            journal: readJson(join(entry.runDir, "journal.json")),
+            state: readJson(join(entry.runDir, "state.json")),
+            costs: readJson(join(entry.runDir, "costs.json")),
           });
           return;
         }
