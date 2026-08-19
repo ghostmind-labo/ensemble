@@ -65,7 +65,14 @@ my-project/
     └── runs/                   ← run artifacts, created for you
 ```
 
-`mkdir -p .ensemble/scenes` if it does not exist yet. **Name scenes `.mts`** — then no
+**Run `ensemble init` in a new project** (instead of `mkdir`): it creates
+`.ensemble/scenes/` *and* the editor shim — a `tsconfig.json`, a `deno.json`, and a
+symlink to the package — so a language server resolves the import and your `state`
+schemas type the `when` predicates instead of leaving `s` as `any`. It is
+idempotent and never overwrites without `--force`; `--starter` also writes an
+example scene. None of it affects how a run behaves.
+
+**Name scenes `.mts`** — then no
 package.json is needed and the `@ghostmind-dev/ensemble` import resolves against the
 global install; use `.ts` only where the project already has `"type": "module"`.
 `ensemble run <path>` accepts any path, and a legacy `./ensemble.json` or `./scenes/`
