@@ -13,6 +13,7 @@ const USAGE = `
 ${c.bold("ensemble")} ${c.dim(`v${packageVersion()}`)} — multi-model agent ensembles
 
 ${c.bold("Usage")}
+  ensemble init                        Scaffold .ensemble/ so an editor resolves scenes
   ensemble run <scene.ts> "<goal>"   Execute a scene against a goal
   ensemble resume <run-dir>            Continue a stopped run from its checkpoint
   ensemble serve [scenes-dir]          Live viewer + run console in the browser
@@ -39,6 +40,8 @@ ${c.bold("Options")}
   --html [file]     view: write a standalone HTML page and print its path
   --no-open         serve: do not launch a browser
   --version, -V     Print the installed version
+  --force           init: overwrite files that already exist
+  --starter         init: also write an example scene
   --help
 
 ${c.bold("Where scenes live")}
@@ -100,6 +103,26 @@ async function cmdSkills(): Promise<number> {
 
   if (reg.configPath) info(c.dim(`\nconfig: ${reg.configPath}`));
   info("");
+  return 0;
+}
+
+/**
+ * `ensemble init` — the editor-experience fix.
+ *
+ * Runs are cwd-relative and need no scaffolding, so this exists purely so a
+ * language server can resolve `@ghostmind-dev/ensemble` and give you typed
+ * `state` in `when` predicates instead of `any`.
+ */
+async function cmdInit(opts: { force: boolean; starter: boolean }): Promise<number> {
+  const { initProject } = await import("./init.ts");
+  const result = initProject(process.cwd(), opts);
+
+  info(`${c.bold("ensemble init")} ${c.dim(result.root)}`);
+  for (const file of result.created) info(`  ${c.green("+")} ${file}`);
+  for (const file of result.skipped) info(`  ${c.dim("·")} ${c.dim(`${file} (exists — --force to replace)`)}`);
+  info("");
+  info(c.dim("Editors now resolve the import, so `state` schemas type your `when` predicates."));
+  info(c.dim("Write scenes to .ensemble/scenes/*.mts; `ensemble serve` finds them with no arguments."));
   return 0;
 }
 
@@ -569,6 +592,8 @@ async function main(): Promise<number> {
       html: { type: "string" },
         // node:util parseArgs has no --no-x negation, so it is its own flag.
         "no-open": { type: "boolean", default: false },
+      force: { type: "boolean", default: false },
+      starter: { type: "boolean", default: false },
         logout: { type: "boolean", default: false },
       },
     });
@@ -601,6 +626,8 @@ async function main(): Promise<number> {
   };
 
   switch (command) {
+    case "init":
+      return cmdInit({ force: values.force ?? false, starter: values.starter ?? false });
     case "skills":
       return cmdSkills();
     case "validate":

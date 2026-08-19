@@ -169,6 +169,24 @@ ensemble mcp           # MCP servers, CONNECTED, with their tools
 ensemble models gpt    # models you can reach
 ```
 
+### `ensemble init` — so your editor understands scenes
+
+Scenes need no scaffolding to *run*, but an editor cannot know that: with no
+`node_modules` it reports `Import "@ghostmind-dev/ensemble" not a dependency`, and
+because the import fails your `state` schemas never reach `when: (s) => s.score < 8`,
+leaving `s` as `any` — typed state's whole benefit invisible exactly where it pays off.
+
+```bash
+ensemble init            # + tsconfig.json, deno.json, .gitignore, package symlink
+ensemble init --starter  # …and an example scene to edit
+```
+
+It writes a `tsconfig.json` (TypeScript/VS Code), a `deno.json` import map (Deno-backed
+editors), and symlinks the installed package into `.ensemble/node_modules/` so ordinary
+resolution works with nothing to install. Idempotent — existing files are kept unless
+`--force`. Verified with the real compiler: after `init`, `s.score === "high"` and a
+misspelled key are **compile errors**, which is the point.
+
 ## Two ways to drive it — pick one, or use both
 
 Ensemble is one engine with two front doors. **Same scenes, same runs, same run
