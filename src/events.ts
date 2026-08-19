@@ -67,6 +67,13 @@ export type RunEvent =
 
 export type EventSink = (event: RunEvent) => void;
 
+/**
+ * Events the SERVER sends to browsers that are not part of a run — currently
+ * scene-file and viewer-source changes. Kept out of `RunEvent` because the
+ * engine must never be able to emit them.
+ */
+export type ServeEvent = { type: "scenes:changed"; file: string } | { type: "ui:changed" };
+
 /** Fan-out so a run can drive the terminal and any number of SSE clients at once. */
 export function combineSinks(...sinks: Array<EventSink | undefined>): EventSink {
   const active = sinks.filter((sink): sink is EventSink => typeof sink === "function");

@@ -431,6 +431,25 @@ export async function serve(opts: ServeOptions): Promise<void> {
     }
   }
 
+  // ---- hot reload for the viewer itself ----
+  //
+  // The page is read from disk on every request, so editing ui/index.html needs
+  // no rebuild — only a refresh. Watching it turns that into no action at all,
+  // which is the difference between iterating on the UI and reinstalling the
+  // package to see a change. Editors write a file in several bursts, hence the
+  // debounce.
+  try {
+    let pending: NodeJS.Timeout | undefined;
+    watch(UI_DIR, { persistent: false }, (_event, filename) => {
+      if (!filename || !filename.endsWith(".html")) return;
+      clearTimeout(pending);
+      pending = setTimeout(() => broadcast({ type: "ui:changed" }), 80);
+    });
+  } catch {
+    // Not a source checkout (or an OS without watch): the UI simply does not
+    // hot-reload, which is exactly the behaviour for an installed package.
+  }
+
   await new Promise<void>((resolveListen, rejectListen) => {
     server.once("error", rejectListen);
     server.listen(opts.port, "127.0.0.1", () => resolveListen());
@@ -445,7 +464,13 @@ export async function serve(opts: ServeOptions): Promise<void> {
 
   info(`${c.bold("ensemble serve")} ${c.dim("·")} ${c.cyan(href)}`);
   info(c.dim(`scenes: ${scenesDir}`));
-  info(c.dim(`${listScenes().length} scene(s) · watching for changes · ctrl-c to stop`));
+  info(
+    c.dim(
+      `${listScenes().length} scene(s) · watching scenes${
+        existsSync(join(UI_DIR, "index.html")) ? " + viewer (hot reload)" : ""
+      } · ctrl-c to stop`,
+    ),
+  );
 
   if (opts.open) {
     const { spawn } = await import("node:child_process");
