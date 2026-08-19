@@ -301,6 +301,26 @@ export async function serve(opts: ServeOptions): Promise<void> {
             journal: readJson(join(entry.runDir, "journal.json")),
             state: readJson(join(entry.runDir, "state.json")),
             costs: readJson(join(entry.runDir, "costs.json")),
+            // The transcript, so a past run can be replayed rather than merely
+            // summarised. Capped: a long agent run can be thousands of lines.
+            events: (() => {
+              try {
+                return readFileSync(join(entry.runDir, "events.jsonl"), "utf8")
+                  .split("\n")
+                  .filter(Boolean)
+                  .slice(-600)
+                  .map((l) => {
+                    try {
+                      return JSON.parse(l) as unknown;
+                    } catch {
+                      return undefined;
+                    }
+                  })
+                  .filter(Boolean);
+              } catch {
+                return [];
+              }
+            })(),
           });
           return;
         }

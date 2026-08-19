@@ -1,7 +1,7 @@
 {
   "id": "JDPxx3FVr4HO",
   "name": "ensemble",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "type": "project",
   "description": "Multi-model agent ensembles. Scenes (one TypeScript file) define nodes \u2014 any model, typed shared state, tool-using agents, human/agent approval pauses \u2014 wired by conditional edges and executed over OpenRouter.",
   "tags": [
@@ -20,7 +20,8 @@
     "runs": "node src/cli.ts serve dev/.ensemble/scenes --port 7777 --no-open",
     "herdr_init": "run herdr init ensemble --all",
     "herdr_attach": "run herdr attach ensemble",
-    "herdr_terminate": "run herdr terminate ensemble"
+    "herdr_terminate": "run herdr terminate ensemble",
+    "jury": "node src/cli.ts run dev/.ensemble/scenes/jury.mts \"Should a two-person team start a new internal tool on SQLite or Postgres?\" --budget 0.10"
   },
   "herdr": {
     "workspaces": [

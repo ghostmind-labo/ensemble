@@ -14,7 +14,7 @@
  *
  * The engine only emits events; rendering lives in reporter.ts and serve.ts.
  */
-import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, existsSync, appendFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join, resolve, basename } from "node:path";
 import type { Scene, NodeSpec } from "./scene.ts";
@@ -450,7 +450,7 @@ async function runNode(
 export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}): Promise<RunResult> {
   const maxNodeRuns = opts.maxNodeRuns ?? 50;
   const timeoutMs = opts.timeoutMs ?? 20 * 60_000;
-  const emit: EventSink = opts.onEvent ?? (() => {});
+  const sink: EventSink = opts.onEvent ?? (() => {});
 
   // An env file may hold the only copy of the key — read it before the first
   // call, so a long-lived MCP server is not stuck with a stale environment.
@@ -500,6 +500,24 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
     entry.tokensIn += r.tokensIn;
     entry.tokensOut += r.tokensOut;
     nodeCosts.set(node, entry);
+  };
+
+  /**
+   * Every event, appended to the run directory as it happens.
+   *
+   * Without this a finished run has state and costs but no story: you can see
+   * WHAT it produced and what it cost, never what happened. `node:delta` is
+   * excluded on purpose — token-by-token deltas are for the live view and would
+   * bloat the file by orders of magnitude for nothing.
+   */
+  const emit: EventSink = (event) => {
+    sink(event);
+    if (event.type === "node:delta") return;
+    try {
+      appendFileSync(join(runDir, "events.jsonl"), `${JSON.stringify(event)}\n`, "utf8");
+    } catch {
+      // A run must never fail because its transcript could not be written.
+    }
   };
 
   const nodeMeta: NodeMeta[] = Object.entries(scene.nodes).map(([name, spec]) => ({
