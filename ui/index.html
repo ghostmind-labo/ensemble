@@ -22,8 +22,8 @@
   * { box-sizing: border-box; }
   body {
     margin: 0; height: 100vh; display: grid;
-    grid-template-columns: 232px 1fr; grid-template-rows: 1fr 240px;
-    grid-template-areas: "side canvas" "side console";
+    grid-template-columns: 232px 1fr var(--panelw, 420px); grid-template-rows: 1fr;
+    grid-template-areas: "side canvas right";
     background: var(--bg); color: var(--fg);
     font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif;
   }
@@ -161,15 +161,26 @@
   .elabel { font-size: 10px; fill: var(--muted); font-family: var(--mono); }
 
   /* ---------- console ---------- */
+  /* The work panel lives on the RIGHT: Log/State/Costs/Runs/Source and the node
+     inspector all need width, which a 232px left rail cannot give them, and the
+     canvas gets the full window height back. */
   footer {
-    grid-area: console; border-top: 1px solid var(--line); background: var(--panel);
-    display: grid; grid-template-columns: 1fr 320px; overflow: hidden;
+    grid-area: right; border-left: 1px solid var(--line); background: var(--panel);
+    display: flex; flex-direction: column; overflow: hidden; position: relative;
   }
-  /* Collapsed console: only the tab strip stays, so the canvas gets the room
-     back and the panes are one click away rather than gone. */
-  body.console-collapsed { grid-template-rows: 1fr 33px; }
+  /* Collapsed: a narrow rail keeps a click target in the panel itself, so
+     reopening never depends on finding the toolbar button. */
+  body.console-collapsed { grid-template-columns: 232px 1fr 30px; }
   body.console-collapsed .pane,
-  body.console-collapsed .inspect { display: none; }
+  body.console-collapsed .tab,
+  body.console-collapsed #savemsg { display: none; }
+  body.console-collapsed .tabs { padding: 6px 0; justify-content: center; }
+  /* Drag the panel's edge to resize it. */
+  #panelgrip {
+    position: absolute; left: -3px; top: 0; bottom: 0; width: 6px; cursor: col-resize; z-index: 6;
+  }
+  #panelgrip:hover { background: var(--accent); opacity: .5; }
+  body.console-collapsed #panelgrip { display: none; }
   #zoombar { display: flex; align-items: center; gap: 2px; }
   #zoombar button { padding: 6px 9px; font-family: var(--mono); }
   #zoomlabel {
@@ -184,7 +195,7 @@
   .log .g { color: var(--ok); }
   .log .r { color: var(--fail); }
   .log .w { color: var(--warn); }
-  .inspect { border-left: 1px solid var(--line); overflow-y: auto; padding: 12px 14px; font-size: 12px; }
+  .inspect { overflow-y: auto; padding: 12px 14px; font-size: 12px; }
   .inspect h3 { margin: 0 0 8px; font-size: 13px; }
   .inspect dt { font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
                 color: var(--muted); margin-top: 9px; }
@@ -193,8 +204,9 @@
                  font-size: 10.5px; white-space: pre-wrap; max-height: 150px; }
   .empty { color: var(--muted); padding: 20px; text-align: center; font-size: 12px; }
   .panel { display: flex; flex-direction: column; overflow: hidden; }
-  .tabs { display: flex; gap: 2px; padding: 6px 10px 0; border-bottom: 1px solid var(--line); align-items: center; }
-  .tab { border: none; background: none; padding: 6px 12px; font-size: 12px; color: var(--muted);
+  .tabs { display: flex; gap: 1px; padding: 6px 8px 0; border-bottom: 1px solid var(--line);
+          align-items: center; flex: none; flex-wrap: wrap; }
+  .tab { border: none; background: none; padding: 6px 9px; font-size: 11.5px; color: var(--muted);
          border-radius: 7px 7px 0 0; cursor: pointer; }
   .tab.active { color: var(--fg); background: var(--accent-soft); font-weight: 600; }
   #savemsg { margin-left: auto; font-size: 11px; padding-right: 8px; }
@@ -298,13 +310,14 @@
 </main>
 
 <footer>
-  <div class="panel">
+  <div id="panelgrip" title="Drag to resize"></div>
     <div class="tabs">
       <button class="tab active" data-tab="log">Log</button>
       <button class="tab" data-tab="state">State</button>
       <button class="tab" data-tab="costs">Costs</button>
       <button class="tab" data-tab="runs">Runs</button>
       <button class="tab" data-tab="source">Source</button>
+      <button class="tab" data-tab="inspect">Node</button>
       <span id="savemsg"></span>
       <button id="barToggle" class="bartoggle" title="Hide/show this panel (⌘\)">▾</button>
     </div>
@@ -319,8 +332,7 @@
         <span class="hint">validated before saving — a broken scene is never written</span>
       </div>
     </div>
-  </div>
-  <div class="inspect" id="inspect"><div class="empty">Select a node.</div></div>
+  <div class="pane inspect" id="inspect"><div class="empty">Select a node.</div></div>
 </footer>
 
 <script type="module">
@@ -504,6 +516,7 @@ async function loadRuns() {
 async function showRun(runId) {
   const box = $("inspect");
   box.innerHTML = '<div class="empty">Loading…</div>';
+  showTab("inspect");
   const d = await fetch(`/api/run-detail?id=${encodeURIComponent(runId)}`).then((x) => x.json());
   if (d.error) { box.innerHTML = `<div class="empty">${esc(d.error)}</div>`; return; }
   const j = d.journal ?? {};
@@ -600,7 +613,12 @@ function draw() {
   }).join("");
 
   for (const el of document.querySelectorAll(".node")) {
-    el.onclick = () => { state.selected = el.dataset.node; draw(); inspect(el.dataset.node); };
+    el.onclick = () => {
+      state.selected = el.dataset.node;
+      draw();
+      inspect(el.dataset.node);
+      showTab("inspect");   // the inspector is a tab now — surface it on click
+    };
   }
   applyOffsets();
   attachDrag();
@@ -718,6 +736,13 @@ function wires() {
 }
 addEventListener("resize", () => requestAnimationFrame(wires));
 
+/** Switches the panel to a tab by name. */
+function showTab(name) {
+  document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("active", x.dataset.tab === name));
+  document.querySelectorAll(".pane").forEach((x) => x.classList.toggle("active", x.id === name));
+  setConsole(false);
+}
+
 function inspect(name) {
   const node = state.layout?.targets.flatMap((t) => t.members).find((m) => m.name === name);
   if (!node) return;
@@ -750,6 +775,12 @@ function log(html, cls = "") {
 // ---------------------------------------------------------------- events
 function onEvent(e) {
   switch (e.type) {
+    // The viewer's own source changed on disk — reload so a UI edit shows up
+    // without touching the browser or restarting the server.
+    case "ui:changed":
+      location.reload();
+      break;
+
     case "scenes:changed":
       loadScenes();
       if (state.current === e.file || !state.current) select(state.current ?? e.file);
@@ -911,15 +942,40 @@ $("zoomfit").onclick = zoomToFit;
 // so the panes are one click away rather than gone.
 function setConsole(collapsed) {
   document.body.classList.toggle("console-collapsed", collapsed);
-  // Both controls point the same way: ▴ reopens, ▾ hides.
-  $("togglebar").textContent = collapsed ? "▴" : "▾";
-  $("barToggle").textContent = collapsed ? "▴" : "▾";
+  // ◀ reopens the panel, ▶ hides it.
+  $("togglebar").textContent = collapsed ? "◀" : "▶";
+  $("barToggle").textContent = collapsed ? "◀" : "▶";
   localStorage.setItem("ensemble:console", collapsed ? "collapsed" : "open");
-  requestAnimationFrame(wires);
+  // The canvas just changed width, so the stage size and centring are stale.
+  requestAnimationFrame(() => applyZoom());
 }
 const toggleConsole = () => setConsole(!document.body.classList.contains("console-collapsed"));
 $("togglebar").onclick = toggleConsole;
 $("barToggle").onclick = (e) => { e.stopPropagation(); toggleConsole(); };
+
+// Drag the panel's left edge to resize it; the width persists per browser.
+(() => {
+  const saved = Number(localStorage.getItem("ensemble:panelw"));
+  if (saved >= 260 && saved <= 900) document.body.style.setProperty("--panelw", `${saved}px`);
+
+  $("panelgrip").addEventListener("mousedown", (down) => {
+    down.preventDefault();
+    const startX = down.clientX;
+    const startW = document.querySelector("footer").getBoundingClientRect().width;
+    const move = (m) => {
+      const w = Math.min(900, Math.max(260, startW - (m.clientX - startX)));
+      document.body.style.setProperty("--panelw", `${w}px`);
+      localStorage.setItem("ensemble:panelw", String(Math.round(w)));
+      applyZoom();
+    };
+    const up = () => {
+      removeEventListener("mousemove", move);
+      removeEventListener("mouseup", up);
+    };
+    addEventListener("mousemove", move);
+    addEventListener("mouseup", up);
+  });
+})();
 
 // Drag empty canvas to pan — the only way to move a zoomed-in graph left/right
 // without reaching for a scrollbar. Node drags own their own mousedown, so this

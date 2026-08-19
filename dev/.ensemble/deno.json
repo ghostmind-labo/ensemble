@@ -1,0 +1,6 @@
+{
+  "imports": {
+    "@ghostmind-dev/ensemble": "npm:@ghostmind-dev/ensemble@^0.13.2"
+  },
+  "nodeModulesDir": "auto"
+}

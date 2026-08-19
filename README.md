@@ -768,5 +768,18 @@ npm test resume   # just the suites whose name matches
 npm run typecheck && npm run build
 ```
 
+To work on the viewer, run it **from source** — never the installed package, or
+you are testing the last release:
+
+```bash
+node src/cli.ts serve dev/.ensemble/scenes    # or: run dev
+```
+
+`dev/` is a sandbox project with a scene that exercises a parallel group, a scored
+gate that loops, and an `ask` node. The page is read from disk on every request and
+the server watches `ui/`, so **editing `ui/index.html` reloads the open browser** —
+no rebuild, no restart, no reinstall. Engine edits under `src/` still need a restart
+of that one command.
+
 Each suite runs as its own process: they chdir into temp projects and replace
 global `fetch`, so sharing one process would let them corrupt each other.
