@@ -13,6 +13,7 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 import { z } from "zod";
 import type { Registry } from "./registry.ts";
 import type { SceneSpec, NodeSpec, EdgeSpec, State } from "./dsl.ts";
+import { RUNTIMES, COMMON_FIELDS } from "./runtimes/index.ts";
 
 export type { SceneSpec, NodeSpec, EdgeSpec, State };
 
@@ -39,22 +40,17 @@ const identifier = z
   .string()
   .regex(/^[a-z0-9]+(?:[-_][a-z0-9]+)*$/i, "must be alphanumeric with - or _ separators");
 
+// Only the fields EVERY runtime shares live here. The rest of a node's legal
+// surface is composed from its runtime object's `fields` — so a new capability
+// is a property on an object, never an edit to this schema.
 const nodeSchema = z
   .object({
-    model: z.string().optional(),
-    runtime: z.enum(["model", "agent", "ask"]).optional(),
-    prompt: z.string().optional(),
-    question: z.string().optional(),
+    runtime: z.string().optional(),
     inputs: z.array(z.string()).optional(),
     outputs: z.array(z.string()).optional(),
-    skills: z.array(z.string()).optional(),
-    mcp: z.array(z.string()).optional(),
-    tools: z.record(z.boolean()).optional(),
-    maxTurns: z.number().int().positive().max(50).optional(),
     description: z.string().optional(),
-    temperature: z.number().min(0).max(2).optional(),
   })
-  .strict();
+  .passthrough();
 
 const edgeSchema = z
   .object({
@@ -80,7 +76,7 @@ const sceneSchema = z
     defaults: z
       .object({
         model: z.string().optional(),
-        runtime: z.enum(["model", "agent", "ask"]).optional(),
+        runtime: z.string().optional(),
         tools: z.record(z.boolean()).optional(),
         temperature: z.number().min(0).max(2).optional(),
       })
@@ -109,7 +105,7 @@ export function resolveTarget(scene: Scene, target: string): string[] {
 }
 
 /** Effective runtime for a node, with scene default then "model" as fallback. */
-export function runtimeOf(scene: Scene, node: NodeSpec): "model" | "agent" | "ask" {
+export function runtimeOf(scene: Scene, node: NodeSpec): string {
   return node.runtime ?? scene.defaults.runtime ?? "model";
 }
 
@@ -146,75 +142,54 @@ function checkReferences(scene: Scene, reg: Registry): string[] {
     }
   }
 
-  for (const [name, node] of Object.entries(scene.nodes)) {
-    const runtime = runtimeOf(scene, node);
+  if (scene.defaults.runtime && !RUNTIMES[scene.defaults.runtime]) {
+    problems.push(
+      `defaults.runtime "${scene.defaults.runtime}" is not a registered runtime — ` +
+        `registered: ${Object.keys(RUNTIMES).join(", ")}`,
+    );
+  }
 
-    // An ask node never calls a model — it waits for someone to supply its
-    // outputs — so a model is not required, and anything model-shaped is a slip.
-    if (runtime === "ask") {
-      if ((node.outputs ?? []).length === 0) {
-        problems.push(
-          `node "${name}" is runtime "ask" but declares no outputs — ` +
-            `an ask node exists to collect state keys, so it must name at least one`,
-        );
-      }
-      for (const field of ["skills", "mcp", "tools", "model", "prompt", "temperature", "maxTurns"] as const) {
-        if (node[field] !== undefined) {
-          problems.push(
-            `node "${name}" is runtime "ask" but declares ${field} — ` +
-              `ask nodes make no model call; use "question" for what to ask`,
-          );
-        }
-      }
+  for (const [name, node] of Object.entries(scene.nodes)) {
+    const runtimeName = runtimeOf(scene, node);
+    const rt = RUNTIMES[runtimeName];
+    if (!rt) {
+      problems.push(
+        `node "${name}" uses unknown runtime "${runtimeName}" — registered: ${Object.keys(RUNTIMES).join(", ")}`,
+      );
       continue;
     }
 
-    const model = node.model ?? scene.defaults.model;
-    if (!model) {
-      problems.push(`node "${name}" has no model and defaults.model is unset`);
-    } else if (!model.includes("/")) {
-      problems.push(`node "${name}" model "${model}" must be "<provider>/<model>"`);
-    }
-
-    if (node.question !== undefined) {
-      problems.push(
-        `node "${name}" declares question but is runtime "${runtime}" — ` +
-          `question belongs to ask nodes; use prompt instead`,
-      );
-    }
-
-    if (runtime === "model") {
-      // A model node is a pure HTTP call — granting it skills/MCP/tools would
-      // silently do nothing, which is worse than an error.
-      for (const field of ["skills", "mcp", "tools"] as const) {
-        const value = node[field];
-        if (value !== undefined && (Array.isArray(value) ? value.length > 0 : Object.keys(value).length > 0)) {
-          problems.push(
-            `node "${name}" is runtime "model" but declares ${field} — ` +
-              `only agent nodes can use ${field}; set runtime: "agent" or remove it`,
-          );
-        }
-      }
-      if (model && !model.startsWith("openrouter/")) {
+    // The node's legal surface = the common fields + what its runtime object
+    // declares. Anything else is a slip, named against the runtime that
+    // rejected it so the fix is obvious.
+    for (const [key, value] of Object.entries(node)) {
+      if (value === undefined || COMMON_FIELDS.has(key)) continue;
+      const fieldSchema = rt.fields[key];
+      if (!fieldSchema) {
+        const accepts = Object.keys(rt.fields).join(", ") || "only the common fields";
         problems.push(
-          `node "${name}" is runtime "model" but its model "${model}" is not "openrouter/…" — ` +
-            `direct calls go through OpenRouter; use runtime: "agent" for other providers`,
+          `node "${name}" declares ${key} but runtime "${runtimeName}" does not accept it — ` +
+            `"${runtimeName}" accepts: ${accepts}`,
         );
+        continue;
       }
-    } else {
-      for (const skill of node.skills ?? []) {
-        if (!reg.skills.has(skill)) {
-          const known = [...reg.skills.keys()].sort().join(", ") || "none installed";
-          problems.push(`node "${name}" requests unknown skill "${skill}" — registry has: ${known}`);
-        }
-      }
-      for (const server of node.mcp ?? []) {
-        if (!reg.mcp.has(server)) {
-          const known = [...reg.mcp.keys()].sort().join(", ") || "none configured";
-          problems.push(`node "${name}" requests unknown MCP server "${server}" — registry has: ${known}`);
-        }
+      const parsed = fieldSchema.safeParse(value);
+      if (!parsed.success) {
+        const first = parsed.error.issues[0];
+        problems.push(`node "${name}".${key}: ${first?.message ?? "invalid value"}`);
       }
     }
+
+    if (rt.needsModel) {
+      const model = node.model ?? scene.defaults.model;
+      if (!model) {
+        problems.push(`node "${name}" has no model and defaults.model is unset`);
+      } else if (!model.includes("/")) {
+        problems.push(`node "${name}" model "${model}" must be "<provider>/<model>"`);
+      }
+    }
+
+    problems.push(...(rt.check?.(name, node, scene.defaults, reg) ?? []));
   }
 
   for (const [i, edge] of scene.edges.entries()) {

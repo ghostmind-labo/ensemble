@@ -210,6 +210,12 @@ export function describeSchema(schema: unknown, depth = 0): string {
         return ((def["options"] as unknown[]) ?? []).map((o) => describeSchema(o, depth + 1)).join(" | ");
       case "ZodRecord":
         return `object mapping string to ${describeSchema(def["valueType"], depth + 1)}`;
+      case "ZodEffects":
+        // .refine()/.transform() wrap the real schema; describe what is inside —
+        // the refinement's message still enforces the logic at validation time.
+        return describeSchema(def["schema"], depth + 1);
+      case "ZodDefault":
+        return describeSchema(def["innerType"], depth + 1);
       default:
         return "value";
     }

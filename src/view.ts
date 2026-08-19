@@ -8,6 +8,7 @@
  */
 import type { Scene } from "./scene.ts";
 import { runtimeOf } from "./scene.ts";
+import { RUNTIMES } from "./runtimes/index.ts";
 import { conditionLabel } from "./engine.ts";
 import { c } from "./log.ts";
 
@@ -94,8 +95,9 @@ export function toTerminal(scene: Scene): string {
     if (!spec) return;
     const model = shortModel(spec.model ?? scene.defaults.model ?? "?");
     const runtime = runtimeOf(scene, spec);
+    const badge = RUNTIMES[runtime]?.badge ?? "•";
     const tag =
-      runtime === "agent" ? c.yellow("⛭agent") : runtime === "ask" ? c.cyan("⏸ask") : c.dim("⚡model");
+      runtime === "agent" ? c.yellow(`${badge}agent`) : runtime === "model" ? c.dim(`${badge}model`) : c.cyan(`${badge}${runtime}`);
     out.push(`${pad}${c.magenta(c.bold(name))} ${c.dim(model)} ${tag}`);
     if ((spec.skills ?? []).length > 0) out.push(`${pad}  ${c.dim("skills:")} ${c.cyan((spec.skills ?? []).join(", "))}`);
     if ((spec.mcp ?? []).length > 0) out.push(`${pad}  ${c.dim("mcp:")} ${c.cyan((spec.mcp ?? []).join(", "))}`);
@@ -143,7 +145,7 @@ export function toTerminal(scene: Scene): string {
 export interface LayoutNode {
   name: string;
   model: string;
-  runtime: "model" | "agent" | "ask";
+  runtime: string;
   skills: string[];
   mcp: string[];
   inputs: string[];

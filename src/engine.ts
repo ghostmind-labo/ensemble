@@ -20,10 +20,9 @@ import { join, resolve, basename } from "node:path";
 import type { Scene, NodeSpec } from "./scene.ts";
 import { resolveTarget, runtimeOf } from "./scene.ts";
 import { loadRegistry } from "./registry.ts";
-import { callAgent } from "./runtimes/agent.ts";
-import { callModel, type NodeResult } from "./runtimes/model.ts";
+import type { NodeResult } from "./runtimes/model.ts";
+import { RUNTIMES, type PendingAsk } from "./runtimes/index.ts";
 import { McpHub } from "./mcp.ts";
-import { BUILTIN_NAMES } from "./tools/builtin.ts";
 import {
   extractOutputs,
   renderInputs,
@@ -74,20 +73,9 @@ export interface NodeCost {
 /** Bumped when the journal's shape changes; an older file is refused, not guessed at. */
 export const JOURNAL_VERSION = 1;
 
-/**
- * A run parked on an `ask` node, waiting to be answered.
- *
- * Durable by construction: it lives in the journal, so the answerer can take
- * minutes or days, the process can die, and the question survives. Whether a
- * human answers it in the viewer or an agent answers it with `resume_run` is
- * not the engine's concern — both just supply the missing state keys.
- */
-export interface PendingAsk {
-  node: string;
-  question: string;
-  /** State keys the answer must provide. */
-  outputs: string[];
-}
+// A parked run's pending question is defined by the runtime objects and
+// re-exported here so existing imports keep working.
+export type { PendingAsk };
 
 /**
  * Everything the executor needs to pick a run back up — the graph position that
@@ -263,6 +251,9 @@ interface NodeCallCtx {
   emit: EventSink;
   /** USD left before the run budget is exhausted; undefined = no budget set. */
   budgetLeft: () => number | undefined;
+  /** Ask nodes that already fell through once this process — see `always`. */
+  askConsumed: Set<string>;
+  registry: import("./registry.ts").Registry;
   signal?: AbortSignal;
 }
 
@@ -274,42 +265,19 @@ async function callOnce(
   text: string,
   history: Array<{ role: "user" | "assistant"; content: string }>,
 ): Promise<NodeResult> {
-  const model = spec.model ?? ctx.scene.defaults.model ?? "";
-  const temperature = spec.temperature ?? ctx.scene.defaults.temperature;
-
-  if (runtimeOf(ctx.scene, spec) === "model") {
-    return callModel({
-      model,
-      ...(spec.prompt ? { system: spec.prompt } : {}),
-      messages: [...history, { role: "user", content: text }],
-      ...(temperature !== undefined ? { temperature } : {}),
-      onDelta: (delta) => ctx.emit({ type: "node:delta", node, delta }),
-      ...(ctx.signal ? { signal: ctx.signal } : {}),
-    });
-  }
-
-  const wanted = spec.mcp ?? [];
-  const hub = wanted.length > 0 ? await ctx.hub.get() : undefined;
-  const registry = loadRegistry();
-  const skills = (spec.skills ?? [])
-    .map((name) => registry.skills.get(name))
-    .filter((s): s is NonNullable<typeof s> => Boolean(s));
+  const rt = RUNTIMES[runtimeOf(ctx.scene, spec)];
+  if (!rt?.call) throw new Error(`runtime "${runtimeOf(ctx.scene, spec)}" cannot be called`);
 
   const costLimit = ctx.budgetLeft();
-
-  return callAgent({
-    model,
-    ...(spec.prompt ? { system: spec.prompt } : {}),
+  return rt.call({
+    node,
+    spec,
+    defaults: ctx.scene.defaults,
     messages: [...history, { role: "user", content: text }],
-    ...(temperature !== undefined ? { temperature } : {}),
-    ...(costLimit !== undefined ? { costLimit } : {}),
-    mcp: wanted,
-    // `tools: { grep: false }` opts a built-in out; default is all of them.
-    builtins: BUILTIN_NAMES.filter((n) => spec.tools?.[n] !== false),
-    skills,
-    hub,
+    registry: ctx.registry,
+    hub: () => ctx.hub.get(),
     root: resolve(process.cwd()),
-    maxTurns: spec.maxTurns ?? 12,
+    ...(costLimit !== undefined ? { costLimit } : {}),
     onDelta: (delta) => ctx.emit({ type: "node:delta", node, delta }),
     onToolCall: (event) => ctx.emit({ type: "node:tool", node, ...event }),
     ...(ctx.signal ? { signal: ctx.signal } : {}),
@@ -332,33 +300,30 @@ async function runNode(
   const spec = ctx.scene.nodes[node];
   if (!spec) return { error: `no such node: ${node}` };
 
-  // An ask node is pure wait: it either finds its answer already in state (an
-  // answered resume) and falls through, or it parks the run.
-  if (runtimeOf(ctx.scene, spec) === "ask") {
+  // A parking runtime (e.g. "ask") decides instantly from state: pass through
+  // or park the run. No model call, no retries — the object owns the logic.
+  const rtName = runtimeOf(ctx.scene, spec);
+  const parkRt = RUNTIMES[rtName];
+  if (parkRt?.park) {
+    const outcome = parkRt.park({ node, spec, state: ctx.state, consumed: ctx.askConsumed });
+    if ("pending" in outcome) return outcome;
     const outputs = spec.outputs ?? [];
-    const missing = outputs.filter((key) => ctx.state[key] === undefined);
-    if (missing.length === 0) {
-      ctx.emit({ type: "node:start", node, model: "ask", skills: [] });
-      ctx.emit({
-        type: "node:end",
-        node,
-        ok: true,
-        text: outputs.map((k) => `${k}: ${String(ctx.state[k])}`).join("\n"),
-        providerID: "ask",
-        modelID: "ask",
-        cost: 0,
-        tokensIn: 0,
-        tokensOut: 0,
-        ms: 0,
-      });
-      return { values: {}, result: { text: "", modelID: "ask", providerID: "ask", cost: 0, tokensIn: 0, tokensOut: 0 } };
-    }
+    ctx.emit({ type: "node:start", node, model: rtName, skills: [] });
+    ctx.emit({
+      type: "node:end",
+      node,
+      ok: true,
+      text: outputs.map((k) => `${k}: ${String(ctx.state[k])}`).join("\n"),
+      providerID: rtName,
+      modelID: rtName,
+      cost: 0,
+      tokensIn: 0,
+      tokensOut: 0,
+      ms: 0,
+    });
     return {
-      pending: {
-        node,
-        question: spec.question ?? `Provide: ${missing.join(", ")}`,
-        outputs: missing,
-      },
+      values: outcome.values,
+      result: { text: "", modelID: rtName, providerID: rtName, cost: 0, tokensIn: 0, tokensOut: 0 },
     };
   }
 
@@ -591,6 +556,8 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
     needsMcp: servers.length > 0,
     emit,
     budgetLeft: () => (budget === undefined ? undefined : Math.max(0, budget - totalCost)),
+    askConsumed: new Set<string>(),
+    registry,
     ...(opts.signal ? { signal: opts.signal } : {}),
   };
 
@@ -655,7 +622,13 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
         pending = parked;
         checkpoint(`waiting for an answer to "${parked.question}"`);
         emit({ type: "state", state: { ...state } });
-        emit({ type: "node:ask", node: parked.node, question: parked.question, outputs: parked.outputs });
+        emit({
+          type: "node:ask",
+          node: parked.node,
+          question: parked.question,
+          outputs: parked.outputs,
+          ...(parked.context ? { context: parked.context } : {}),
+        });
         emit({
           type: "run:end",
           ok: false,

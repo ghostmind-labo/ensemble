@@ -50,7 +50,9 @@ export type TypedState<S extends StateSchema> = { [K in keyof S]: TypeOf<S[K]> }
  *   it supplies the node's `outputs` — a human in the viewer, or an agent calling
  *   `resume_run` with answers. Pure wait.
  */
-export type NodeRuntime = "model" | "agent" | "ask";
+// The built-ins keep autocomplete; `string & {}` admits any runtime mounted
+// with registerRuntime() — a runtime is an object, not a member of an enum.
+export type NodeRuntime = "model" | "agent" | "ask" | (string & {});
 
 export interface NodeSpec {
   /** `openrouter/<vendor>/<model>`, e.g. "openrouter/anthropic/claude-sonnet-5". */
@@ -63,6 +65,13 @@ export interface NodeSpec {
    * returned by `run_status`, so it must make sense with no other context.
    */
   question?: string;
+  /**
+   * ask nodes only — park on EVERY entry, not only while outputs are absent.
+   * The default (presence-based) asks once and then falls through forever,
+   * which is right for a one-time approval and wrong for a loop that must
+   * collect a fresh answer each round (a quiz, an iterative review).
+   */
+  always?: boolean;
   /** State keys injected into the node's prompt as context. */
   inputs?: string[];
   /** State keys harvested from the node's fenced json block. */

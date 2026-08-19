@@ -123,6 +123,13 @@ export default scene({
 });
 ```
 
+**Everything is an object.** A node is an object; its `runtime` names a runtime
+OBJECT that declares which extra properties the node may carry, how it validates,
+and how it executes. The built-ins are `model` / `agent` / `ask`; library code can
+mount more with `registerRuntime({...})` — a new way to execute is a new object,
+never an engine change. Edges stay plain connector objects (`from`/`to`/`when`/
+`maxLoops`).
+
 Every `NodeSpec` field: `model`, `runtime` ("model" | "agent" | "ask"), `prompt`
 (system-style instruction), `question` (ask only), `inputs`, `outputs`, `skills`,
 `mcp`, `tools`, `maxTurns` (agent only, default 12), `temperature`, `description`.
@@ -177,6 +184,20 @@ ergonomics, so gate on keys the upstream node actually wrote.
 enums, structured records). Prose keys — `findings` as a long write-up, `answer`,
 `notes` — are fine as plain strings; `z.string()` adds nothing there.
 
+**Transition contracts.** To require that moving past a node needs specific fields
+that also make sense together, combine `z.object({...})` (the required structure)
+with `.refine()` (the cross-field logic) — a violation is rejected and self-corrects
+on the free retry, with your refine message as the reason:
+
+```ts
+review: z.object({ verdict: z.enum(["pass","fail"]), score: z.number().min(0).max(10),
+                   reason: z.string(), checked_by: z.string() })
+  .refine((r) => r.verdict !== "pass" || r.score >= 7,
+          { message: "a pass requires score >= 7" }),
+// then the edge gates on the now-guaranteed-coherent value:
+{ from: "review", to: "ship", when: (s) => s.review.verdict === "pass" },
+```
+
 ### How data flows (know this before authoring)
 
 Every node receives: the run's **goal**, plus the current value of each declared
@@ -225,7 +246,12 @@ the merge.
   someone supplies its `outputs`. Declares `question` (what to ask) and `outputs`
   (the state keys the answer must fill); never `model`/`prompt`/`mcp`/`skills`.
   Free, and durable: the question lives in the journal, so the run can wait days.
-  See §3 for how to answer one.
+  Its `inputs` are rendered into the pause as **context** — this is how content
+  generated DURING the run (a quiz question, a draft to approve) reaches the
+  answerer; the static `question` cannot contain it. Add **`always: true`** for a
+  node inside a loop that must collect a FRESH answer on every entry (a game
+  round, an iterative review) — the default presence-based node asks once and
+  then falls through forever. See §3 for how to answer one.
 - **Agent nodes cost real money.** Recent tool results are resent each turn (results
   older than 6 calls are auto-pruned to stubs); a vague job ("audit everything") still
   compounds — a real example dropped $0.44 → $0.05 just by narrowing the prompt. Give
@@ -361,6 +387,12 @@ measured metric instead of an opinion.
 
 **Pipeline with rejection** — research → parallel review (critic + factchecker) →
 write, with `verdict === "reject"` looping back, capped by `maxLoops`.
+
+**Interactive loop (a game, an interview, an iterative review)** — an `always` ask
+node inside a `maxLoops` cycle parks EVERY round; a generator node writes fresh
+content each pass and the pause's context carries it to the answerer. Score or
+history accumulates on the blackboard across pauses. See
+`dev/.ensemble/scenes/trivia.mts` in the repo for a complete 5-round quiz.
 
 **Human — or agent — in the loop (`runtime: "ask"`)** — a node that stops the run and
 waits for an answer. The canonical shape is an approval gate:

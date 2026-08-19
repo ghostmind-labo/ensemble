@@ -423,8 +423,9 @@ function report(
     // Parked on an ask node is not a failure — it is the scene working as
     // designed, waiting on a human or an agent.
     if (result.waiting) {
-      const { node, question, outputs } = result.waiting;
+      const { node, question, outputs, context } = result.waiting;
       info(`\n${c.bold(c.cyan("⏸ waiting"))} ${c.dim(`on ${node}, after ${duration(Date.now() - started)}`)}`);
+      if (context) info(`\n${c.dim(context)}`);
       info(`\n${question}\n`);
       info(c.dim("answer and continue:"));
       info(
@@ -516,7 +517,9 @@ async function cmdResume(
     const missing = journal.pending.outputs.filter((k) => answers[k] === undefined);
     if (missing.length > 0) {
       error(
-        `this run is waiting on "${journal.pending.node}":\n\n  ${journal.pending.question}\n\n` +
+        `this run is waiting on "${journal.pending.node}":\n\n` +
+          (journal.pending.context ? `${journal.pending.context}\n\n` : "") +
+          `  ${journal.pending.question}\n\n` +
           `Answer it and resume:\n  ensemble resume ${dir} ` +
           missing.map((k) => `--answer ${k}="…"`).join(" "),
       );

@@ -58,6 +58,7 @@ export function createTerminalReporter(opts: { verbose: boolean }): EventSink {
       case "node:ask":
         info(
           `\n${c.cyan("⏸")} ${c.bold(c.magenta(event.node))} ${c.dim("needs an answer")}\n` +
+            (event.context ? `${indent(c.dim(event.context), "   ")}\n` : "") +
             indent(event.question, "   ") +
             `\n${c.dim(`   expects: ${event.outputs.join(", ")}`)}`,
         );
