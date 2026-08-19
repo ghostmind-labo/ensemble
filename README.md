@@ -694,6 +694,30 @@ exists — so the server holds nothing but an AbortController per live run. If i
 dies, in-flight runs die *resumably*: the same failure story as everywhere else.
 Programmatic embedding gets the same thing via `buildEnsembleServer()`.
 
+## Everything is an object
+
+The design rule, applied inward as well as outward: nodes, edges, schemas, and —
+since 0.16 — **runtimes** are objects. Each runtime object declares its own node
+properties (with zod shapes), its own validation, and its own execution (`park`
+for waiting runtimes, `call` for model-calling ones). The engine holds no
+runtime-specific branches; the validator composes each node's legal surface from
+the object it names.
+
+The payoff is that adding a capability means adding an object:
+
+```ts
+import { registerRuntime, z } from "@ghostmind-dev/ensemble";
+
+registerRuntime({
+  name: "webhook", summary: "POSTs the node's inputs and waits", badge: "🌐",
+  needsModel: false,
+  fields: { url: z.string().url() },
+  park: ({ node, spec, state }) => /* wait, or pass values through */ …,
+});
+// nodes may now declare { runtime: "webhook", url: "…" } — validated and drawn
+// like any built-in, with zero engine edits.
+```
+
 ## Using it as a library
 
 ```ts

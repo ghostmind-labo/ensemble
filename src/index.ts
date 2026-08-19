@@ -32,6 +32,9 @@ export type { Registry, Skill, McpServer } from "./registry.ts";
 
 // --- execution --------------------------------------------------------------
 export { runScene, readJournal, hashScene, JOURNAL_VERSION } from "./engine.ts";
+// The groundwork: runtimes are objects; mount your own without forking.
+export { RUNTIMES, registerRuntime } from "./runtimes/index.ts";
+export type { RuntimeObject, RuntimeCallArgs, RuntimeParkArgs } from "./runtimes/index.ts";
 export type { RunOptions, RunResult, Journal, ResumeState, NodeCost, PendingAsk } from "./engine.ts";
 export { callAgent } from "./runtimes/agent.ts";
 export type { AgentCallRequest, ToolCallEvent } from "./runtimes/agent.ts";

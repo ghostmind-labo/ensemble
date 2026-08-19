@@ -164,6 +164,9 @@ export function buildEnsembleServer(root = process.cwd()): McpServer {
             waitingFor: {
               node: journal.pending.node,
               question: journal.pending.question,
+              // Content generated during the run (the quiz question, the draft)
+              // — relay this to whoever is answering.
+              ...(journal.pending.context ? { context: journal.pending.context } : {}),
               answerKeys: journal.pending.outputs,
             },
             answerHint:

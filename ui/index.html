@@ -91,7 +91,7 @@
   /* Toolbar is OUTSIDE the scroller, so it cannot drift sideways when a zoomed
      graph is panned; only #canvas scrolls. */
   main { grid-area: canvas; display: flex; flex-direction: column; overflow: hidden; position: relative; }
-  #canvas { flex: 1; overflow: auto; position: relative; padding: 0 24px 28px; }
+  #canvas { flex: 1; overflow: auto; position: relative; }
   .toolbar {
     flex: none; z-index: 5; display: flex; gap: 8px; align-items: center;
     padding: 20px 24px 14px; background: var(--bg);
@@ -415,8 +415,11 @@ const state = {
 const ZOOM_MIN = 0.25, ZOOM_MAX = 2;
 const clampZoom = (z) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(z * 100) / 100));
 
-function applyZoom() {
+function applyZoom(keepScroll = true) {
   const vp = $("viewport"), layers = $("layers"), stage = $("stage"), canvas = $("canvas");
+  // Re-rendering the graph must not move the view. Anything that SHOULD move it
+  // (zoom, fit, a new scene) sets the scroll itself afterwards.
+  const keepL = canvas.scrollLeft, keepT = canvas.scrollTop;
   // Transforms do not affect layout, so size the stage to the SCALED content or
   // there is nothing to scroll to when zoomed in.
   // Free space you can pan INTO on all four sides, sized from the viewport so the
@@ -434,31 +437,45 @@ function applyZoom() {
   stage.style.marginLeft = `${Math.max(0, (canvas.clientWidth - w) / 2)}px`;
   $("zoomlabel").textContent = `${Math.round(state.zoom * 100)}%`;
   localStorage.setItem("ensemble:zoom", String(state.zoom));
+  if (keepScroll) { canvas.scrollLeft = keepL; canvas.scrollTop = keepT; }
   requestAnimationFrame(wires);
 }
 
-/** Zooms about the centre of what you are looking at, not the top-left corner. */
+/**
+ * Zooms about the centre of what you are looking at.
+ *
+ * The anchor must be computed in GRAPH coordinates, not stage pixels: only the
+ * graph scales — the surrounding pad and the centring margin do not — so
+ * mapping a stage-pixel offset by the zoom ratio alone drifts the view toward
+ * a corner, which is exactly what zooming out looked like.
+ */
+function setZoom(z) {
+  const canvas = $("canvas"), stage = $("stage");
+  const prev = state.zoom || 1;
+  const next = clampZoom(z);
+  if (next === prev) return;
+
+  const marginOf = () => parseFloat(stage.style.marginLeft) || 0;
+  // Viewport centre → graph space (origin = the graph's own top-left).
+  const gx = (canvas.scrollLeft + canvas.clientWidth / 2 - marginOf() - (state.padX ?? 0)) / prev;
+  const gy = (canvas.scrollTop + canvas.clientHeight / 2 - (state.padY ?? 0)) / prev;
+
+  state.zoom = next;
+  applyZoom();
+
+  // …and back, using the NEW pad and margin. Where the graph now fits, the
+  // margin centres it and these assignments clamp to 0 — which is the same
+  // answer, so nothing special is needed for that case.
+  canvas.scrollLeft = gx * next + (state.padX ?? 0) + marginOf() - canvas.clientWidth / 2;
+  canvas.scrollTop = gy * next + (state.padY ?? 0) - canvas.clientHeight / 2;
+}
+
 /** Puts the graph itself in the middle of the viewport, past the surrounding pad. */
 function centerGraph() {
   const canvas = $("canvas"), layers = $("layers");
   const gw = layers.offsetWidth * state.zoom, gh = layers.offsetHeight * state.zoom;
   canvas.scrollLeft = (state.padX ?? 0) + gw / 2 - canvas.clientWidth / 2;
   canvas.scrollTop = (state.padY ?? 0) + gh / 2 - canvas.clientHeight / 2;
-}
-
-function setZoom(z) {
-  const main = $("canvas");
-  const prev = state.zoom || 1;
-  const next = clampZoom(z);
-  if (next === prev) return;
-  // The point currently centred, in unscaled coordinates…
-  const cx = (main.scrollLeft + main.clientWidth / 2) / prev;
-  const cy = (main.scrollTop + main.clientHeight / 2) / prev;
-  state.zoom = next;
-  applyZoom();
-  // …put back under the centre at the new scale.
-  main.scrollLeft = cx * next - main.clientWidth / 2;
-  main.scrollTop = cy * next - main.clientHeight / 2;
 }
 
 /** Scale so the whole graph fits the visible canvas, never magnifying past 1:1. */
@@ -825,6 +842,7 @@ async function select(file) {
   state.layout = data.layout;
   $("srctext").value = data.source ?? "";
   draw();
+  centerGraph();   // a different scene is the one case that re-frames the view
 }
 
 // ---------------------------------------------------------------- render
@@ -890,7 +908,6 @@ function draw() {
   applyOffsets();
   attachDrag();
   applyZoom();          // re-sizes the stage for the new content, then draws wires
-  centerGraph();        // …and start looking at the graph, not the surrounding pad
 }
 
 // ---------------------------------------------------------------- drag
