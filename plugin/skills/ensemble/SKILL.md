@@ -48,7 +48,7 @@ ensemble validate <scene>                          # free, and now checks the ke
   **Prefer a file when driving through MCP:** the server inherits the host's
   environment at spawn, so a key exported later in some other terminal never
   reaches it, while a file is re-read on every call.
-- Node ≥ 22.6. No other install, no subprocess, no external agent.
+- Node ≥ 22.18. No other install, no subprocess, no external agent.
 
 ### Where things go — everything under `.ensemble/`
 

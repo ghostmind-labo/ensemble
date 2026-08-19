@@ -8,12 +8,19 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 22.18 is the floor: scenes are .mts loaded by Node's UNFLAGGED type
+        # stripping, which landed there (22.6 needs --experimental-strip-types,
+        # so a scene will not load at all). 24.x is what most people run.
+        node: ["22.18", "24"]
+    name: node ${{ matrix.node }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          # Scenes are TypeScript loaded by Node's native type stripping.
-          node-version: "22.6"
+          node-version: ${{ matrix.node }}
       - run: npm ci
       - run: npm run typecheck
       # Every suite mocks OpenRouter, so CI needs no key and spends nothing.

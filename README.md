@@ -440,7 +440,7 @@ npm i @ghostmind-dev/ensemble
 
 Requirements:
 
-- **Node ≥ 22.6** — scenes are TypeScript, loaded via Node's native type stripping
+- **Node ≥ 22.18** — scenes are TypeScript, loaded via Node's native type stripping
 - `OPENROUTER_API_KEY` in the environment — **that's the only credential**
 
 Name scenes `.mts` and nothing else is needed. (`.ts` also works when the nearest
