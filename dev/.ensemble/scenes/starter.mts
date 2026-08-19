@@ -5,7 +5,8 @@ import { scene, z } from "@ghostmind-dev/ensemble";
 
 export default scene({
   name: "starter",
-  defaults: { model: "openrouter/anthropic/claude-haiku-4.5" },
+  // Workers are cheap and fast; the brain is the one that judges.
+  defaults: { model: "openrouter/deepseek/deepseek-v4-flash" },
 
   state: {
     score: z.number().min(0).max(10),
@@ -19,7 +20,7 @@ export default scene({
     read_b: { inputs: ["draft"], prompt: "Critique accuracy in two sentences.", outputs: ["accuracy"] },
 
     judge: {
-      model: "openrouter/anthropic/claude-sonnet-5",
+      model: "openrouter/z-ai/glm-5.3",   // the brain: money goes to the gate
       prompt: "Score the draft 0-10 and say ship or revise.",
       inputs: ["draft", "clarity", "accuracy"],
       outputs: ["score", "verdict", "feedback"],

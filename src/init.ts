@@ -75,7 +75,8 @@ const STARTER = `import { scene, z } from "@ghostmind-dev/ensemble";
 
 export default scene({
   name: "starter",
-  defaults: { model: "openrouter/anthropic/claude-haiku-4.5" },
+  // Cheap, fast worker by default; the strong model sits at the gate.
+  defaults: { model: "openrouter/deepseek/deepseek-v4-flash" },
 
   // Shapes are enforced at run time AND type \`s\` in the edges below.
   state: { score: z.number().min(0).max(10), answer: z.string() },
@@ -83,7 +84,7 @@ export default scene({
   nodes: {
     writer: { inputs: ["feedback"], outputs: ["answer"] },
     judge: {
-      model: "openrouter/anthropic/claude-sonnet-5",
+      model: "openrouter/z-ai/glm-5.3",
       prompt: "Score the answer 0-10 and give one concrete improvement.",
       inputs: ["answer"],
       outputs: ["score", "feedback"],

@@ -37,7 +37,25 @@
   .brand small { display: block; font-weight: 400; color: var(--muted); font-size: 11px; letter-spacing: 0; }
   .section { padding: 10px 16px 4px; font-size: 11px; text-transform: uppercase;
              letter-spacing: .07em; color: var(--muted); }
-  .scenes { overflow-y: auto; flex: 1; }
+  .scenes { overflow-y: auto; flex: 1; min-height: 0; }
+  /* Runs are SELECTED here, beside the scenes, because a run is a thing you
+     pick — not a tab you visit. The right panel then always shows one run. */
+  .runsec { display: flex; align-items: center; gap: 6px; border-top: 1px solid var(--line); }
+  #runcount { margin-left: auto; font-family: var(--mono); font-size: 10px; }
+  .runrow {
+    padding: 5px 16px; cursor: pointer; border-left: 2px solid transparent;
+    display: flex; align-items: baseline; gap: 6px; font-family: var(--mono); font-size: 10.5px;
+  }
+  .runrow:hover { background: var(--accent-soft); }
+  .runrow.sel { border-left-color: var(--accent); background: var(--accent-soft); }
+  .runrow .dot { width: 6px; height: 6px; border-radius: 50%; flex: none; background: var(--muted); }
+  .runrow.completed .dot { background: var(--ok); }
+  .runrow.waiting   .dot { background: var(--warn); }
+  .runrow.stopped   .dot { background: var(--fail); }
+  .runrow.livenow   .dot { background: var(--run); animation: pulse 1.1s ease-in-out infinite; }
+  .runrow b { font-weight: 600; color: var(--fg); font-size: 11px; }
+  .runrow span { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .runrow .when { margin-left: auto; color: var(--muted); }
   .scene {
     padding: 8px 16px; cursor: pointer; border-left: 2px solid transparent;
     display: flex; flex-direction: column; gap: 1px;
@@ -223,6 +241,41 @@
   .pane.src.active { display: flex; flex-direction: column; }
   #state { padding: 12px 16px; font-family: var(--mono); font-size: 11.5px; }
   #state .kv { margin-bottom: 10px; }
+  /* One always-visible context bar: which run every pane below is showing, and
+     the controls to step between runs. Per-pane banners scrolled out of view,
+     which is how you end up reading history and thinking it is live. */
+  #ctx {
+    display: flex; align-items: center; gap: 6px; padding: 7px 10px;
+    border-bottom: 1px solid var(--line); font-family: var(--mono); font-size: 11px;
+    background: var(--panel); flex: none;
+  }
+  #ctx button { padding: 2px 7px; font-size: 11px; line-height: 1.3; }
+  #ctxlabel { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #ctx.live #ctxlabel { color: var(--ok); }
+  #ctx.live #ctxlive, #ctx.live #ctxprev, #ctx.live #ctxnext { opacity: .45; }
+  #ctx.history { background: var(--accent-soft); }
+  #ctx.history #ctxlabel { color: var(--accent); font-weight: 600; }
+  body.console-collapsed #ctx { display: none; }
+
+  /* The timeline: one row per step, each with the blackboard AS IT WAS then. */
+  .steps { display: flex; gap: 4px; flex-wrap: wrap; padding: 0 0 10px; }
+  .step {
+    padding: 3px 9px; border-radius: 999px; cursor: pointer; font-family: var(--mono);
+    font-size: 10.5px; border: 1px solid var(--line); color: var(--muted); background: none;
+  }
+  .step:hover { border-color: var(--accent); color: var(--accent); }
+  .step.sel { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .stepnote { font-family: var(--mono); font-size: 10.5px; color: var(--muted); margin-bottom: 8px; }
+  #state .kv.fresh .k::after { content: " new"; color: var(--ok); font-weight: 400; font-size: 9px; }
+  #state .kv.fresh pre { border-left: 2px solid var(--ok); }
+
+  .statebar {
+    display: flex; align-items: center; gap: 8px; margin: -4px 0 10px;
+    padding: 5px 8px; border-radius: 7px; background: var(--accent-soft);
+    font-family: var(--mono); font-size: 10.5px; color: var(--muted);
+  }
+  .statebar b { color: var(--accent); font-weight: 600; }
+  .statebar button { margin-left: auto; padding: 2px 8px; font-size: 10.5px; }
   #state .k { color: var(--accent); font-weight: 700; }
   #state pre { margin: 3px 0 0; white-space: pre-wrap; word-break: break-word;
                background: var(--bg); padding: 7px 9px; border-radius: 7px; max-height: 140px; overflow-y: auto; }
@@ -282,6 +335,8 @@
   <div class="brand">ensemble<small id="conn">connecting…</small></div>
   <div class="section">Scenes</div>
   <div class="scenes" id="scenes"></div>
+  <div class="section runsec">Runs <span id="runcount"></span></div>
+  <div class="scenes" id="runlist"></div>
   <div class="reg" id="registry"></div>
 </aside>
 
@@ -311,11 +366,16 @@
 
 <footer>
   <div id="panelgrip" title="Drag to resize"></div>
+    <div id="ctx">
+      <button id="ctxprev" title="Older run">◀</button>
+      <button id="ctxnext" title="Newer run">▶</button>
+      <span id="ctxlabel">live</span>
+      <button id="ctxlive" title="Return to the live run">← live</button>
+    </div>
     <div class="tabs">
       <button class="tab active" data-tab="log">Log</button>
-      <button class="tab" data-tab="state">State</button>
+      <button class="tab" data-tab="state">Timeline</button>
       <button class="tab" data-tab="costs">Costs</button>
-      <button class="tab" data-tab="runs">Runs</button>
       <button class="tab" data-tab="source">Source</button>
       <button class="tab" data-tab="inspect">Node</button>
       <span id="savemsg"></span>
@@ -324,7 +384,6 @@
     <div class="log pane active" id="log"><div class="empty">Run a scene to see live output.</div></div>
     <div class="pane" id="state"><div class="empty">State appears here as nodes complete.</div></div>
     <div class="pane" id="costs"><div class="empty">Per-node spend appears here as nodes complete.</div></div>
-    <div class="pane" id="runs"><div class="empty">Loading runs…</div></div>
     <div class="pane src" id="source">
       <textarea id="srctext" spellcheck="false"></textarea>
       <div class="srcbar">
@@ -345,6 +404,10 @@ const state = {
   spent: 0,            // running total for the ticker
   budget: null,        // USD cap of the current run, if any
   selected: null, running: false,
+  viewingRun: null,   // runId whose state the State tab is showing, or null = live
+  steps: [],          // state history: one entry per completed target
+  stepAt: 0,          // which step the Timeline is showing
+  lastTarget: null,
   zoom: Number(localStorage.getItem("ensemble:zoom")) || 1,
 };
 
@@ -426,23 +489,33 @@ function updateSpend() {
   }
 }
 
-function renderCosts() {
+/**
+ * Renders the Costs pane from either the live tally or a past run's receipt.
+ * `label` set means historical, and the banner says so.
+ */
+function renderCosts(costs, total, budget, label) {
   const pane = $("costs");
-  if (state.costs.size === 0) {
-    pane.innerHTML = '<div class="empty">Per-node spend appears here as nodes complete.</div>';
+  const map = costs ?? state.costs;
+  const spent = total ?? state.spent;
+  const cap = budget === undefined ? state.budget : budget;
+  const banner = "";
+
+  if (map.size === 0) {
+    pane.innerHTML = banner + '<div class="empty">Per-node spend appears here as nodes complete.</div>';
     return;
   }
-  const rows = [...state.costs.entries()].sort((a, b) => b[1].cost - a[1].cost);
+  const rows = [...map.entries()].sort((a, b) => b[1].cost - a[1].cost);
   const max = rows[0][1].cost || 1;
-  pane.innerHTML = rows.map(([node, t]) => {
-    const share = state.spent > 0 ? Math.round((t.cost / state.spent) * 100) : 0;
+  pane.innerHTML = banner + rows.map(([node, t]) => {
+    const share = spent > 0 ? Math.round((t.cost / spent) * 100) : 0;
     return `<div class="crow">
       <span class="cname">${esc(node)}</span>
       <div class="cbar"><i style="width:${Math.max(2, (t.cost / max) * 100)}%"></i></div>
       <span class="cval">${usd(t.cost)} · ${share}% · ${t.runs}×</span>
     </div>`;
   }).join("") +
-    `<div class="ctotal">total ${usd(state.spent)}${state.budget ? ` of ${usd(state.budget)} budget` : ""}</div>`;
+    `<div class="ctotal">total ${usd(spent)}${cap ? ` of ${usd(cap)} budget` : ""}</div>`;
+
 }
 
 // ---------------------------------------------------------------- data
@@ -472,53 +545,247 @@ async function loadRegistry() {
     (r.problems?.length ? `<div class="warn">${r.problems.length} skipped</div>` : "");
 }
 
+/**
+ * Renders the State pane.
+ *
+ * Two modes, deliberately in ONE tab: the live blackboard of the current run,
+ * or a past run's blackboard read from its checkpoint. A separate tab for
+ * history would mean remembering which one you were looking at; a banner and a
+ * way back is less to hold in your head.
+ */
+function renderState() {
+  const pane = $("state");
+  const steps = state.steps ?? [];
+
+  // No steps recorded (a live run that has not finished a target yet, or a run
+  // from before transcripts were kept) — show the blackboard as it stands.
+  if (steps.length === 0) {
+    const data = state.viewingRun ? (state.viewingDetail?.state ?? {}) : state.blackboard;
+    pane.innerHTML = Object.entries(data).map(([k, v]) => kv(k, v, false)).join("")
+      || '<div class="empty">State is empty.</div>';
+    return;
+  }
+
+  const at = Math.min(state.stepAt ?? steps.length - 1, steps.length - 1);
+  const step = steps[at];
+  const prev = at > 0 ? steps[at - 1].state : {};
+
+  pane.innerHTML =
+    `<div class="steps">` +
+    steps.map((s, i) =>
+      `<button class="step ${i === at ? "sel" : ""}" data-step="${i}">${i + 1}. ${esc(s.target)}</button>`).join("") +
+    `</div>` +
+    `<div class="stepnote">after <b>${esc(step.target)}</b> — step ${at + 1} of ${steps.length}` +
+    `${step.added.length ? ` · wrote ${esc(step.added.join(", "))}` : ""}</div>` +
+    Object.entries(step.state).map(([k, v]) => kv(k, v, !(k in prev))).join("");
+
+  for (const el of pane.querySelectorAll(".step")) {
+    el.onclick = () => { state.stepAt = Number(el.dataset.step); renderState(); };
+  }
+}
+
+/** One state key. `fresh` marks a key this step introduced. */
+function kv(k, v, fresh) {
+  return `<div class="kv${fresh ? " fresh" : ""}"><span class="k">${esc(k)}</span><pre>${esc(
+    typeof v === "string" ? v : JSON.stringify(v, null, 2))}</pre></div>`;
+}
+
+/**
+ * Turns a transcript into the state history: one entry per completed target,
+ * carrying the blackboard AS IT WAS at that moment and which keys were new.
+ * This is what makes a run reproducible by reading rather than by rerunning.
+ */
+function stepsFromEvents(events) {
+  const steps = [];
+  let target = "?";
+  let prevKeys = new Set();
+  for (const e of events ?? []) {
+    if (e.type === "target:start") target = e.target;
+    if (e.type === "state") {
+      const st = e.state ?? {};
+      steps.push({
+        target,
+        state: st,
+        added: Object.keys(st).filter((k) => !prevKeys.has(k)),
+      });
+      prevKeys = new Set(Object.keys(st));
+    }
+  }
+  return steps;
+}
+
+/**
+ * Repaints the context bar: which run every pane is showing, and whether the
+ * step controls are usable. Called on every mode change so the bar can never
+ * disagree with the panes below it.
+ */
+function renderCtx() {
+  const bar = $("ctx");
+  const list = state.runList ?? [];
+  const at = state.viewingRun ? list.indexOf(state.viewingRun) : -1;
+
+  bar.classList.toggle("history", Boolean(state.viewingRun));
+  bar.classList.toggle("live", !state.viewingRun);
+  $("ctxlabel").textContent = state.viewingRun
+    ? `${state.viewingRun}${at >= 0 ? `  (${at + 1}/${list.length})` : ""}`
+    : state.running ? "live · running" : "live";
+  // Newest first, so "older" is forward in the array.
+  $("ctxprev").disabled = list.length === 0 || (at >= 0 && at >= list.length - 1);
+  $("ctxnext").disabled = at <= 0;
+  $("ctxlive").disabled = !state.viewingRun;
+}
+
+/** Steps to the adjacent run: +1 older, -1 newer. */
+function stepRun(delta) {
+  const list = state.runList ?? [];
+  if (list.length === 0) return;
+  const at = state.viewingRun ? list.indexOf(state.viewingRun) : -1;
+  const next = at === -1 ? 0 : at + delta;
+  if (next < 0 || next >= list.length) return;
+  showRun(list[next]);
+}
+
+/** Drops the historical context and returns every pane to the live run. */
+function backToLive() {
+  state.viewingRun = null;
+  state.viewingDetail = null;
+  state.status.clear();
+  state.steps = [];
+  state.stepAt = 0;
+  renderState();
+  renderCosts();
+  $("log").innerHTML = '<div class="empty">Run a scene to see live output.</div>';
+  draw();
+  renderCtx();
+}
+
+/** Renders one persisted event into the log, mirroring the live formatting. */
+function replayEvent(e) {
+  switch (e.type) {
+    case "run:start": log(`▶ ${esc(e.scene)} — ${esc(e.goal)}`, "h"); break;
+    case "node:start": log(`┌ ${esc(e.node)} <span class="m">${esc(e.model)}</span>`); break;
+    case "node:tool":
+      log(`  ⚒ ${esc(e.tool)} <span class="m">${((e.ms ?? 0) / 1000).toFixed(1)}s · ${esc(e.preview ?? "")}</span>`,
+          e.ok ? "" : "r");
+      break;
+    case "node:retry": log(`⚠ ${esc(e.node)}: ${esc(e.problem)} — reprompting`, "w"); break;
+    case "node:ask": log(`⏸ ${esc(e.node)} asks: ${esc(e.question)}`, "w"); break;
+    case "node:end": {
+      const meta = `${e.tokensIn}→${e.tokensOut} tok · $${(e.cost ?? 0).toFixed(4)} · ${((e.ms ?? 0) / 1000).toFixed(1)}s`;
+      if (e.text) log(esc(String(e.text).trim()), "m");
+      log(`└ ${esc(e.node)} ${e.ok ? "ok" : "failed"} <span class="m">${esc(meta)}</span>`, e.ok ? "g" : "r");
+      if (!e.ok && e.error) log(`  ${esc(e.error)}`, "r");
+      break;
+    }
+    case "edge":
+      log(e.skipped ? `  ${esc(e.from)}→${esc(e.to)} loop cap reached`
+                    : `  → ${esc(e.to)}${e.when ? ` <span class="m">(${esc(e.when)})</span>` : ""}`,
+          e.skipped ? "m" : "");
+      break;
+    case "run:end":
+      log(e.ok ? `✓ done · ${e.nodeRuns} node runs · $${(e.totalCost ?? 0).toFixed(4)}`
+               : `✗ ${esc(e.reason ?? "failed")}`, e.ok ? "g h" : "r h");
+      break;
+  }
+}
+
 // ---------------------------------------------------------------- runs
 // Read from the machine-level index, so runs an AGENT started over MCP — or the
 // CLI, in another project entirely — show up here, not just this tab's own runs.
 async function loadRuns() {
-  const pane = $("runs");
+  const pane = $("runlist");
   try {
     const r = await fetch("/api/runs").then((x) => x.json());
     const projects = r.projects ?? [];
-    if (projects.length === 0) {
-      pane.innerHTML = '<div class="empty">No runs yet on this machine.</div>';
+    // Flat and newest-first: a run is picked by WHEN it happened far more often
+    // than by which project it belonged to.
+    const all = projects.flatMap((p) =>
+      p.scenes.flatMap((s) => s.runs.map((run) => ({ ...run, project: p.label, here: p.project === r.thisProject }))),
+    ).sort((a, b) => (a.startedAt < b.startedAt ? 1 : -1));
+
+    state.runList = all.map((x) => x.runId);
+    $("runcount").textContent = all.length ? String(all.length) : "";
+    renderCtx();
+
+    if (all.length === 0) {
+      pane.innerHTML = '<div class="empty" style="padding:12px">No runs yet.</div>';
       return;
     }
-    pane.innerHTML = projects.map((p) => `
-      <div class="proj">
-        <div class="projname"><b>${esc(p.label)}</b> ${esc(p.project)}${
-          p.project === r.thisProject ? ' <span style="color:var(--accent)">· this project</span>' : ""
-        }</div>
-        ${p.scenes.map((s) => `
-          <div class="sc">
-            <div class="scname">${esc(s.scene)}</div>
-            ${s.runs.map((run) => `
-              <div class="run" data-run="${esc(run.runId)}" title="${esc(run.runDir)}">
-                <span class="st ${esc(run.status)}">${esc(run.status)}</span>
-                <span class="rid">${esc(run.runId)}${
-                  run.waitingFor ? ` <span class="q">· ${esc(run.waitingFor.question)}</span>` : ""
-                }</span>
-                <span class="meta">${run.nodeRuns} node · ${usd(run.totalCost ?? 0)}</span>
-                <span class="meta">${run.status === "stopped" || run.status === "waiting" ? "resumable" : ""}</span>
-              </div>`).join("")}
-          </div>`).join("")}
+
+    const when = (iso) => {
+      const d = new Date(iso);
+      return Number.isNaN(+d) ? "" : `${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`;
+    };
+    pane.innerHTML = all.map((run) => `
+      <div class="runrow ${esc(run.status)} ${state.viewingRun === run.runId ? "sel" : ""}"
+           data-run="${esc(run.runId)}" title="${esc(run.runId)} · ${esc(run.runDir)}">
+        <span class="dot"></span>
+        <b>${esc(run.scene)}</b>
+        <span>${run.nodeRuns} node · ${usd(run.totalCost ?? 0)}${run.here ? "" : ` · ${esc(run.project)}`}</span>
+        <span class="when">${when(run.startedAt)}</span>
       </div>`).join("");
 
-    for (const el of pane.querySelectorAll(".run")) {
+    for (const el of pane.querySelectorAll(".runrow")) {
       el.onclick = () => showRun(el.dataset.run);
     }
+    return;
   } catch {
-    pane.innerHTML = '<div class="empty">Could not read the run index.</div>';
+    pane.innerHTML = '<div class="empty" style="padding:12px">Could not read the run index.</div>';
+    return;
   }
+
 }
 
 /** Loads one run's journal/state/costs into the inspector panel. */
+/**
+ * Loads a past run as a COMPLETE package: its state, its per-node costs, its
+ * transcript, and the node statuses painted back onto the canvas.
+ *
+ * Half-loading it — state here, costs still showing the live run — is worse than
+ * not loading it at all, because nothing tells you the two panes disagree. So
+ * every pane switches together and every one carries the same banner.
+ */
 async function showRun(runId) {
   const box = $("inspect");
   box.innerHTML = '<div class="empty">Loading…</div>';
-  showTab("inspect");
   const d = await fetch(`/api/run-detail?id=${encodeURIComponent(runId)}`).then((x) => x.json());
   if (d.error) { box.innerHTML = `<div class="empty">${esc(d.error)}</div>`; return; }
+
+  state.viewingRun = runId;
+  state.viewingDetail = d;
+
+  // 1 · the state HISTORY, not just the final frame
+  state.steps = stepsFromEvents(d.events);
+  state.stepAt = Math.max(0, state.steps.length - 1);
+  renderState();
+
+  // 2 · costs, from the run's own receipt rather than this tab's tally
+  const nodes = d.costs?.nodes ?? {};
+  renderCosts(
+    new Map(Object.entries(nodes)),
+    d.costs?.totalCost ?? 0,
+    d.costs?.budget ?? null,
+    runId,
+  );
+
+  // 3 · transcript, replayed into the log
+  $("log").innerHTML = "";
+  for (const e of d.events ?? []) replayEvent(e);
+
+  // 4 · the graph, marked with how that run actually went
+  state.status.clear();
+  for (const e of d.events ?? []) {
+    if (e.type === "node:end") {
+      state.status.set(e.node, {
+        state: e.ok ? "ok" : "fail",
+        meta: `${e.tokensIn}→${e.tokensOut} tok · $${(e.cost ?? 0).toFixed(4)} · ${((e.ms ?? 0) / 1000).toFixed(1)}s`,
+        text: e.text,
+      });
+    }
+  }
+  draw();
+  renderCtx();
+  showTab("state");
   const j = d.journal ?? {};
   const row = (k, v) => (v || v === 0 ? `<dt>${k}</dt><dd>${esc(v)}</dd>` : "");
   box.innerHTML = `<h3>${esc(runId)}</h3><dl>
@@ -774,6 +1041,9 @@ function log(html, cls = "") {
 
 // ---------------------------------------------------------------- events
 function onEvent(e) {
+  // Remembered so a `state` event can be attributed to the target that produced it.
+  if (e.type === "target:start") state.lastTarget = e.target;
+
   switch (e.type) {
     // The viewer's own source changed on disk — reload so a UI edit shows up
     // without touching the browser or restarting the server.
@@ -797,7 +1067,11 @@ function onEvent(e) {
       const cap = Number($("budget").value);
       state.budget = Number.isFinite(cap) && cap > 0 ? cap : null;
       state.running = true;
-      updateSpend(); renderCosts();
+      state.viewingRun = null;   // a new run takes the panes back from history
+      state.viewingDetail = null;
+      state.steps = [];          // and starts a fresh timeline
+      state.stepAt = 0;
+      updateSpend(); renderCosts(); renderCtx();
       $("run").disabled = true; $("stop").disabled = false;
       $("log").innerHTML = "";
       log(`▶ ${esc(e.scene)} — ${esc(e.goal)}`, "h");
@@ -830,11 +1104,20 @@ function onEvent(e) {
 
     case "state": {
       state.blackboard = e.state ?? {};
-      const pane = $("state");
-      pane.innerHTML = Object.entries(state.blackboard).map(([k, v]) =>
-        `<div class="kv"><span class="k">${esc(k)}</span><pre>${esc(
-          typeof v === "string" ? v : JSON.stringify(v, null, 2))}</pre></div>`).join("")
-        || '<div class="empty">State is empty.</div>';
+      // Append a live step so the timeline grows during the run.
+      {
+        const prevKeys = new Set(Object.keys(state.steps.at(-1)?.state ?? {}));
+        state.steps.push({
+          target: state.lastTarget ?? "?",
+          state: e.state ?? {},
+          added: Object.keys(e.state ?? {}).filter((k) => !prevKeys.has(k)),
+        });
+        state.stepAt = state.steps.length - 1;
+      }
+      // A live event always returns the pane to live mode: watching a run and
+      // silently seeing a stale historical blackboard would be worse than useless.
+      state.viewingRun = null;
+      renderState();
       draw();
       break;
     }
@@ -863,7 +1146,8 @@ function onEvent(e) {
       tally.tokensIn += e.tokensIn; tally.tokensOut += e.tokensOut;
       state.costs.set(e.node, tally);
       state.spent += e.cost;
-      updateSpend(); renderCosts();
+      updateSpend();
+      if (!state.viewingRun) renderCosts();   // do not clobber a run being inspected
       // opencode gives no incremental text, so the reply lands here in one piece.
       if (e.text) log(esc(e.text.trim()), "m");
       log(`└ ${esc(e.node)} ${e.ok ? "ok" : "failed"} <span class="m">${esc(meta)}</span>`, e.ok ? "g" : "r");
@@ -891,6 +1175,7 @@ function onEvent(e) {
       state.spent = e.totalCost;
       updateSpend(); renderCosts();
       $("run").disabled = false; $("stop").disabled = true;
+      renderCtx();
       if (e.ok) {
         const under = state.budget ? ` of ${usd(state.budget)} budget` : "";
         log(`✓ done · ${e.nodeRuns} node runs · $${e.totalCost.toFixed(4)}${under}`, "g h");
@@ -934,6 +1219,10 @@ $("goal").addEventListener("keydown", (e) => { if (e.key === "Enter") $("run").c
 
 // ---------------------------------------------------------------- zoom + layout
 const STEP = 1.15;
+$("ctxprev").onclick = () => stepRun(1);
+$("ctxnext").onclick = () => stepRun(-1);
+$("ctxlive").onclick = () => backToLive();
+
 $("zoomin").onclick = () => setZoom(state.zoom * STEP);
 $("zoomout").onclick = () => setZoom(state.zoom / STEP);
 $("zoomfit").onclick = zoomToFit;
@@ -1070,7 +1359,7 @@ function esc(s) {
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
 }
 
-loadScenes(); loadRegistry(); loadRuns(); connect();
+loadScenes(); loadRegistry(); loadRuns(); renderCtx(); connect();
 </script>
 </body>
 </html>
