@@ -18,7 +18,7 @@
 // 15 nodes, every one a different casting of model to job. All are runtime
 // "model" (pure OpenRouter calls) — the point here is topology, not tool use, so
 // the whole council runs on nothing but OPENROUTER_API_KEY, like example 01.
-import { scene } from "../../src/index.ts";
+import { scene } from "@ghostmind-dev/ensemble";
 
 // The bar the option set must clear before the council will spend money drafting
 // the final brief. Number(), not a truthy string — see the gate edge below.

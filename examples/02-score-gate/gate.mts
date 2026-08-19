@@ -7,7 +7,7 @@
 //
 // This is also the skeleton of the auto-research / self-improvement loop:
 // run → measure → if below target, mutate using the feedback → run again.
-import { scene } from "../../src/index.ts";
+import { scene } from "@ghostmind-dev/ensemble";
 
 const TARGET = 8;
 

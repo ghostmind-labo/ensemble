@@ -1,7 +1,7 @@
 {
   "name": "ensemble",
   "version": "0.13.0",
-  "description": "Author, run, observe, and revise multi-model agent scenes with @ghostmind-dev/ensemble. Bundles the ensemble MCP server — installing the plugin is all the setup there is.",
+  "description": "Author, run, observe, and revise multi-model agent scenes with @ghostmind-dev/ensemble. Bundles the ensemble MCP server \u2014 installing the plugin is all the setup there is.",
   "author": {
     "name": "ghostmind",
     "url": "https://github.com/ghostmind-labo"

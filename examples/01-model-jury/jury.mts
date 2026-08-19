@@ -7,7 +7,7 @@
 //
 // Every node here is runtime "model" (the default): a direct OpenRouter call.
 // No tools, no skills — so no opencode server is spawned at all for this scene.
-import { scene } from "../../src/index.ts";
+import { scene } from "@ghostmind-dev/ensemble";
 
 const jurorPrompt = [
   "Answer the goal directly and concretely in about 150 words.",

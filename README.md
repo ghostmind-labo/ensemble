@@ -749,11 +749,24 @@ promotion is a deliberate step.
 
 ## Status
 
-v0.7 — **fully self-contained**; the opencode dependency is gone. Verified: per-node
+v0.12 — **fully self-contained**; the opencode dependency is gone. Verified: per-node
 cross-vendor routing, the agent loop calling built-in *and* MCP tools until done,
 skills inlined from SKILL.md, function conditions, loop caps, parallel groups, token
-streaming, validate-before-save editing, hard cost budgets, resumable runs, and
-ensemble driving itself over MCP.
+streaming, validate-before-save editing, hard cost budgets, resumable runs, typed
+state enforced by zod, `ask` nodes that pause for a human or an agent, a
+machine-level run index behind one viewer, and ensemble driving itself over MCP.
+`npm test` runs 10 offline suites; CI runs them on every push.
 
-Not built yet: the orchestrator node (dynamic routing), drag-and-drop editing, and a
-machine-level run index with a single global viewer across projects.
+Not built yet: the orchestrator node (dynamic routing), drag-and-drop editing, and
+any hosted/remote execution — runs are local by design.
+
+### Working on ensemble itself
+
+```bash
+npm test          # 10 suites, all offline (OpenRouter is mocked) — no key, no spend
+npm test resume   # just the suites whose name matches
+npm run typecheck && npm run build
+```
+
+Each suite runs as its own process: they chdir into temp projects and replace
+global `fetch`, so sharing one process would let them corrupt each other.
