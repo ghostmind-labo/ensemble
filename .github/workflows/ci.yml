@@ -23,6 +23,7 @@ jobs:
           node-version: ${{ matrix.node }}
       - run: npm ci
       - run: npm run typecheck
+      # `npm test` builds first (pretest): the init suite type-checks a
+      # scaffolded project against dist/index.d.ts, exactly as a consumer would.
       # Every suite mocks OpenRouter, so CI needs no key and spends nothing.
       - run: npm test
-      - run: npm run build
