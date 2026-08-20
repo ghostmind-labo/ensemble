@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { loadRegistry } from "./registry.ts";
 import { loadScene, SceneError, runtimeOf } from "./scene.ts";
 import { loadKeyFiles, hasApiKey, missingKeyMessage } from "./credentials.ts";
-import { runScene, readJournal, hashScene } from "./engine.ts";
+import { runScene, readJournal, hashScene, cancelRun } from "./engine.ts";
 import { createTerminalReporter } from "./reporter.ts";
 import { toMermaid, toTerminal, toHtml } from "./view.ts";
 import { c, info, error, duration } from "./log.ts";
@@ -16,6 +16,7 @@ ${c.bold("Usage")}
   ensemble init                        Scaffold .ensemble/ so an editor resolves scenes
   ensemble run <scene.ts> "<goal>"   Execute a scene against a goal
   ensemble resume <run-dir>            Continue a stopped run from its checkpoint
+  ensemble cancel <run-dir> [reason]   Close a parked run for good (artifacts kept)
   ensemble serve [scenes-dir]          Live viewer + run console in the browser
   ensemble view <scene.ts>           Draw the graph (terminal, mermaid, or html)
   ensemble validate <scene.ts>       Check a scene without running it
@@ -647,6 +648,20 @@ async function main(): Promise<number> {
         budget: num(values.budget),
         verbose: values.verbose ?? false,
       });
+    case "cancel": {
+      if (!rest[0]) {
+        error("cancel needs a run directory: ensemble cancel .ensemble/runs/<id> [reason]");
+        return 2;
+      }
+      try {
+        const journal = cancelRun(rest[0], rest.slice(1).join(" ") || undefined);
+        info(`${c.green("cancelled")} ${c.bold(journal.runId)} ${c.dim("— artifacts kept; it will no longer show as waiting")}`);
+        return 0;
+      } catch (err) {
+        error(err instanceof Error ? err.message : String(err));
+        return 1;
+      }
+    }
     case "resume":
       return cmdResume(rest[0], {
         maxRuns: num(values["max-runs"]),

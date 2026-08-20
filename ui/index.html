@@ -53,6 +53,8 @@
   .runrow.waiting   .dot { background: var(--warn); }
   .runrow.stopped   .dot { background: var(--fail); }
   .runrow.livenow   .dot { background: var(--run); animation: pulse 1.1s ease-in-out infinite; }
+  .runrow.cancelled .dot { background: var(--line); }
+  .runrow.cancelled b, .runrow.cancelled span { opacity: .55; }
   .runrow b { font-weight: 600; color: var(--fg); font-size: 11px; }
   .runrow span { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .runrow .when { margin-left: auto; color: var(--muted); }
