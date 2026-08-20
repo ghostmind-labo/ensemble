@@ -128,14 +128,30 @@ capability means adding an object — never editing the engine:
 
 | Object | What it is | Mount point |
 |---|---|---|
-| node | a unit of work | `nodes: {...}` in the scene |
-| edge | a connector (`from`/`to`/`when`/`maxLoops`) | `edges: [...]` |
+| node | a unit of work — the neuron | `nodes: {...}` in the scene |
+| edge | a connector — the synapse (`from`/`to`/`when`/`maxLoops`) | `edges: [...]` |
 | schema | the shape a state key must respect | `state: {...}` (zod) |
 | runtime | how a node executes (fields + validation + park/call) | `registerRuntime({...})` |
 | tool | a capability offered to agent nodes | `registerTool({...})` |
 | store | where run artifacts go (files by default) | `runScene(..., { store })` |
 
-Built-in runtimes: `model` / `agent` / `ask`. A custom store should WRAP
+Built-in runtimes: `model` (stochastic neuron) / `agent` (tool-using) / `ask`
+(external input) / **`fn` (deterministic)** — a plain function over state:
+
+```ts
+counter: { runtime: "fn", fn: (s) => ({ round: Number(s.round) + 1 }),
+           inputs: ["round"], outputs: ["round"] },
+```
+
+Free, instant, and held to the SAME `state` schema contract as model output —
+use it for arithmetic, formatting, tallies, and anything a model should never be
+paid to do. A throwing fn fails its node with the real message.
+
+**Terminology — the condition on an edge is called `when`.** It is a
+function-valued *property* of the edge object, not a separately mounted object:
+in this paradigm, objects carry identity and composition, while functions are
+the behaviour-carrying leaves on them (`edge.when`, `node.fn`, `runtime.call`,
+`tool.run`, `store.writeState` — all the same pattern). A custom store should WRAP
 `fileRunStore` rather than replace it, or its runs stop being resumable (resume
 reads the journal from the run directory).
 

@@ -76,6 +76,8 @@ export interface RuntimeObject {
   mcpServers?: (spec: NodeSpec) => string[];
   /** Waiting runtimes: park the run or pass through — no model call. */
   park?: (args: RuntimeParkArgs) => { values: State } | { pending: PendingAsk };
+  /** Computing runtimes: a deterministic function over state — no model call. */
+  compute?: (args: { node: string; spec: NodeSpec; state: State }) => State | Promise<State>;
   /** Calling runtimes: one attempt; the engine owns retries and extraction. */
   call?: (args: RuntimeCallArgs) => Promise<NodeResult>;
 }
@@ -218,12 +220,39 @@ const askRuntime: RuntimeObject = {
   },
 };
 
+/* ─────────────────────────────── fn ──────────────────────────────── */
+
+const fnRuntime: RuntimeObject = {
+  name: "fn",
+  summary: "a plain function over state — deterministic, free, instant",
+  badge: "λ",
+  needsModel: false,
+  fields: {
+    fn: z.custom<(state: State) => unknown>((v) => typeof v === "function", "must be a function"),
+  },
+  check: (name, spec) => {
+    const problems: string[] = [];
+    if (typeof spec.fn !== "function") {
+      problems.push(`node "${name}" is runtime "fn" but declares no fn — the function IS the node`);
+    }
+    if ((spec.outputs ?? []).length === 0) {
+      problems.push(`node "${name}" is runtime "fn" but declares no outputs — its return value would be discarded`);
+    }
+    return problems;
+  },
+  compute: async ({ spec, state }) => {
+    const result = await spec.fn!({ ...state });
+    return (result ?? {}) as State;
+  },
+};
+
 /* ───────────────────────────── registry ───────────────────────────── */
 
 export const RUNTIMES: Record<string, RuntimeObject> = {
   model: modelRuntime,
   agent: agentRuntime,
   ask: askRuntime,
+  fn: fnRuntime,
 };
 
 /** Node properties every runtime shares; everything else belongs to an object. */
