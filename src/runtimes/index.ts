@@ -27,7 +27,7 @@ import type { NodeResult } from "./model.ts";
 import type { ToolCallEvent } from "./agent.ts";
 import { callModel } from "./model.ts";
 import { callAgent } from "./agent.ts";
-import { BUILTIN_NAMES } from "../tools/builtin.ts";
+import { BUILTIN_TOOLS } from "../tools/builtin.ts";
 import { renderInputs } from "../state.ts";
 
 /** What a parked node is waiting for — re-exported through the engine. */
@@ -72,6 +72,8 @@ export interface RuntimeObject {
   needsModel: boolean;
   /** Runtime-specific validation problems (messages, not exceptions). */
   check?: (name: string, spec: NodeSpec, defaults: { model?: string }, registry: Registry) => string[];
+  /** MCP servers a node of this runtime wants prewarmed (engine connects lazily). */
+  mcpServers?: (spec: NodeSpec) => string[];
   /** Waiting runtimes: park the run or pass through — no model call. */
   park?: (args: RuntimeParkArgs) => { values: State } | { pending: PendingAsk };
   /** Calling runtimes: one attempt; the engine owns retries and extraction. */
@@ -128,6 +130,7 @@ const agentRuntime: RuntimeObject = {
     tools: z.record(z.boolean()),
     maxTurns: z.number().int().positive().max(50),
   },
+  mcpServers: (spec) => spec.mcp ?? [],
   check: (name, spec, _defaults, registry) => {
     const problems: string[] = [];
     for (const skill of spec.skills ?? []) {
@@ -160,7 +163,7 @@ const agentRuntime: RuntimeObject = {
       ...(a.costLimit !== undefined ? { costLimit: a.costLimit } : {}),
       mcp: wanted,
       // `tools: { grep: false }` opts a built-in out; default is all of them.
-      builtins: BUILTIN_NAMES.filter((n) => a.spec.tools?.[n] !== false),
+      builtins: BUILTIN_TOOLS.map((tool) => tool.name).filter((n) => a.spec.tools?.[n] !== false),
       skills,
       hub,
       root: a.root,
