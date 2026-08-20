@@ -28,6 +28,7 @@ import {
   renderInputs,
   outputContract,
   detectLossyExtraction,
+  applySchemas,
   type State,
 } from "./state.ts";
 import { loadKeyFiles } from "./credentials.ts";
@@ -365,6 +366,41 @@ async function runNode(
       values: outcome.values,
       result: { text: "", modelID: rtName, providerID: rtName, cost: 0, tokensIn: 0, tokensOut: 0 },
     };
+  }
+
+  // A computing runtime (e.g. "fn") is a deterministic function over state:
+  // free, instant, and held to the SAME schema contract as model output.
+  if (parkRt?.compute) {
+    const startedAt = Date.now();
+    ctx.emit({ type: "node:start", node, model: rtName, skills: [] });
+    const finishCompute = (ok: boolean, text: string, error?: string): void => {
+      ctx.emit({
+        type: "node:end", node, ok, text, providerID: rtName, modelID: rtName,
+        cost: 0, tokensIn: 0, tokensOut: 0, ms: Date.now() - startedAt,
+        ...(error ? { error } : {}),
+      });
+    };
+    try {
+      const outputs = spec.outputs ?? [];
+      const values = await parkRt.compute({ node, spec, state: { ...ctx.state } });
+      const missing = outputs.filter((k) => values[k] === undefined);
+      if (missing.length > 0) {
+        const message = `fn returned no value for declared output(s): ${missing.join(", ")}`;
+        finishCompute(false, "", message);
+        return { error: `node "${node}" failed: ${message}` };
+      }
+      const shaped = applySchemas(values, outputs, ctx.scene.state);
+      if (!shaped.ok) {
+        finishCompute(false, "", shaped.problem);
+        return { error: `node "${node}" failed: ${shaped.problem}` };
+      }
+      finishCompute(true, outputs.map((k) => `${k}: ${typeof values[k] === "string" ? values[k] : JSON.stringify(values[k])}`).join("\n"));
+      return { values, result: { text: "", modelID: rtName, providerID: rtName, cost: 0, tokensIn: 0, tokensOut: 0 } };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      finishCompute(false, "", message);
+      return { error: `node "${node}" failed: ${message}` };
+    }
   }
 
   const model = spec.model ?? ctx.scene.defaults.model ?? "";

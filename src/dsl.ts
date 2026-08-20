@@ -49,6 +49,9 @@ export type TypedState<S extends StateSchema> = { [K in keyof S]: TypeOf<S[K]> }
  * - `"ask"`: no model call at all. The run **pauses** here until something outside
  *   it supplies the node's `outputs` — a human in the viewer, or an agent calling
  *   `resume_run` with answers. Pure wait.
+ * - `"fn"`: a plain function over state — the deterministic neuron. No tokens,
+ *   no pause: `fn(state)` returns the node's outputs, validated against the
+ *   scene's schemas exactly like model output. Pure compute.
  */
 // The built-ins keep autocomplete; `string & {}` admits any runtime mounted
 // with registerRuntime() — a runtime is an object, not a member of an enum.
@@ -72,6 +75,12 @@ export interface NodeSpec {
    * collect a fresh answer each round (a quiz, an iterative review).
    */
   always?: boolean;
+  /**
+   * fn nodes only — the computation. Receives the CURRENT blackboard (read it
+   * freely; `inputs` remain documentation for the graph view) and returns the
+   * node's outputs. Keep it pure: throwing fails the node.
+   */
+  fn?: (state: State) => Record<string, unknown> | Promise<Record<string, unknown>>;
   /** State keys injected into the node's prompt as context. */
   inputs?: string[];
   /** State keys harvested from the node's fenced json block. */

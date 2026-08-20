@@ -96,44 +96,54 @@ export function extractOutputs(
     };
   }
 
-  // Shape enforcement. A key with no schema is passed through untouched, so
-  // adding `state` to an existing scene never breaks it. Where a schema exists,
-  // the PARSED value replaces the raw one — zod coercions and defaults apply, so
-  // downstream nodes and `when` predicates see the shape they were promised.
-  if (schema) {
-    const problems: string[] = [];
-    for (const key of outputs) {
-      const keySchema = schema[key] as { safeParse?: (v: unknown) => unknown } | undefined;
-      if (typeof keySchema?.safeParse !== "function") continue;
+  // Shape enforcement — shared with fn nodes, so computed values face exactly
+  // the same contract as model output.
+  const shaped = applySchemas(values, outputs, schema);
+  if (!shaped.ok) {
+    return {
+      ok: false,
+      values,
+      problem: `${shaped.problem}. Re-emit the json block with the shapes as specified.`,
+    };
+  }
+  return { ok: true, values };
+}
 
-      const result = keySchema.safeParse(values[key]) as {
-        success: boolean;
-        data?: unknown;
-        error?: { issues?: Array<{ path: Array<string | number>; message: string }> };
-      };
-      if (result.success) {
-        values[key] = result.data;
-        continue;
-      }
-      // Name the exact path so the retry is actionable, not "invalid input".
-      for (const issue of result.error?.issues ?? []) {
-        const where = [key, ...(issue.path ?? [])].join(".");
-        problems.push(`${where}: ${issue.message}`);
-      }
+/**
+ * Validates (and, via zod parsing, coerces) values in place against the scene's
+ * state schemas. A key with no schema passes through untouched, so schemas stay
+ * additive. Shared by text extraction and fn-node computation: where a value
+ * came from must not change what shapes are acceptable.
+ */
+export function applySchemas(
+  values: State,
+  outputs: string[],
+  schema?: Record<string, unknown>,
+): { ok: true } | { ok: false; problem: string } {
+  if (!schema) return { ok: true };
+  const problems: string[] = [];
+  for (const key of outputs) {
+    const keySchema = schema[key] as { safeParse?: (v: unknown) => unknown } | undefined;
+    if (typeof keySchema?.safeParse !== "function") continue;
+
+    const result = keySchema.safeParse(values[key]) as {
+      success: boolean;
+      data?: unknown;
+      error?: { issues?: Array<{ path: Array<string | number>; message: string }> };
+    };
+    if (result.success) {
+      values[key] = result.data;
+      continue;
     }
-
-    if (problems.length > 0) {
-      return {
-        ok: false,
-        values,
-        problem:
-          `these values do not match the required shape — ` +
-          `${problems.join("; ")}. Re-emit the json block with the shapes as specified.`,
-      };
+    // Name the exact path so the failure is actionable, not "invalid input".
+    for (const issue of result.error?.issues ?? []) {
+      const where = [key, ...(issue.path ?? [])].join(".");
+      problems.push(`${where}: ${issue.message}`);
     }
   }
-
-  return { ok: true, values };
+  return problems.length > 0
+    ? { ok: false, problem: `these values do not match the required shape — ${problems.join("; ")}` }
+    : { ok: true };
 }
 
 /**

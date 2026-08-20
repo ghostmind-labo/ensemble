@@ -703,6 +703,11 @@ for waiting runtimes, `call` for model-calling ones). The engine holds no
 runtime-specific branches; the validator composes each node's legal surface from
 the object it names.
 
+Since 0.19, nodes have a **deterministic** form too: `runtime: "fn"` makes the node
+a plain function over state — free, instant, schema-checked like model output.
+Nodes are the neurons (`model` stochastic, `fn` deterministic, `ask` external
+input); edges are the synapses, gated by their `when` property.
+
 Since 0.18 the same is true of **tools** (`registerTool({...})` — offered to every
 agent node) and the **run store** (`runScene(..., { store })` — every artifact write
 goes through a store object; wrap `fileRunStore` to mirror runs elsewhere while
