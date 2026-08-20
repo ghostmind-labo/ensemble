@@ -14,7 +14,7 @@
  *
  * The engine only emits events; rendering lives in reporter.ts and serve.ts.
  */
-import { mkdirSync, writeFileSync, readFileSync, existsSync, appendFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join, resolve, basename } from "node:path";
 import type { Scene, NodeSpec } from "./scene.ts";
@@ -31,7 +31,7 @@ import {
   type State,
 } from "./state.ts";
 import { loadKeyFiles } from "./credentials.ts";
-import { recordRun } from "./index-file.ts";
+import { fileRunStore, type RunStore } from "./store.ts";
 import type { EventSink, NodeMeta } from "./events.ts";
 
 export interface RunOptions {
@@ -56,6 +56,12 @@ export interface RunOptions {
    * on finds its outputs already present and falls through.
    */
   answers?: State;
+  /**
+   * Where artifacts go — a store OBJECT (default: files in the run directory).
+   * Swap or wrap it to mirror runs elsewhere; see src/store.ts for the caveat
+   * about keeping runs resumable.
+   */
+  store?: RunStore;
   /** Receives every run event. Omit for a silent run. */
   onEvent?: EventSink;
   /** Aborts the run; model nodes abort mid-stream, agent nodes between nodes. */
@@ -450,6 +456,7 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
   const maxNodeRuns = opts.maxNodeRuns ?? 50;
   const timeoutMs = opts.timeoutMs ?? 20 * 60_000;
   const sink: EventSink = opts.onEvent ?? (() => {});
+  const store: RunStore = opts.store ?? fileRunStore;
 
   // An env file may hold the only copy of the key — read it before the first
   // call, so a long-lived MCP server is not stuck with a stale environment.
@@ -458,11 +465,10 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
   const registry = loadRegistry();
   const root = resolve(process.cwd());
 
-  // MCP servers connect only if some node actually names one.
+  // MCP servers connect only if some node actually names one — and which nodes
+  // can name one is the runtime OBJECT's business, not an engine branch.
   const wantedServers = new Set(
-    Object.values(scene.nodes)
-      .filter((n) => runtimeOf(scene, n) === "agent")
-      .flatMap((n) => n.mcp ?? []),
+    Object.values(scene.nodes).flatMap((n) => RUNTIMES[runtimeOf(scene, n)]?.mcpServers?.(n) ?? []),
   );
   const servers = [...registry.mcp.values()].filter((s) => wantedServers.has(s.name));
 
@@ -513,7 +519,7 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
     sink(event);
     if (event.type === "node:delta") return;
     try {
-      appendFileSync(join(runDir, "events.jsonl"), `${JSON.stringify(event)}\n`, "utf8");
+      store.appendEvent(runDir, event);
     } catch {
       // A run must never fail because its transcript could not be written.
     }
@@ -528,7 +534,7 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
   }));
   // One line in the machine-level index so a single viewer can find this run
   // wherever it was started from. Resumes reuse the id, so the reader dedupes.
-  recordRun({
+  store.recordIndex({
     runId: id,
     runDir,
     project: root,
@@ -549,16 +555,13 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
   let pending: PendingAsk | undefined;
 
   const checkpoint = (stoppedBecause?: string): void => {
-    writeFileSync(join(runDir, "state.json"), JSON.stringify(state, null, 2), "utf8");
-    writeFileSync(
-      join(runDir, "costs.json"),
-      JSON.stringify(
-        { totalCost, nodeRuns, ...(budget !== undefined ? { budget } : {}), nodes: Object.fromEntries(nodeCosts) },
-        null,
-        2,
-      ),
-      "utf8",
-    );
+    store.writeState(runDir, state);
+    store.writeCosts(runDir, {
+      totalCost,
+      nodeRuns,
+      ...(budget !== undefined ? { budget } : {}),
+      nodes: Object.fromEntries(nodeCosts),
+    });
     const journal: Journal = {
       version: JOURNAL_VERSION,
       runId: id,
@@ -573,7 +576,7 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
       ...(stoppedBecause !== undefined ? { stoppedBecause } : {}),
       updatedAt: new Date().toISOString(),
     };
-    writeFileSync(join(runDir, "journal.json"), JSON.stringify(journal, null, 2), "utf8");
+    store.writeJournal(runDir, journal);
   };
 
   const fail = (reason: string): RunResult => {
@@ -747,7 +750,7 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
     }
 
     checkpoint();
-    writeFileSync(join(runDir, "result.md"), renderResult(scene, state), "utf8");
+    store.writeResult(runDir, renderResult(scene, state));
     emit({ type: "run:end", ok: true, state, totalCost, nodeRuns, ...(budget !== undefined ? { budget } : {}) });
 
     return { ok: true, state, runDir, totalCost, runId: id };

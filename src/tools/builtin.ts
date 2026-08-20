@@ -212,4 +212,18 @@ export const BUILTIN_TOOLS: BuiltinTool[] = [
   },
 ];
 
+/** Names of the tools present at import time. Prefer reading BUILTIN_TOOLS live. */
 export const BUILTIN_NAMES = BUILTIN_TOOLS.map((t) => t.name);
+
+/**
+ * Mounts a new built-in tool — the same groundwork rule as runtimes and stores:
+ * a capability is an object handed to a register function. Every agent node
+ * offers it from the next run (opt out per node with `tools: { name: false }`).
+ * Keep tools read-only in spirit: agent nodes deliberately have no write/exec
+ * built-ins, and a registered tool that mutates state breaks that promise.
+ */
+export function registerTool(tool: BuiltinTool): void {
+  const at = BUILTIN_TOOLS.findIndex((existing) => existing.name === tool.name);
+  if (at >= 0) BUILTIN_TOOLS[at] = tool;
+  else BUILTIN_TOOLS.push(tool);
+}

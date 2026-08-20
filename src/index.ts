@@ -42,7 +42,12 @@ export { callModel } from "./runtimes/model.ts";
 export type { NodeResult, ModelCallRequest } from "./runtimes/model.ts";
 export { McpHub } from "./mcp.ts";
 export type { McpTool, ServerStatus } from "./mcp.ts";
-export { BUILTIN_TOOLS, BUILTIN_NAMES } from "./tools/builtin.ts";
+export { BUILTIN_TOOLS, BUILTIN_NAMES, registerTool } from "./tools/builtin.ts";
+export type { BuiltinTool } from "./tools/builtin.ts";
+
+// --- stores: where run artifacts go, as objects -------------------------------
+export { fileRunStore } from "./store.ts";
+export type { RunStore, CostsArtifact } from "./store.ts";
 
 // --- events -----------------------------------------------------------------
 export { combineSinks } from "./events.ts";

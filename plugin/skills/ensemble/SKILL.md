@@ -123,12 +123,21 @@ export default scene({
 });
 ```
 
-**Everything is an object.** A node is an object; its `runtime` names a runtime
-OBJECT that declares which extra properties the node may carry, how it validates,
-and how it executes. The built-ins are `model` / `agent` / `ask`; library code can
-mount more with `registerRuntime({...})` — a new way to execute is a new object,
-never an engine change. Edges stay plain connector objects (`from`/`to`/`when`/
-`maxLoops`).
+**Everything is an object.** The system is composed of six kinds, and adding a
+capability means adding an object — never editing the engine:
+
+| Object | What it is | Mount point |
+|---|---|---|
+| node | a unit of work | `nodes: {...}` in the scene |
+| edge | a connector (`from`/`to`/`when`/`maxLoops`) | `edges: [...]` |
+| schema | the shape a state key must respect | `state: {...}` (zod) |
+| runtime | how a node executes (fields + validation + park/call) | `registerRuntime({...})` |
+| tool | a capability offered to agent nodes | `registerTool({...})` |
+| store | where run artifacts go (files by default) | `runScene(..., { store })` |
+
+Built-in runtimes: `model` / `agent` / `ask`. A custom store should WRAP
+`fileRunStore` rather than replace it, or its runs stop being resumable (resume
+reads the journal from the run directory).
 
 Every `NodeSpec` field: `model`, `runtime` ("model" | "agent" | "ask"), `prompt`
 (system-style instruction), `question` (ask only), `inputs`, `outputs`, `skills`,
