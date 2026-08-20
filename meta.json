@@ -1,7 +1,7 @@
 {
   "id": "JDPxx3FVr4HO",
   "name": "ensemble",
-  "version": "0.16.0",
+  "version": "0.17.0",
   "type": "project",
   "description": "Multi-model agent ensembles. Scenes (one TypeScript file) define nodes \u2014 any model, typed shared state, tool-using agents, human/agent approval pauses \u2014 wired by conditional edges and executed over OpenRouter.",
   "tags": [

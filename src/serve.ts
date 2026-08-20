@@ -236,6 +236,7 @@ export async function serve(opts: ServeOptions): Promise<void> {
           for (const entry of entries) {
             const journal = readJson<{
               resumeAt?: string;
+              cancelled?: { at: string; reason?: string };
               pending?: { node: string; question: string; outputs: string[] };
               nodeRuns?: number;
               totalCost?: number;
@@ -245,11 +246,13 @@ export async function serve(opts: ServeOptions): Promise<void> {
 
             const status = !journal
               ? "unknown"
-              : journal.pending
-                ? "waiting"
-                : journal.resumeAt === undefined
-                  ? "completed"
-                  : "stopped";
+              : journal.cancelled
+                ? "cancelled"
+                : journal.pending
+                  ? "waiting"
+                  : journal.resumeAt === undefined
+                    ? "completed"
+                    : "stopped";
 
             const group =
               projects.get(entry.project) ??

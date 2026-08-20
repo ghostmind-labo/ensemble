@@ -102,6 +102,8 @@ export interface Journal {
   nodeCosts: Record<string, NodeCost>;
   /** Why the run stopped, when it stopped early. */
   stoppedBecause?: string;
+  /** Set when the run was closed deliberately — it will never resume. */
+  cancelled?: { at: string; reason?: string };
   updatedAt: string;
 }
 
@@ -146,6 +148,11 @@ export function readJournal(runDir: string): ResumeState {
       `journal.json is version ${journal.version}, this build understands ${JOURNAL_VERSION}`,
     );
   }
+  if (journal.cancelled) {
+    throw new Error(
+      `that run was cancelled${journal.cancelled.reason ? ` (${journal.cancelled.reason})` : ""} — a cancelled run never resumes`,
+    );
+  }
   if (!journal.resumeAt) {
     throw new Error(`that run already reached its exit — there is nothing left to resume`);
   }
@@ -156,6 +163,33 @@ export function readJournal(runDir: string): ResumeState {
   const state = existsSync(statePath) ? (JSON.parse(readFileSync(statePath, "utf8")) as State) : {};
 
   return { journal, state, runDir: dir };
+}
+
+/**
+ * Closes a parked run for good.
+ *
+ * A pause is deliberately durable — nothing expires it — so "we are done with
+ * this" must be just as deliberate. Cancelling clears the graph position and
+ * the pending question, so the run stops showing as waiting/resumable
+ * everywhere, and readJournal refuses it thereafter. The artifacts stay: state,
+ * costs, and transcript remain readable history.
+ */
+export function cancelRun(runDir: string, reason?: string): Journal {
+  const dir = resolve(runDir);
+  const path = join(dir, "journal.json");
+  if (!existsSync(path)) throw new Error(`no journal.json in ${runDir} — not a run directory`);
+  const journal = JSON.parse(readFileSync(path, "utf8")) as Journal;
+
+  if (journal.cancelled) return journal; // idempotent
+  if (!journal.resumeAt) throw new Error(`that run already completed — nothing to cancel`);
+
+  delete journal.resumeAt;
+  delete journal.pending;
+  journal.cancelled = { at: new Date().toISOString(), ...(reason ? { reason } : {}) };
+  journal.stoppedBecause = reason ? `cancelled: ${reason}` : "cancelled";
+  journal.updatedAt = new Date().toISOString();
+  writeFileSync(path, JSON.stringify(journal, null, 2), "utf8");
+  return journal;
 }
 
 export type RunResult =

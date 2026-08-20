@@ -290,7 +290,7 @@ working instead of blocking on a shell.
 | `run_scene(file, goal, budget?)` | async start → runId |
 | `run_status(runId)` | running/**waiting**/stopped/completed · position · spend · recent activity |
 | `peek_state(runId, keys?)` | read the blackboard mid-run (clipped values) |
-| `stop_run(runId)` | abort safely — position journalled, resumable |
+| `stop_run(runId)` | live run: abort resumably · parked run: CANCEL for good |
 | `resume_run(runId, budget?, answers?)` | continue from the checkpoint; `answers` answers an ask node |
 | `list_runs()` | what exists, what's resumable |
 
@@ -332,6 +332,7 @@ The CLI does the same jobs when there is a shell and no MCP host:
 ensemble validate review.mts                        # FREE — always run before spending
 ensemble run review.mts "<the goal>" --budget 0.50  # hard cost cap — set one when iterating
 ensemble resume .ensemble/runs/<id> --budget 1.00   # continue a stopped run, don't restart
+ensemble cancel .ensemble/runs/<id> "reason"        # close a parked run for good (artifacts kept)
 ensemble serve                         # browser: live canvas, streaming tokens, spend
                                        # ticker + Costs tab, state tab, source editor
 ```

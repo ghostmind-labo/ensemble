@@ -22,7 +22,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { loadRegistry } from "./registry.ts";
 import { loadScene, SceneError } from "./scene.ts";
-import { runScene, readJournal, hashScene, type Journal, type RunResult } from "./engine.ts";
+import { runScene, readJournal, hashScene, cancelRun, type Journal, type RunResult } from "./engine.ts";
 import { packageVersion } from "./version.ts";
 import { loadKeyFiles, hasApiKey, missingKeyMessage } from "./credentials.ts";
 import type { RunEvent } from "./events.ts";
@@ -137,11 +137,13 @@ export function buildEnsembleServer(root = process.cwd()): McpServer {
     const running = handle !== undefined && handle.result === undefined;
     const status = running
       ? "running"
-      : journal?.pending
-        ? "waiting" // parked on an ask node — needs an answer, not a retry
-        : handle?.result?.ok === true || (journal && journal.resumeAt === undefined)
-          ? "completed"
-          : "stopped"; // early stop — resumable
+      : journal?.cancelled
+        ? "cancelled" // closed deliberately — will never resume
+        : journal?.pending
+          ? "waiting" // parked on an ask node — needs an answer, not a retry
+          : handle?.result?.ok === true || (journal && journal.resumeAt === undefined)
+            ? "completed"
+            : "stopped"; // early stop — resumable
 
     return {
       runId,
@@ -296,12 +298,20 @@ export function buildEnsembleServer(root = process.cwd()): McpServer {
     "stop_run",
     {
       description:
-        "Stop a running run. Safe: the position is journalled, so the run can be continued later with resume_run — nothing already paid for is lost.",
+        "Stop a run. A LIVE run is aborted resumably (position journalled). A PARKED run (status waiting/stopped) is CANCELLED for good — it stops showing as resumable; artifacts are kept.",
       inputSchema: { runId: z.string() },
     },
     async ({ runId }) => {
       const handle = live.get(runId);
-      if (!handle) return failure(`run ${runId} is not live in this server`);
+      if (!handle) {
+        // Not live here — but a PARKED run can still be closed for good.
+        try {
+          const journal = cancelRun(join(runsDir, runId));
+          return json({ runId, cancelled: true, at: journal.cancelled?.at, note: "parked run closed — it will no longer show as waiting; artifacts kept" });
+        } catch (err) {
+          return failure(err instanceof Error ? err.message : String(err));
+        }
+      }
       if (handle.result) return json({ runId, alreadyFinished: true, ok: handle.result.ok });
       handle.abort.abort();
       // The engine aborts mid-stream / between turns; give it a moment to journal.
