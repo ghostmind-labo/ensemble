@@ -29,6 +29,7 @@ import { callModel } from "./model.ts";
 import { callAgent } from "./agent.ts";
 import { BUILTIN_TOOLS } from "../tools/builtin.ts";
 import { renderInputs } from "../state.ts";
+import { experimentRuntime, researchTools, type ResearchSpec } from "../research.ts";
 
 /** What a parked node is waiting for — re-exported through the engine. */
 export interface PendingAsk {
@@ -54,9 +55,23 @@ export interface RuntimeCallArgs {
   registry: Registry;
   hub: () => Promise<McpHub>;
   root: string;
+  /** The scene's research block, when it has one — unlocks the scoped write tools. */
+  research?: ResearchSpec;
+  /** This run's artifact directory (where research mode keeps the incumbent snapshot). */
+  runDir?: string;
   costLimit?: number;
   onDelta: (delta: string) => void;
   onToolCall: (event: ToolCallEvent) => void;
+  signal?: AbortSignal;
+}
+
+export interface RuntimeComputeArgs {
+  node: string;
+  spec: NodeSpec;
+  state: State;
+  root: string;
+  runDir: string;
+  research?: ResearchSpec;
   signal?: AbortSignal;
 }
 
@@ -77,7 +92,7 @@ export interface RuntimeObject {
   /** Waiting runtimes: park the run or pass through — no model call. */
   park?: (args: RuntimeParkArgs) => { values: State } | { pending: PendingAsk };
   /** Computing runtimes: a deterministic function over state — no model call. */
-  compute?: (args: { node: string; spec: NodeSpec; state: State }) => State | Promise<State>;
+  compute?: (args: RuntimeComputeArgs) => State | Promise<State>;
   /** Calling runtimes: one attempt; the engine owns retries and extraction. */
   call?: (args: RuntimeCallArgs) => Promise<NodeResult>;
 }
@@ -166,6 +181,9 @@ const agentRuntime: RuntimeObject = {
       mcp: wanted,
       // `tools: { grep: false }` opts a built-in out; default is all of them.
       builtins: BUILTIN_TOOLS.map((tool) => tool.name).filter((n) => a.spec.tools?.[n] !== false),
+      // Research mode is the ONLY source of write tools, and they are scoped to
+      // research.edit. Opt-out per node works the same way as for built-ins.
+      extraTools: a.research ? researchTools(a.research, a.runDir).filter((t) => a.spec.tools?.[t.name] !== false) : [],
       skills,
       hub,
       root: a.root,
@@ -253,6 +271,7 @@ export const RUNTIMES: Record<string, RuntimeObject> = {
   agent: agentRuntime,
   ask: askRuntime,
   fn: fnRuntime,
+  experiment: experimentRuntime,
 };
 
 /** Node properties every runtime shares; everything else belongs to an object. */

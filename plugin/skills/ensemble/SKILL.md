@@ -407,9 +407,42 @@ parallel group, one foreman synthesises with `consensus` / `dissent` / `stronges
 
 **Score gate (improve-until-good)** — worker → judge that emits a NUMBER `score` +
 `feedback`; edge `when: (s) => Number(s["score"]) < TARGET, maxLoops: N` loops the
-feedback back into the worker (`inputs: ["feedback", "score"]`). For auto-research,
-make the judge a `runtime: "agent"` node that runs the experiment and reports a
-measured metric instead of an opinion.
+feedback back into the worker (`inputs: ["feedback", "score"]`).
+
+**Autoresearch (improve ONE file against a code-graded metric)** — when the goal is
+"make X better" and X can be measured by a command, do NOT hand-roll a judge. Declare
+a scene-level `research` block and use `runtime: "experiment"`:
+
+```ts
+research: {
+  edit: "src/prompt.md",            // the ONLY file agents may write (string or array)
+  measure: "node bench.mjs",        // prints the metric; killed at `budget`
+  metric: "score",                  // parsed from output: `score: 12.5` / `score=` / JSON
+  minimize: false,                  // true for a loss
+  budget: "5m",                     // per try; overrun = crash, never a longer try
+  threshold: 0,                     // raise to the metric's run-to-run noise
+  log: "results.tsv",               // audit trail, root-relative
+},
+nodes: {
+  propose:    { runtime: "agent", inputs: ["best", "verdict", "reason", "output"], outputs: ["hypothesis"] },
+  experiment: { runtime: "experiment", note: "hypothesis",
+                outputs: ["iteration", "score", "best", "verdict", "reason", "output"] },
+},
+edges: [
+  { from: "experiment", to: "propose", when: (s) => Number(s.iteration) <= N },
+  { from: "propose", to: "experiment" },
+],
+entry: "experiment", exit: "experiment",   // first pass = baseline, nothing to keep/revert
+```
+
+What it buys you: agent nodes get `write_file`/`edit_file` scoped to `research.edit`
+(they have NO write tools otherwise); the experiment node snapshots the incumbent,
+measures under the budget, keeps only a candidate that beats `best` by more than
+`threshold`, restores the incumbent on revert or crash, and logs every try. Feed
+`verdict`/`reason`/`output` back into the proposer so a revert informs the next idea.
+Tell the proposer to read `results.tsv` and to make ONE change per iteration. Set
+`threshold` above zero whenever the metric is stochastic — otherwise the loop keeps
+sampling luck. `examples/05-autoresearch` is a complete, cheap instance.
 
 **Pipeline with rejection** — research → parallel review (critic + factchecker) →
 write, with `verdict === "reject"` looping back, capped by `maxLoops`.

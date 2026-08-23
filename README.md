@@ -106,6 +106,58 @@ One declaration does three jobs:
 Entirely **additive**: keys with no schema behave exactly as before, so existing scenes
 are unaffected. Schema the keys gates depend on; leave prose keys as plain strings.
 
+## Research mode: the autoresearch loop, built in
+
+Any scene can improve something rather than just answer — but a loop that edits
+and measures is only trustworthy under discipline, and that discipline is exactly
+[Karpathy's autoresearch](https://github.com/karpathy/autoresearch): **one mutable
+artefact, a fixed budget per try, a code-graded metric, keep-or-revert with an
+audit trail.** Declare a `research` block and the engine enforces all four:
+
+```ts
+export default scene({
+  name: "autoresearch",
+  research: {
+    edit: "train.py",                 // the ONE file agents may change
+    measure: "python train.py",       // prints the metric; killed at the budget
+    metric: "val_bpb", minimize: true,
+    budget: "5m",                     // an overrun is a crash, not a longer try
+    threshold: 0.002,                 // must beat the incumbent by MORE than the noise
+  },
+  nodes: {
+    propose:    { runtime: "agent", inputs: ["best", "verdict", "reason", "output"], outputs: ["hypothesis"] },
+    experiment: { runtime: "experiment", note: "hypothesis", outputs: ["iteration", "best", "verdict", "reason", "output"] },
+  },
+  edges: [
+    { from: "experiment", to: "propose", when: (s) => Number(s.iteration) <= 50 },
+    { from: "propose", to: "experiment" },
+  ],
+  entry: "experiment", exit: "experiment",   // first pass measures the baseline
+});
+```
+
+What the block changes:
+
+- **Agent nodes gain `write_file` and `edit_file` — scoped to `research.edit` and
+  nothing else.** This is the only way an agent node ever gets a write tool; the
+  grant exists because the scene named precisely what may change.
+- **`runtime: "experiment"`** snapshots the incumbent, runs `measure` under `budget`
+  (the whole process group is killed at the limit), parses `metric` from the output,
+  keeps the candidate only if it clears `threshold`, restores the incumbent otherwise,
+  and appends `iteration · score · best · verdict · ms · note` to `results.tsv`.
+  Verdicts: `baseline`, `keep`, `revert`, `crash`. A revert is a result: the
+  proposer sees `verdict`, `reason`, and the measure output on its next turn.
+- **The loop guards widen.** `maxLoops` on the edge is the real bound; the default
+  node-run cap and wall clock that catch accidental cycles no longer cut a deliberate
+  loop short.
+- `validate` checks the artefact exists, the budget parses, and an `experiment` node
+  is present — before anything runs.
+
+Everything else is ordinary: the proposer is any agent node with any model, the loop
+is an edge, resume works (the incumbent snapshot lives in the run directory), and you
+can put a judge, a jury, or a human `ask` gate anywhere in the cycle.
+[`examples/05-autoresearch`](./examples/05-autoresearch) is a complete, cheap one.
+
 Three things carry the design:
 
 - **`inputs` / `outputs` are the whole data-flow contract** — and the access-control
@@ -706,7 +758,10 @@ the object it names.
 Since 0.19, nodes have a **deterministic** form too: `runtime: "fn"` makes the node
 a plain function over state — free, instant, schema-checked like model output.
 Nodes are the neurons (`model` stochastic, `fn` deterministic, `ask` external
-input); edges are the synapses, gated by their `when` property.
+input, `experiment` measurement); edges are the synapses, gated by their `when`
+property. Research mode (0.20) is the same rule applied again: `experiment` is a
+runtime object with a `compute` face, and the scoped write tools are tool objects
+assembled per node — the engine learned nothing new.
 
 Since 0.18 the same is true of **tools** (`registerTool({...})` — offered to every
 agent node) and the **run store** (`runScene(..., { store })` — every artifact write

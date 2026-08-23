@@ -40,6 +40,8 @@ export interface AgentCallRequest {
   mcp: string[];
   /** Built-in tool names this node may use. Empty disables built-ins. */
   builtins: string[];
+  /** Extra tool objects assembled for this node (research-mode write tools). */
+  extraTools?: BuiltinTool[];
   /** Skills whose instructions get inlined into the system prompt. */
   skills: Skill[];
   hub: McpHub | undefined;
@@ -210,7 +212,10 @@ export async function callAgent(req: AgentCallRequest): Promise<NodeResult & { t
   const model = apiModel(req.model);
 
   // --- assemble this node's tools. Omission is the access control. ---
-  const builtins: BuiltinTool[] = BUILTIN_TOOLS.filter((t) => req.builtins.includes(t.name));
+  const builtins: BuiltinTool[] = [
+    ...BUILTIN_TOOLS.filter((t) => req.builtins.includes(t.name)),
+    ...(req.extraTools ?? []),
+  ];
   const mcpTools: McpTool[] = req.hub ? req.hub.toolsFor(req.mcp) : [];
 
   const tools: OpenAITool[] = [

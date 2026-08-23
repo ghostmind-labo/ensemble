@@ -25,6 +25,8 @@ export type { SceneSpec, StateSchema, TypedState } from "./dsl.ts";
 export { z } from "zod";
 export { loadScene, validateSpec, SceneError, splitModel, resolveTarget, runtimeOf } from "./scene.ts";
 export type { Scene, NodeSpec, EdgeSpec } from "./scene.ts";
+export type { ResearchSpec } from "./research.ts";
+export { experimentRuntime, researchTools, parseMetric, parseBudget, measure, runExperiment } from "./research.ts";
 
 // --- the registry opencode owns ---------------------------------------------
 export { loadRegistry } from "./registry.ts";

@@ -13,6 +13,7 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 import { z } from "zod";
 import type { Registry } from "./registry.ts";
 import type { SceneSpec, NodeSpec, EdgeSpec, State } from "./dsl.ts";
+import { researchSchema, editTargets, parseBudget } from "./research.ts";
 import { RUNTIMES, COMMON_FIELDS } from "./runtimes/index.ts";
 
 export type { SceneSpec, NodeSpec, EdgeSpec, State };
@@ -82,6 +83,7 @@ const sceneSchema = z
       })
       .strict()
       .optional(),
+    research: researchSchema.optional(),
     nodes: z.record(nodeSchema),
     groups: z.record(z.array(z.string())).optional(),
     edges: z.array(edgeSchema).optional(),
@@ -149,9 +151,29 @@ function checkReferences(scene: Scene, reg: Registry): string[] {
     );
   }
 
+  if (scene.research) {
+    for (const target of editTargets(scene.research)) {
+      if (!existsSync(resolve(target))) {
+        problems.push(`research.edit names "${target}" but it does not exist — the artefact under study must exist before the baseline`);
+      }
+    }
+    try {
+      parseBudget(scene.research.budget);
+    } catch (err) {
+      problems.push(err instanceof Error ? err.message : String(err));
+    }
+    const experiments = Object.entries(scene.nodes).filter(([, n]) => runtimeOf(scene, n) === "experiment");
+    if (experiments.length === 0) {
+      problems.push(`scene declares research but no node is runtime "experiment" — nothing would measure, keep or revert`);
+    }
+  }
+
   for (const [name, node] of Object.entries(scene.nodes)) {
     const runtimeName = runtimeOf(scene, node);
     const rt = RUNTIMES[runtimeName];
+    if (runtimeName === "experiment" && !scene.research) {
+      problems.push(`node "${name}" is runtime "experiment" but the scene has no research block — add research: { edit, measure }`);
+    }
     if (!rt) {
       problems.push(
         `node "${name}" uses unknown runtime "${runtimeName}" — registered: ${Object.keys(RUNTIMES).join(", ")}`,

@@ -295,6 +295,7 @@ interface NodeCallCtx {
   /** Ask nodes that already fell through once this process — see `always`. */
   askConsumed: Set<string>;
   registry: import("./registry.ts").Registry;
+  runDir: string;
   signal?: AbortSignal;
 }
 
@@ -318,6 +319,8 @@ async function callOnce(
     registry: ctx.registry,
     hub: () => ctx.hub.get(),
     root: resolve(process.cwd()),
+    ...(ctx.scene.research ? { research: ctx.scene.research } : {}),
+    runDir: ctx.runDir,
     ...(costLimit !== undefined ? { costLimit } : {}),
     onDelta: (delta) => ctx.emit({ type: "node:delta", node, delta }),
     onToolCall: (event) => ctx.emit({ type: "node:tool", node, ...event }),
@@ -382,7 +385,15 @@ async function runNode(
     };
     try {
       const outputs = spec.outputs ?? [];
-      const values = await parkRt.compute({ node, spec, state: { ...ctx.state } });
+      const values = await parkRt.compute({
+        node,
+        spec,
+        state: { ...ctx.state },
+        root: resolve(process.cwd()),
+        runDir: ctx.runDir,
+        ...(ctx.scene.research ? { research: ctx.scene.research } : {}),
+        ...(ctx.signal ? { signal: ctx.signal } : {}),
+      });
       const missing = outputs.filter((k) => values[k] === undefined);
       if (missing.length > 0) {
         const message = `fn returned no value for declared output(s): ${missing.join(", ")}`;
@@ -489,8 +500,11 @@ async function runNode(
 }
 
 export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}): Promise<RunResult> {
-  const maxNodeRuns = opts.maxNodeRuns ?? 50;
-  const timeoutMs = opts.timeoutMs ?? 20 * 60_000;
+  // A research scene is a loop by design: the guards that catch an accidental
+  // cycle in an ordinary scene would cut a deliberate one short, so the
+  // defaults widen and the edge's `maxLoops` becomes the real bound.
+  const maxNodeRuns = opts.maxNodeRuns ?? (scene.research ? 10_000 : 50);
+  const timeoutMs = opts.timeoutMs ?? (scene.research ? 24 * 60 * 60_000 : 20 * 60_000);
   const sink: EventSink = opts.onEvent ?? (() => {});
   const store: RunStore = opts.store ?? fileRunStore;
 
@@ -631,6 +645,7 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
     budgetLeft: () => (budget === undefined ? undefined : Math.max(0, budget - totalCost)),
     askConsumed: new Set<string>(),
     registry,
+    runDir,
     ...(opts.signal ? { signal: opts.signal } : {}),
   };
 
