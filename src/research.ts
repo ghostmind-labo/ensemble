@@ -33,6 +33,7 @@ import { z } from "zod";
 import type { State } from "./dsl.ts";
 import type { BuiltinTool } from "./tools/builtin.ts";
 import type { RuntimeObject } from "./runtimes/index.ts";
+import { registerCapability, type CapabilityObject } from "./capabilities.ts";
 
 export interface ResearchSpec {
   /** The one thing an agent may change — a path, or a few, relative to the project root. */
@@ -347,19 +348,26 @@ export const experimentRuntime: RuntimeObject = {
     /** State key whose value is written to the results log as the note (e.g. the proposer's "hypothesis"). */
     note: z.string(),
   },
-  check: (name, spec) =>
-    (spec.outputs ?? []).length === 0
-      ? [`node "${name}" is runtime "experiment" but declares no outputs — declare at least ["verdict"]`]
-      : [],
+  check: (name, spec, scene) => {
+    const problems: string[] = [];
+    if ((spec.outputs ?? []).length === 0) {
+      problems.push(`node "${name}" is runtime "experiment" but declares no outputs — declare at least ["verdict"]`);
+    }
+    if (!scene.research) {
+      problems.push(`node "${name}" is runtime "experiment" but the scene has no research block — add research: { edit, measure }`);
+    }
+    return problems;
+  },
   compute: (args) => {
-    if (!args.research) {
+    const research = args.capabilities["research"] as ResearchSpec | undefined;
+    if (!research) {
       throw new Error(`node "${args.node}" is runtime "experiment" but the scene declares no research block`);
     }
     return runExperiment({
       node: args.node,
       spec: args.spec as { note?: string },
       state: args.state,
-      research: args.research,
+      research,
       root: args.root,
       runDir: args.runDir,
       ...(args.signal ? { signal: args.signal } : {}),
@@ -369,3 +377,42 @@ export const experimentRuntime: RuntimeObject = {
 
 /** Every key an experiment node can emit — for docs and the validator's hint. */
 export const EXPERIMENT_OUTPUTS = ["iteration", "score", "best", "verdict", "kept", "reason", "output", "summary"];
+
+/* ───────────────────────── the capability object ───────────────────────── */
+
+/**
+ * The research block AS a mounted capability — the scene-level rules live
+ * here, on the object, not in the validator. What it contributes:
+ * schema for the block, its semantic checks, the scoped write tools every
+ * agent node receives while it is active, and widened loop guards (a research
+ * scene loops by design, so the accidental-cycle defaults would cut it short).
+ */
+export const researchCapability: CapabilityObject<ResearchSpec> = {
+  name: "research",
+  summary: "the autoresearch loop: one mutable artefact, fixed budget, code-graded metric, keep-or-revert",
+  schema: researchSchema,
+  check: (value, scene) => {
+    const problems: string[] = [];
+    for (const target of editTargets(value)) {
+      if (!existsSync(resolve(target))) {
+        problems.push(`research.edit names "${target}" but it does not exist — the artefact under study must exist before the baseline`);
+      }
+    }
+    try {
+      parseBudget(value.budget);
+    } catch (err) {
+      problems.push(err instanceof Error ? err.message : String(err));
+    }
+    const hasExperiment = Object.values(scene.nodes).some(
+      (n) => (n.runtime ?? scene.defaults.runtime ?? "model") === "experiment",
+    );
+    if (!hasExperiment) {
+      problems.push(`scene declares research but no node is runtime "experiment" — nothing would measure, keep or revert`);
+    }
+    return problems;
+  },
+  tools: (value, { runDir }) => researchTools(value, runDir),
+  tune: () => ({ maxNodeRuns: 10_000, timeoutMs: 24 * 60 * 60_000 }),
+};
+
+registerCapability(researchCapability);

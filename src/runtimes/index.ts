@@ -29,7 +29,9 @@ import { callModel } from "./model.ts";
 import { callAgent } from "./agent.ts";
 import { BUILTIN_TOOLS } from "../tools/builtin.ts";
 import { renderInputs } from "../state.ts";
-import { experimentRuntime, researchTools, type ResearchSpec } from "../research.ts";
+import { experimentRuntime } from "../research.ts";
+import type { Scene } from "../scene.ts";
+import type { BuiltinTool } from "../tools/builtin.ts";
 
 /** What a parked node is waiting for — re-exported through the engine. */
 export interface PendingAsk {
@@ -55,10 +57,8 @@ export interface RuntimeCallArgs {
   registry: Registry;
   hub: () => Promise<McpHub>;
   root: string;
-  /** The scene's research block, when it has one — unlocks the scoped write tools. */
-  research?: ResearchSpec;
-  /** This run's artifact directory (where research mode keeps the incumbent snapshot). */
-  runDir?: string;
+  /** Tools contributed by the scene's active capabilities (e.g. research's scoped writes). */
+  extraTools?: BuiltinTool[];
   costLimit?: number;
   onDelta: (delta: string) => void;
   onToolCall: (event: ToolCallEvent) => void;
@@ -71,7 +71,8 @@ export interface RuntimeComputeArgs {
   state: State;
   root: string;
   runDir: string;
-  research?: ResearchSpec;
+  /** Active capability blocks by name — how a runtime reads the block it serves. */
+  capabilities: Record<string, unknown>;
   signal?: AbortSignal;
 }
 
@@ -86,7 +87,7 @@ export interface RuntimeObject {
   /** Whether validation must ensure a model is resolvable for this node. */
   needsModel: boolean;
   /** Runtime-specific validation problems (messages, not exceptions). */
-  check?: (name: string, spec: NodeSpec, defaults: { model?: string }, registry: Registry) => string[];
+  check?: (name: string, spec: NodeSpec, scene: Scene, registry: Registry) => string[];
   /** MCP servers a node of this runtime wants prewarmed (engine connects lazily). */
   mcpServers?: (spec: NodeSpec) => string[];
   /** Waiting runtimes: park the run or pass through — no model call. */
@@ -109,8 +110,8 @@ const modelRuntime: RuntimeObject = {
     prompt: z.string(),
     temperature: z.number().min(0).max(2),
   },
-  check: (name, spec, defaults) => {
-    const model = spec.model ?? defaults.model;
+  check: (name, spec, scene) => {
+    const model = spec.model ?? scene.defaults.model;
     return model && !model.startsWith("openrouter/")
       ? [
           `node "${name}" is runtime "model" but its model "${model}" is not "openrouter/…" — ` +
@@ -181,9 +182,9 @@ const agentRuntime: RuntimeObject = {
       mcp: wanted,
       // `tools: { grep: false }` opts a built-in out; default is all of them.
       builtins: BUILTIN_TOOLS.map((tool) => tool.name).filter((n) => a.spec.tools?.[n] !== false),
-      // Research mode is the ONLY source of write tools, and they are scoped to
-      // research.edit. Opt-out per node works the same way as for built-ins.
-      extraTools: a.research ? researchTools(a.research, a.runDir).filter((t) => a.spec.tools?.[t.name] !== false) : [],
+      // Capability-contributed tools (research's scoped writes are the first).
+      // Per-node opt-out works the same way as for built-ins.
+      extraTools: (a.extraTools ?? []).filter((t) => a.spec.tools?.[t.name] !== false),
       skills,
       hub,
       root: a.root,

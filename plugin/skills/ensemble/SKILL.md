@@ -562,6 +562,12 @@ has a specific, repeated complaint about agent-node behaviour — the default is
 
 ## 6 · Library use (embedding in code)
 
+Everything is a mountable object: `registerRuntime` (new node kind),
+`registerTool` (new agent tool), `registerCapability` (new scene-level block —
+`research:` is the first; a capability owns its schema, checks, contributed
+tools, and guard tuning), `store` (artifact destination), `onEvent` (sink).
+
+
 ```ts
 import { loadScene, loadRegistry, runScene, readJournal } from "@ghostmind-dev/ensemble";
 

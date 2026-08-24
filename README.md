@@ -759,9 +759,32 @@ Since 0.19, nodes have a **deterministic** form too: `runtime: "fn"` makes the n
 a plain function over state — free, instant, schema-checked like model output.
 Nodes are the neurons (`model` stochastic, `fn` deterministic, `ask` external
 input, `experiment` measurement); edges are the synapses, gated by their `when`
-property. Research mode (0.20) is the same rule applied again: `experiment` is a
-runtime object with a `compute` face, and the scoped write tools are tool objects
-assembled per node — the engine learned nothing new.
+property.
+
+Since 0.20 the rule reaches the **scene level** too: a top-level block like
+`research:` is a mounted **capability object**. A capability declares its block's
+schema, its semantic checks, the tools it hands to agent nodes while active, and
+any engine guard defaults it retunes — and `research` is simply the first one in
+the registry, not a special case. The validator composes the scene's legal top
+level from what is mounted, so an unregistered block is still a typo:
+
+```ts
+import { registerCapability, z } from "@ghostmind-dev/ensemble";
+
+registerCapability({
+  name: "notify", summary: "posts run milestones to a webhook",
+  schema: z.object({ url: z.string().url() }).strict(),
+  tools: (value) => [/* tool objects every agent node receives while active */],
+  tune: () => ({ timeoutMs: 60 * 60_000 }),
+});
+// scenes may now declare  notify: { url: "…" }  — validated, tools delivered,
+// with zero engine or validator edits.
+```
+
+So the registries are: **runtimes** (what a node can be), **tools** (what an agent
+can do), **capabilities** (what a scene can declare), **stores** (where artifacts
+go), **sinks** (who watches). The engine is a walk over a blackboard; everything
+else arrives as a block.
 
 Since 0.18 the same is true of **tools** (`registerTool({...})` — offered to every
 agent node) and the **run store** (`runScene(..., { store })` — every artifact write
