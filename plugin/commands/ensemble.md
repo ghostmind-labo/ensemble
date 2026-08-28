@@ -10,6 +10,12 @@ arguments (if any): $ARGUMENTS
 
 Follow the skill's workflow:
 
+0a. **First decide: is this autoresearch?** If the user wants ONE measurable thing made
+   better and a command can score it, use the sealed mode — `research({ modify,
+   evaluate, instruction })` and `ensemble research <file>` — never a hand-authored
+   loop. It accepts exactly those three keys and refuses all others by design, and the
+   command takes no goal argument (the directive lives in `instruction`).
+
 0. If the `ensemble` MCP tools are available (run_scene, run_status, …), prefer them
    over the CLI — runs start async and can be peeked, stopped, and resumed as tools.
 1. Check setup (`ensemble` binary or local install, `OPENROUTER_API_KEY`).

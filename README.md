@@ -106,57 +106,104 @@ One declaration does three jobs:
 Entirely **additive**: keys with no schema behave exactly as before, so existing scenes
 are unaffected. Schema the keys gates depend on; leave prose keys as plain strings.
 
-## Research mode: the autoresearch loop, built in
+## Research mode: three things, and nothing else
 
-Any scene can improve something rather than just answer — but a loop that edits
-and measures is only trustworthy under discipline, and that discipline is exactly
-[Karpathy's autoresearch](https://github.com/karpathy/autoresearch): **one mutable
-artefact, a fixed budget per try, a code-graded metric, keep-or-revert with an
-audit trail.** Declare a `research` block and the engine enforces all four:
+Sometimes you do not want a workflow that *answers* — you want one that **improves
+something, measurably, over and over**. That loop is
+[Karpathy's autoresearch](https://github.com/karpathy/autoresearch), and it works
+because of what the researcher is *not* allowed to touch: one file changes, one
+command scores it, and the directive is written once and read identically every
+iteration. Anything else you could turn into a knob is a confound.
+
+So research mode is **sealed**. `research()` takes exactly three things and refuses
+every other key by name:
+
+```ts
+import { research } from "@ghostmind-dev/ensemble";
+
+export default research({
+  modify:      "train.py",                       // 1 · the ONE thing that may change
+  evaluate:    { command: "python train.py",     // 2 · how it is scored — code, not a judge
+                 metric: "val_bpb", minimize: true, budget: "5m" },
+  instruction: "Lower validation bits-per-byte. Do not touch the data or the eval.",
+});                                              // 3 · the directive, constant forever
+```
+
+```bash
+ensemble validate program.mts                    # free
+ensemble research program.mts --iterations 50    # no goal argument — see below
+```
+
+No nodes, no edges, no entry, no model, no prompts. Pass one and you get a refusal
+that says why (`"edges" — the loop is generated: propose → evaluate → keep or revert
+is the whole topology`). The loop is identical for every program in the world, which
+is the point: two people's results are comparable because their scaffolding is not a
+variable. Which model proposes, how many iterations, and the noise threshold are
+**flags** (`--model`, `--iterations`, `--threshold`) — the file is the experiment, the
+flags are the session.
+
+```
+            ┌───────────────────────────────────────────────┐
+            ▼                                               │
+      ┌──────────┐   hypothesis   ┌────────────┐            │
+      │ propose  │ ─────────────► │  evaluate  │ ── keep or revert ──┘
+      │ edits    │                │ 🔬 scores  │
+      │ ONE file │ ◄───────────── │ under the  │
+      └──────────┘  best, verdict │  budget    │
+                    reason, output└─────┬──────┘
+                                        ▼
+                                  results.tsv
+```
+
+`ensemble research` deliberately takes **no goal argument**: the directive lives in
+`instruction`, so there is nowhere for it to drift between iterations. Entry is the
+evaluator, not the proposer — the first pass measures whatever is on disk, and that
+baseline is what every later candidate is compared against.
+
+What the mode enforces:
+
+- **The proposer gains `write_file` and `edit_file` — scoped to `modify` and nothing
+  else.** This is the only way an agent node ever gets a write tool. It physically
+  cannot edit the evaluator, so it cannot optimise the scorer instead of the artefact.
+- **The evaluator runs under a hard time budget** — the whole process group is killed
+  at the limit, so an overrun is a *crash*, never a longer experiment. Results stay
+  comparable.
+- **The metric is parsed from the command's output.** No model judges anything: a
+  judge adds its own variance, and an optimiser cannot tell "it improved" from "the
+  judge felt different today".
+- **Keep or revert, written down.** The incumbent is snapshotted, a candidate is kept
+  only if it clears `--threshold`, and the incumbent is restored otherwise. Every try
+  appends `iteration · score · best · verdict · ms · note` to `results.tsv`. Verdicts:
+  `baseline`, `keep`, `revert`, `crash`. **A revert is a result** — the proposer sees
+  `verdict`, `reason`, and the evaluator's output on its next turn, so a rejected idea
+  informs the next one.
+- `validate` checks the artefact exists and the budget parses — before anything runs.
+  Resume works too: the incumbent snapshot lives in the run directory.
+
+[`examples/05-autoresearch`](./examples/05-autoresearch) is a complete, cheap one.
+
+**If three things are genuinely not enough** — a jury of proposers, a human `ask` gate
+before each experiment, two metrics — drop to an ordinary `scene()` with a
+scene-level `research:` block and `runtime: "experiment"`. That is the same machinery
+with the guardrails off, and it is the escape hatch, not the default:
 
 ```ts
 export default scene({
-  name: "autoresearch",
-  research: {
-    edit: "train.py",                 // the ONE file agents may change
-    measure: "python train.py",       // prints the metric; killed at the budget
-    metric: "val_bpb", minimize: true,
-    budget: "5m",                     // an overrun is a crash, not a longer try
-    threshold: 0.002,                 // must beat the incumbent by MORE than the noise
-  },
+  name: "reviewed-research",
+  research: { edit: "train.py", measure: "python train.py", metric: "val_bpb", minimize: true, budget: "5m" },
   nodes: {
-    propose:    { runtime: "agent", inputs: ["best", "verdict", "reason", "output"], outputs: ["hypothesis"] },
+    propose:    { runtime: "agent", inputs: ["best", "verdict", "reason"], outputs: ["hypothesis"] },
+    approve:    { runtime: "ask", question: "Run this experiment?", inputs: ["hypothesis"], outputs: ["ok"], always: true },
     experiment: { runtime: "experiment", note: "hypothesis", outputs: ["iteration", "best", "verdict", "reason", "output"] },
   },
   edges: [
-    { from: "experiment", to: "propose", when: (s) => Number(s.iteration) <= 50 },
-    { from: "propose", to: "experiment" },
+    { from: "experiment", to: "propose", maxLoops: 50 },
+    { from: "propose", to: "approve" },
+    { from: "approve", to: "experiment", when: (s) => s["ok"] === "yes" },
   ],
-  entry: "experiment", exit: "experiment",   // first pass measures the baseline
+  entry: "experiment", exit: "experiment",
 });
 ```
-
-What the block changes:
-
-- **Agent nodes gain `write_file` and `edit_file` — scoped to `research.edit` and
-  nothing else.** This is the only way an agent node ever gets a write tool; the
-  grant exists because the scene named precisely what may change.
-- **`runtime: "experiment"`** snapshots the incumbent, runs `measure` under `budget`
-  (the whole process group is killed at the limit), parses `metric` from the output,
-  keeps the candidate only if it clears `threshold`, restores the incumbent otherwise,
-  and appends `iteration · score · best · verdict · ms · note` to `results.tsv`.
-  Verdicts: `baseline`, `keep`, `revert`, `crash`. A revert is a result: the
-  proposer sees `verdict`, `reason`, and the measure output on its next turn.
-- **The loop guards widen.** `maxLoops` on the edge is the real bound; the default
-  node-run cap and wall clock that catch accidental cycles no longer cut a deliberate
-  loop short.
-- `validate` checks the artefact exists, the budget parses, and an `experiment` node
-  is present — before anything runs.
-
-Everything else is ordinary: the proposer is any agent node with any model, the loop
-is an edge, resume works (the incumbent snapshot lives in the run directory), and you
-can put a judge, a jury, or a human `ask` gate anywhere in the cycle.
-[`examples/05-autoresearch`](./examples/05-autoresearch) is a complete, cheap one.
 
 Three things carry the design:
 

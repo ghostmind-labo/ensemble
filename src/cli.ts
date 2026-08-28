@@ -2,6 +2,7 @@ import { parseArgs } from "node:util";
 import { existsSync } from "node:fs";
 import { loadRegistry } from "./registry.ts";
 import { loadScene, SceneError, runtimeOf } from "./scene.ts";
+import { isProgram, ITERATION_EDGE } from "./autoresearch.ts";
 import { loadKeyFiles, hasApiKey, missingKeyMessage } from "./credentials.ts";
 import { runScene, readJournal, hashScene, cancelRun } from "./engine.ts";
 import { createTerminalReporter } from "./reporter.ts";
@@ -15,6 +16,9 @@ ${c.bold("ensemble")} ${c.dim(`v${packageVersion()}`)} — multi-model agent ens
 ${c.bold("Usage")}
   ensemble init                        Scaffold .ensemble/ so an editor resolves scenes
   ensemble run <scene.ts> "<goal>"   Execute a scene against a goal
+  ensemble research <program.ts>     Run an autoresearch program: propose →
+                                       evaluate → keep or revert, until the
+                                       iteration budget runs out
   ensemble resume <run-dir>            Continue a stopped run from its checkpoint
   ensemble cancel <run-dir> [reason]   Close a parked run for good (artifacts kept)
   ensemble serve [scenes-dir]          Live viewer + run console in the browser
@@ -35,6 +39,11 @@ ${c.bold("Options")}
   --max-runs <n>    Global node-execution cap (default 50)
   --timeout <min>   Wall-clock limit in minutes (default 20)
   --budget <usd>    Hard cost cap for the run, e.g. --budget 0.50
+  --iterations <n>  research: experiments to run after the baseline (default 10)
+  --model <ref>     research: the proposing model (default claude-sonnet-5)
+  --threshold <n>   research: metric gain required to keep a change (default 0) —
+                    raise it to your metric's run-to-run noise, or the loop will
+                    "discover" sampling luck
                     (ENSEMBLE_BUDGET sets a machine-wide default)
   --verbose         Print full node transcripts instead of clipped ones
   --mermaid         view: print Mermaid source instead of the terminal sketch
@@ -399,9 +408,114 @@ async function cmdRun(
     throw err;
   }
 
+  // A research program has its own verb, because it takes no goal: sending it
+  // through `run` would attach a command-line goal to a loop whose whole point
+  // is a directive that never changes.
+  if (isProgram(scene)) {
+    error(
+      `${path} is a research program, not a scene — run it with:\n\n` +
+        `  ensemble research ${path}\n\n` +
+        `  It takes no goal: the directive is \`instruction\` in the program file,\n` +
+        `  read identically on every iteration.`,
+    );
+    return 2;
+  }
+
   const started = Date.now();
   const result = await runScene(scene, goal, {
     maxNodeRuns: opts.maxRuns,
+    timeoutMs: opts.timeout ? opts.timeout * 60_000 : undefined,
+    ...(opts.budget !== undefined ? { budget: opts.budget } : {}),
+    onEvent: createTerminalReporter({ verbose: opts.verbose }),
+  });
+
+  return report(scene, result, started);
+}
+
+
+/**
+ * `ensemble research <program.ts>` — the sealed loop.
+ *
+ * Deliberately takes NO goal argument. The directive is `instruction` in the
+ * program file and is read identically on every iteration; accepting a goal
+ * here would reintroduce exactly the variable the mode exists to remove, so a
+ * stray one is refused rather than silently ignored.
+ */
+async function cmdResearch(
+  path: string | undefined,
+  opts: {
+    iterations?: number;
+    model?: string;
+    threshold?: number;
+    timeout?: number;
+    budget?: number;
+    verbose: boolean;
+  },
+): Promise<number> {
+  if (!path) {
+    error("research needs a program file: ensemble research <program.mts>");
+    return 2;
+  }
+
+  const reg = loadRegistry();
+  let scene;
+  try {
+    scene = await loadScene(path, reg);
+  } catch (err) {
+    if (err instanceof SceneError) {
+      error(`${path} is not a valid research program:\n`);
+      for (const problem of err.problems) console.error(`  • ${problem}`);
+      console.error("");
+      return 1;
+    }
+    throw err;
+  }
+
+  if (!isProgram(scene)) {
+    error(
+      `${path} is a scene, not a research program.\n\n` +
+        `  Run it with:  ensemble run ${path} "<goal>"\n\n` +
+        `  A research program default-exports research({ modify, evaluate, instruction })\n` +
+        `  — three things and nothing else. See: ensemble research --help`,
+    );
+    return 2;
+  }
+
+  // Run-time settings are applied to the generated scene here, which is what
+  // keeps them OUT of the program file: the file is the experiment, these are
+  // the session.
+  if (opts.model) scene.defaults.model = opts.model;
+  if (opts.iterations !== undefined) {
+    if (!Number.isInteger(opts.iterations) || opts.iterations < 1) {
+      error("--iterations must be a positive whole number");
+      return 2;
+    }
+    scene.edges[ITERATION_EDGE]!.maxLoops = opts.iterations;
+  }
+  if (opts.threshold !== undefined) scene.research!.threshold = opts.threshold;
+
+  loadKeyFiles();
+  if (!hasApiKey()) {
+    error(missingKeyMessage());
+    return 1;
+  }
+
+  const iterations = scene.edges[ITERATION_EDGE]!.maxLoops ?? 10;
+  const targets = Array.isArray(scene.research!.edit) ? scene.research!.edit : [scene.research!.edit];
+  info(
+    `${c.bold("research")} ${c.dim(path)}\n` +
+      `  ${c.dim("modify  ")} ${targets.join(", ")}\n` +
+      `  ${c.dim("evaluate")} ${scene.research!.measure} ${c.dim(`(${scene.research!.budget ?? "5m"} budget, ` +
+        `${scene.research!.minimize ? "lower" : "higher"} is better)`)}\n` +
+      `  ${c.dim("proposer")} ${scene.defaults.model}\n` +
+      `  ${c.dim("plan    ")} baseline + up to ${iterations} experiment(s), keep or revert each\n` +
+      `  ${c.dim("log     ")} ${scene.research!.log ?? "results.tsv"}\n`,
+  );
+
+  const started = Date.now();
+  // The instruction IS the goal — passed here so nodes render it the same way
+  // an ordinary scene renders its goal, and never taken from the command line.
+  const result = await runScene(scene, scene.description ?? "run the experiment loop", {
     timeoutMs: opts.timeout ? opts.timeout * 60_000 : undefined,
     ...(opts.budget !== undefined ? { budget: opts.budget } : {}),
     onEvent: createTerminalReporter({ verbose: opts.verbose }),
@@ -589,6 +703,9 @@ async function main(): Promise<number> {
       "max-runs": { type: "string" },
       timeout: { type: "string" },
       budget: { type: "string" },
+      iterations: { type: "string" },
+      model: { type: "string" },
+      threshold: { type: "string" },
       // Repeatable: --answer key=value --answer other=value
       answer: { type: "string", multiple: true },
       mermaid: { type: "boolean", default: false },
@@ -640,6 +757,15 @@ async function main(): Promise<number> {
       return cmdView(rest[0], {
         mermaid: values.mermaid ?? false,
         html: values.html,
+      });
+    case "research":
+      return cmdResearch(rest[0], {
+        iterations: num(values.iterations),
+        model: values.model,
+        threshold: num(values.threshold),
+        timeout: num(values.timeout),
+        budget: num(values.budget),
+        verbose: values.verbose ?? false,
       });
     case "run":
       return cmdRun(rest[0], rest[1], {

@@ -1,58 +1,32 @@
-import { scene, z } from "@ghostmind-dev/ensemble";
+import { research } from "@ghostmind-dev/ensemble";
 
 /**
- * 05 — Autoresearch: propose → measure → keep or revert → repeat.
+ * 05 — Autoresearch: three things, and nothing else.
  *
- * One file may change (heuristic.mjs). One command measures it (measure.mjs).
- * One scalar decides (score, code-graded). The experiment node keeps a winner
- * and reverts everything else, and results.tsv is the audit trail.
+ * There is no graph here, and that is the feature. A loop that measures its own
+ * changes only means something if the artefact is the only thing that varies —
+ * so the mode accepts the artefact, the scorer, and the directive, generates
+ * the loop itself, and refuses every other key.
  */
-export default scene({
-  name: "autoresearch",
-  description: "Improve heuristic.mjs against a fixed metric, one experiment at a time",
-  defaults: { model: "openrouter/anthropic/claude-sonnet-5" },
+export default research({
+  // 1 · what may change — the ONE artefact under study
+  modify: "examples/05-autoresearch/heuristic.mjs",
 
-  research: {
-    edit: "examples/05-autoresearch/heuristic.mjs",
-    measure: "node examples/05-autoresearch/measure.mjs",
+  // 2 · how it is scored — code, never a model judge
+  evaluate: {
+    command: "node examples/05-autoresearch/measure.mjs",
     metric: "score",
     budget: "30s",
-    threshold: 0,            // the metric is deterministic — any gain is real
-    log: "examples/05-autoresearch/results.tsv",
   },
 
-  state: {
-    iteration: z.number().int(),
-    verdict: z.enum(["baseline", "keep", "revert", "crash"]),
-    hypothesis: z.string(),
-  },
+  // 3 · the directive — written once, read identically every iteration
+  instruction: `
+Raise the spam-classification accuracy of heuristic.mjs.
 
-  nodes: {
-    propose: {
-      runtime: "agent",
-      prompt: [
-        "You are running an experiment loop on examples/05-autoresearch/heuristic.mjs.",
-        "Read the artefact and examples/05-autoresearch/measure.mjs (the metric — you cannot edit it,",
-        "and must not special-case its data). Read examples/05-autoresearch/results.tsv to see what",
-        "was tried. Make ONE focused change to heuristic.mjs with edit_file or write_file,",
-        "keep it a pure function, then stop. Output the hypothesis behind the change.",
-      ].join(" "),
-      inputs: ["best", "verdict", "reason", "output"],
-      outputs: ["hypothesis"],
-      maxTurns: 8,
-    },
-    experiment: {
-      runtime: "experiment",
-      note: "hypothesis",      // logged beside the score in results.tsv
-      outputs: ["iteration", "score", "best", "verdict", "reason", "output"],
-    },
-  },
-
-  edges: [
-    { from: "experiment", to: "propose", when: (s) => s.iteration <= 6 && s.best < 100 },
-    { from: "propose", to: "experiment" },
-  ],
-
-  entry: "experiment",       // the first pass measures the baseline
-  exit: "experiment",
+isSpam(message) must stay a pure function: no I/O, no network, no randomness,
+no reading the test data. Generalisable signals only — the kinds of things that
+would still work on messages you have not seen (urgency, money, credentials,
+link shorteners, prize language). Hard-coding the sample sentences is a
+fabricated result, not a finding.
+  `.trim(),
 });

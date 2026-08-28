@@ -18,6 +18,8 @@
 
 // --- scenes -----------------------------------------------------------------
 export { scene } from "./dsl.ts";
+export { research, ProgramError, isProgram, defaultProposer, ITERATION_EDGE } from "./autoresearch.ts";
+export type { ResearchProgram } from "./autoresearch.ts";
 export type { SceneSpec, StateSchema, TypedState } from "./dsl.ts";
 // Re-exported so a scene can declare state shapes without its own node_modules:
 // the resolver hook only maps this package, so `import { z } from "zod"` would

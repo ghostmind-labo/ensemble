@@ -15,6 +15,15 @@ The loop you own: **author a scene → `validate` (free) → `run` cheap → rea
 artifacts → revise the scene when the results say so.** Do not accept a weak result
 when a one-line change to a prompt, model, or threshold would fix it.
 
+## 0 · Is this autoresearch, a scene, or neither?
+
+**Ask first: is the user trying to make one measurable thing better?** If there is
+(or can be) a command that scores it, this is **autoresearch** — use `research()` and
+`ensemble research` (§3), not a scene. Do not hand-author a propose/evaluate loop; the
+sealed mode exists so that the scaffolding is never a variable between experiments.
+
+If it is not that, ask whether it is a scene at all:
+
 ## 0 · Should this be a scene at all?
 
 Every scene costs real money on every run, so build one only when the shape of the
@@ -409,9 +418,59 @@ parallel group, one foreman synthesises with `consensus` / `dissent` / `stronges
 `feedback`; edge `when: (s) => Number(s["score"]) < TARGET, maxLoops: N` loops the
 feedback back into the worker (`inputs: ["feedback", "score"]`).
 
-**Autoresearch (improve ONE file against a code-graded metric)** — when the goal is
-"make X better" and X can be measured by a command, do NOT hand-roll a judge. Declare
-a scene-level `research` block and use `runtime: "experiment"`:
+**Autoresearch (improve ONE file against a code-graded metric) — USE THE SEALED MODE.**
+When the goal is "make X better" and X can be measured by a command, do NOT author a
+scene. Write a **program**: `research()` takes exactly three things and refuses
+everything else, and generates the loop for you.
+
+```ts
+import { research } from "@ghostmind-dev/ensemble";
+
+export default research({
+  modify:   "src/prompt.md",             // 1 · the ONE artefact that may change
+  evaluate: { command: "node bench.mjs", // 2 · how it is scored — code, never a judge
+              metric: "score",           //     default: last number in the output
+              minimize: false,           //     true for a loss
+              budget: "5m" },            //     per try; overrun = crash, not a longer try
+  instruction: `                         // 3 · the directive, constant forever
+Raise the score. Keep it a pure function. Generalisable changes only —
+hard-coding the benchmark's inputs is a fabricated result, not a finding.
+  `.trim(),
+});
+```
+
+```bash
+ensemble validate program.mts                        # free
+ensemble research program.mts --iterations 10        # NO goal argument
+```
+
+**Rules of the mode — do not try to route around these:**
+
+- **Three keys. Nothing else.** `nodes`, `edges`, `entry`, `exit`, `state`, `model`,
+  `prompt`, `iterations`, `threshold`, `name`, `goal` are all rejected by name with a
+  reason. They are not missing features; each one would be a confound that makes two
+  iterations incomparable.
+- **`ensemble research` takes no goal.** The directive lives in `instruction` and is
+  inlined verbatim every iteration. If the user gives you a goal sentence, it belongs
+  IN `instruction`, in the file.
+- **Session settings are flags, not keys:** `--iterations` (default 10), `--model`
+  (default sonnet), `--threshold` (default 0). Raise `--threshold` to the metric's
+  run-to-run spread whenever the metric is stochastic, or the loop will keep sampling
+  luck. Say this to the user when their metric involves a model or a timing.
+- **Write the `instruction` carefully — it is the whole prompt-engineering surface.**
+  State the objective, the invariants (purity, no I/O, don't touch the data), and
+  explicitly forbid special-casing the scorer. The proposer physically cannot edit the
+  evaluator, but it can still cheat *within* the artefact if you don't say not to.
+- **The evaluator must print a number** and be cheap enough to run every iteration.
+  If the user has no such command, building one is the first task — a loop without a
+  code-graded metric is not autoresearch, it is a vibe.
+- Read `results.tsv` when reporting: `iteration score best verdict ms note`. A
+  **revert is a result**, not a failure — say what was tried and rejected.
+
+**Escape hatch (only when the sealed mode genuinely cannot express the experiment** —
+a jury of proposers, a human gate each round, two metrics): drop to `scene()` with a
+scene-level `research` block and `runtime: "experiment"`, which is the same machinery
+with the guardrails off:
 
 ```ts
 research: {
@@ -435,14 +494,11 @@ edges: [
 entry: "experiment", exit: "experiment",   // first pass = baseline, nothing to keep/revert
 ```
 
-What it buys you: agent nodes get `write_file`/`edit_file` scoped to `research.edit`
-(they have NO write tools otherwise); the experiment node snapshots the incumbent,
-measures under the budget, keeps only a candidate that beats `best` by more than
-`threshold`, restores the incumbent on revert or crash, and logs every try. Feed
-`verdict`/`reason`/`output` back into the proposer so a revert informs the next idea.
-Tell the proposer to read `results.tsv` and to make ONE change per iteration. Set
-`threshold` above zero whenever the metric is stochastic — otherwise the loop keeps
-sampling luck. `examples/05-autoresearch` is a complete, cheap instance.
+Both forms buy the same enforcement: agent nodes get `write_file`/`edit_file` scoped
+to the artefact (they have NO write tools otherwise); the experiment node snapshots the
+incumbent, measures under the budget, keeps only a candidate that beats `best` by more
+than the threshold, restores the incumbent on revert or crash, and logs every try.
+`examples/05-autoresearch` is a complete, cheap instance of the sealed mode.
 
 **Pipeline with rejection** — research → parallel review (critic + factchecker) →
 write, with `verdict === "reject"` looping back, capped by `maxLoops`.
