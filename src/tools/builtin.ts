@@ -2,6 +2,8 @@
  * Built-in tools.
  *
  * Deliberately **read-only and few**. There is no `bash`, no `write`, no `edit`.
+ * (The one exception is research mode — see research.ts — where a scene names
+ * the single artefact under study and agents get write tools scoped to it.)
  * A shell tool is the single largest attack surface an agent can have, and a
  * hastily-written one is worse than none — anything that needs to mutate the
  * world should go through an MCP server whose author sandboxed it on purpose.

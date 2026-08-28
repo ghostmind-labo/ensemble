@@ -13,6 +13,7 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 import { z } from "zod";
 import type { Registry } from "./registry.ts";
 import type { SceneSpec, NodeSpec, EdgeSpec, State } from "./dsl.ts";
+import { CAPABILITIES } from "./capabilities.ts";
 import { RUNTIMES, COMMON_FIELDS } from "./runtimes/index.ts";
 
 export type { SceneSpec, NodeSpec, EdgeSpec, State };
@@ -149,6 +150,13 @@ function checkReferences(scene: Scene, reg: Registry): string[] {
     );
   }
 
+  // Scene-level capability blocks validate themselves — the rules live on the
+  // object that owns the block, never here.
+  for (const cap of Object.values(CAPABILITIES)) {
+    const value = (scene as unknown as Record<string, unknown>)[cap.name];
+    if (value !== undefined) problems.push(...(cap.check?.(value, scene) ?? []));
+  }
+
   for (const [name, node] of Object.entries(scene.nodes)) {
     const runtimeName = runtimeOf(scene, node);
     const rt = RUNTIMES[runtimeName];
@@ -189,7 +197,7 @@ function checkReferences(scene: Scene, reg: Registry): string[] {
       }
     }
 
-    problems.push(...(rt.check?.(name, node, scene.defaults, reg) ?? []));
+    problems.push(...(rt.check?.(name, node, scene, reg) ?? []));
   }
 
   for (const [i, edge] of scene.edges.entries()) {
@@ -232,7 +240,13 @@ function checkReferences(scene: Scene, reg: Registry): string[] {
 
 /** Validates an already-imported spec. Used by the loader and by the editor's save path. */
 export function validateSpec(doc: unknown, file: string, reg: Registry): Scene {
-  const parsed = sceneSchema.safeParse(doc);
+  // The scene's legal top level = the base schema + one optional key per
+  // MOUNTED capability. Strictness survives: an unregistered block is still a
+  // typo, and a registered one is validated by the shape its object declared.
+  const withCapabilities = sceneSchema.extend(
+    Object.fromEntries(Object.values(CAPABILITIES).map((cap) => [cap.name, cap.schema.optional()])),
+  );
+  const parsed = withCapabilities.safeParse(doc);
   if (!parsed.success) {
     throw new SceneError(
       parsed.error.issues.map((issue) => {

@@ -10,6 +10,8 @@ look like.
 | [01](./01-model-jury) | **Model Jury** — three vendors answer the same question, a foreman synthesises | Parallel groups · cross-vendor routing · fan-in | $0.08 |
 | [02](./02-score-gate) | **Score Gate** — a judge scores the work; the graph only advances past a threshold | Conditional edges · typed state · feedback loops · `maxLoops` budget | $0.03 |
 | [03](./03-full-stack) | **Full Stack** — model node plans, agent node reads files via MCP, agent node applies a skill | Both runtimes · MCP setup · skills · where config lives · measured agent overhead | $0.04 |
+| [04](./04-decision-council) | **Decision Council** — orchestrator, four teams, an adjudicating gate | Composition at scale · 15 nodes | — |
+| [05](./05-autoresearch) | **Autoresearch** — an agent improves one file against a code-graded metric; keep or revert, logged | The sealed `research()` mode · `ensemble research` · scoped write tools · time budget · `results.tsv` | ~$0.03/iter |
 
 ## Before running any of them
 

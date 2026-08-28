@@ -18,6 +18,8 @@
 
 // --- scenes -----------------------------------------------------------------
 export { scene } from "./dsl.ts";
+export { research, ProgramError, isProgram, defaultProposer, ITERATION_EDGE } from "./autoresearch.ts";
+export type { ResearchProgram } from "./autoresearch.ts";
 export type { SceneSpec, StateSchema, TypedState } from "./dsl.ts";
 // Re-exported so a scene can declare state shapes without its own node_modules:
 // the resolver hook only maps this package, so `import { z } from "zod"` would
@@ -25,6 +27,8 @@ export type { SceneSpec, StateSchema, TypedState } from "./dsl.ts";
 export { z } from "zod";
 export { loadScene, validateSpec, SceneError, splitModel, resolveTarget, runtimeOf } from "./scene.ts";
 export type { Scene, NodeSpec, EdgeSpec } from "./scene.ts";
+export type { ResearchSpec } from "./research.ts";
+export { experimentRuntime, researchTools, parseMetric, parseBudget, measure, runExperiment } from "./research.ts";
 
 // --- the registry opencode owns ---------------------------------------------
 export { loadRegistry } from "./registry.ts";

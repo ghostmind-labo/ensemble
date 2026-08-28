@@ -33,6 +33,7 @@ import {
 } from "./state.ts";
 import { loadKeyFiles } from "./credentials.ts";
 import { fileRunStore, type RunStore } from "./store.ts";
+import { activeCapabilities } from "./capabilities.ts";
 import type { EventSink, NodeMeta } from "./events.ts";
 
 export interface RunOptions {
@@ -295,6 +296,11 @@ interface NodeCallCtx {
   /** Ask nodes that already fell through once this process — see `always`. */
   askConsumed: Set<string>;
   registry: import("./registry.ts").Registry;
+  runDir: string;
+  /** Active capability blocks by name, for compute runtimes. */
+  capabilities: Record<string, unknown>;
+  /** Tools contributed by active capabilities, offered to every agent node. */
+  capabilityTools: import("./tools/builtin.ts").BuiltinTool[];
   signal?: AbortSignal;
 }
 
@@ -318,6 +324,7 @@ async function callOnce(
     registry: ctx.registry,
     hub: () => ctx.hub.get(),
     root: resolve(process.cwd()),
+    ...(ctx.capabilityTools.length > 0 ? { extraTools: ctx.capabilityTools } : {}),
     ...(costLimit !== undefined ? { costLimit } : {}),
     onDelta: (delta) => ctx.emit({ type: "node:delta", node, delta }),
     onToolCall: (event) => ctx.emit({ type: "node:tool", node, ...event }),
@@ -382,7 +389,15 @@ async function runNode(
     };
     try {
       const outputs = spec.outputs ?? [];
-      const values = await parkRt.compute({ node, spec, state: { ...ctx.state } });
+      const values = await parkRt.compute({
+        node,
+        spec,
+        state: { ...ctx.state },
+        root: resolve(process.cwd()),
+        runDir: ctx.runDir,
+        capabilities: ctx.capabilities,
+        ...(ctx.signal ? { signal: ctx.signal } : {}),
+      });
       const missing = outputs.filter((k) => values[k] === undefined);
       if (missing.length > 0) {
         const message = `fn returned no value for declared output(s): ${missing.join(", ")}`;
@@ -489,8 +504,16 @@ async function runNode(
 }
 
 export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}): Promise<RunResult> {
-  const maxNodeRuns = opts.maxNodeRuns ?? 50;
-  const timeoutMs = opts.timeoutMs ?? 20 * 60_000;
+  // Active capabilities may retune the guard defaults (research widens them:
+  // a research scene loops by design, so the accidental-cycle defaults would
+  // cut a deliberate loop short). Explicit options always win.
+  const capsActive = activeCapabilities(scene);
+  const tuned = capsActive.reduce<{ maxNodeRuns?: number; timeoutMs?: number }>(
+    (acc, { cap, value }) => ({ ...acc, ...cap.tune?.(value) }),
+    {},
+  );
+  const maxNodeRuns = opts.maxNodeRuns ?? tuned.maxNodeRuns ?? 50;
+  const timeoutMs = opts.timeoutMs ?? tuned.timeoutMs ?? 20 * 60_000;
   const sink: EventSink = opts.onEvent ?? (() => {});
   const store: RunStore = opts.store ?? fileRunStore;
 
@@ -631,6 +654,9 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
     budgetLeft: () => (budget === undefined ? undefined : Math.max(0, budget - totalCost)),
     askConsumed: new Set<string>(),
     registry,
+    runDir,
+    capabilities: Object.fromEntries(capsActive.map(({ cap, value }) => [cap.name, value])),
+    capabilityTools: capsActive.flatMap(({ cap, value }) => cap.tools?.(value, { runDir }) ?? []),
     ...(opts.signal ? { signal: opts.signal } : {}),
   };
 

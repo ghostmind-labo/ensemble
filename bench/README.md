@@ -1,5 +1,11 @@
 # bench — autoresearch for the agent scaffolding
 
+> Since 0.20 this loop is a built-in scene pattern: a `research` block plus
+> `runtime: "experiment"` (see the root README, "Research mode", and
+> `examples/05-autoresearch`). This directory predates it and stays as the
+> hand-rolled reference — it optimises ensemble's own agent prompt, with its own
+> code-graded benchmark — but a new loop should be written as a scene.
+
 An implementation of [Karpathy's autoresearch](https://github.com/karpathy/autoresearch)
 pattern — propose, measure, **keep or revert**, repeat, with an audit trail —
 pointed at the one part of ensemble that is prompt-engineering rather than code:

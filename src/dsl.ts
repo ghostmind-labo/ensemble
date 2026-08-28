@@ -12,6 +12,9 @@
  */
 
 import type { ZodTypeAny, TypeOf } from "zod";
+import type { ResearchSpec } from "./research.ts";
+
+export type { ResearchSpec };
 
 export type State = Record<string, unknown>;
 
@@ -45,17 +48,21 @@ export type TypedState<S extends StateSchema> = { [K in keyof S]: TypeOf<S[K]> }
  *   no local dependencies. No tools, no skills, no MCP — pure think.
  * - `"agent"`: our own tool-calling loop. Gets read-only built-in tools plus any
  *   MCP servers it allowlists, and loops until the model stops asking for tools.
- *   Pure do.
+ *   Pure do. (In a scene with a `research` block it also gets `write_file` /
+ *   `edit_file`, scoped to `research.edit`.)
  * - `"ask"`: no model call at all. The run **pauses** here until something outside
  *   it supplies the node's `outputs` — a human in the viewer, or an agent calling
  *   `resume_run` with answers. Pure wait.
  * - `"fn"`: a plain function over state — the deterministic neuron. No tokens,
  *   no pause: `fn(state)` returns the node's outputs, validated against the
  *   scene's schemas exactly like model output. Pure compute.
+ * - `"experiment"`: the autoresearch step. Requires a scene-level `research`
+ *   block. Measures the artefact under study, keeps or reverts it, appends to
+ *   results.tsv. Pure measure.
  */
 // The built-ins keep autocomplete; `string & {}` admits any runtime mounted
 // with registerRuntime() — a runtime is an object, not a member of an enum.
-export type NodeRuntime = "model" | "agent" | "ask" | (string & {});
+export type NodeRuntime = "model" | "agent" | "ask" | "fn" | "experiment" | (string & {});
 
 export interface NodeSpec {
   /** `openrouter/<vendor>/<model>`, e.g. "openrouter/anthropic/claude-sonnet-5". */
@@ -93,6 +100,8 @@ export interface NodeSpec {
   tools?: Record<string, boolean>;
   /** agent nodes only — max tool-calling turns before giving up (default 12). */
   maxTurns?: number;
+  /** experiment nodes only — state key logged as the note in results.tsv (e.g. "hypothesis"). */
+  note?: string;
   description?: string;
   temperature?: number;
 }
@@ -119,6 +128,13 @@ export interface SceneSpec<S extends StateSchema = StateSchema> {
    * behave exactly as before (presence-checked only).
    */
   state?: S;
+  /**
+   * Turns the scene into an autoresearch loop (Karpathy's pattern): names the
+   * ONE artefact agents may edit, the command that measures it, and the
+   * budget. Declaring this is what grants agent nodes their scoped
+   * `write_file`/`edit_file` tools and what `runtime: "experiment"` runs.
+   */
+  research?: ResearchSpec;
   defaults?: {
     model?: string;
     runtime?: NodeRuntime;
