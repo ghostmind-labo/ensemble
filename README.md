@@ -345,9 +345,17 @@ working — but new work goes under `.ensemble/`.
 
 ### Getting the plugin — the lowest-friction path
 
-The plugin bundles the **skill** (the operating manual that teaches your agent the
-scene format, the patterns, casting, and the budget/resume discipline) **and the MCP
-server**, wired up automatically. Two lines, and there is nothing else to configure:
+The plugin bundles **three skills** and the **MCP server**, wired up automatically:
+
+| skill | what it teaches |
+|---|---|
+| `autoresearch` | the *concept* — Karpathy's loop, why its constraints exist, and whether a goal qualifies |
+| `autoresearch-build` | the *implementation* — the three things, writing an evaluator, launching, reading the ledger |
+| `ensemble` | general scene authoring — the format, the patterns, casting, budget and resume discipline |
+
+The split is deliberate: an agent asked *why* the loop refuses something loads the
+first, one asked to *build* one loads the second. Two lines, nothing else to
+configure:
 
 ```
 /plugin marketplace add ghostmind-labo/ensemble

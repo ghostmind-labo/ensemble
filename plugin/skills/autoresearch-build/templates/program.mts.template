@@ -1,0 +1,31 @@
+import { research } from "@ghostmind-dev/ensemble";
+
+/**
+ * <what this experiment is trying to find out>
+ *
+ * Three things, and nothing else. The loop is generated — that is what makes
+ * this run comparable to any other run of the same shape.
+ */
+export default research({
+  // 1 · what may change — the ONE artefact under study.
+  //     Must exist before the baseline. An array only for paths that must move together.
+  modify: "<path/to/artefact>",
+
+  // 2 · how it is scored — code, never a model judge.
+  //     Must live OUTSIDE `modify`, be deterministic, and print a number.
+  evaluate: {
+    command: "<command that prints a number>",
+    metric: "score",       // omit → the last number printed wins
+    minimize: false,       // true when lower is better (a loss)
+    budget: "5m",          // wall clock per experiment; over budget scores nothing
+  },
+
+  // 3 · the directive — written once, read identically every iteration.
+  //     Say what to aim for AND what is off limits. Anything you do not forbid,
+  //     the agent may do, and the thing you forgot is how the metric gets gamed.
+  instruction: `
+<what to aim for, in a sentence or two>
+
+<what is off limits — be explicit and concrete>
+  `.trim(),
+});
