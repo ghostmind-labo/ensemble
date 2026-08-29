@@ -142,6 +142,8 @@ capability means adding an object — never editing the engine:
 | schema | the shape a state key must respect | `state: {...}` (zod) |
 | runtime | how a node executes (fields + validation + park/call) | `registerRuntime({...})` |
 | tool | a capability offered to agent nodes | `registerTool({...})` |
+| agent | a coding-agent CLI, rented per node | `registerAgentBackend({...})` |
+| capability | a scene-level block (`research: {...}`) | `registerCapability({...})` |
 | store | where run artifacts go (files by default) | `runScene(..., { store })` |
 
 Built-in runtimes: `model` (stochastic neuron) / `agent` (tool-using) / `ask`
@@ -302,6 +304,17 @@ the merge.
   for one node. Use `bash` to VERIFY (run the tests you just changed), not just
   to act. Add MCP servers per node with `mcp: ["name"]`, or scene-wide with
   `defaults.mcp`.
+- **`runtime: "opencode"`** rents a real coding-agent CLI for ONE node. Reach for
+  it when a node must genuinely build something; stay on `"agent"` otherwise,
+  because an external CLI injects thousands of tokens of its own scaffolding per
+  call. Needs `opencode` on PATH (`brew install sst/tap/opencode`) — `ensemble
+  validate` says so before anything spends — and nothing else: it reads the same
+  `OPENROUTER_API_KEY`, and the scene's `defaults.skills`/`defaults.mcp` are
+  injected into it per call, so one grant covers both agents. Fields: `model`,
+  `prompt`, `skills`, `mcp`, `timeout` (seconds), `dir` (subdirectory of root).
+  Mount another CLI with `registerAgentBackend({ name, bin, command, parse })` —
+  the name becomes the runtime name. Never mount one that meters a first-party
+  consumer subscription; that violates the upstream terms when automated.
 - **`runtime: "ask"`** makes no model call at all — it **pauses the run** until
   someone supplies its `outputs`. Declares `question` (what to ask) and `outputs`
   (the state keys the answer must fill); never `model`/`prompt`/`mcp`/`skills`.

@@ -15,6 +15,9 @@ import type { Registry } from "./registry.ts";
 import type { SceneSpec, NodeSpec, EdgeSpec, State } from "./dsl.ts";
 import { CAPABILITIES } from "./capabilities.ts";
 import { RUNTIMES, COMMON_FIELDS } from "./runtimes/index.ts";
+// Mounts the shipped agent backend (runtime: "opencode"). Importing here means
+// every path that loads a scene knows about it — cli, serve and the MCP server.
+import "./agents/opencode.ts";
 
 export type { SceneSpec, NodeSpec, EdgeSpec, State };
 

@@ -4,17 +4,25 @@ Multi-model agent ensembles. You describe a **scene** — nodes wired by
 edges, each node a model with scoped state access — in **one TypeScript file**, and
 `ensemble` runs it: conditions, loops, parallel groups, live visualization.
 
-Every node can use a **different model from a different vendor**, and every node can
-be one of two kinds:
+Every node can use a **different model from a different vendor**, and a node is
+whichever kind of worker the job needs:
 
 - **`runtime: "model"`** (default) — one direct OpenRouter call. Streams tokens live.
   Pure *think*.
-- **`runtime: "agent"`** — our own tool-calling loop: read-only built-in tools plus any
-  MCP servers the node allowlists, looping until the model stops asking for tools.
-  Pure *do*.
+- **`runtime: "agent"`** — our own tool-calling loop: built-in tools (read *and*
+  write) plus any MCP servers the node allowlists, looping until the model stops
+  asking for tools. Pure *do*.
+- **`runtime: "fn"`** — a plain function over state. Free, instant, deterministic,
+  and held to the same schema contract as model output. Use it for arithmetic,
+  tallies and formatting, and never pay a model to count.
+- **`runtime: "ask"`** — no model call at all: the run **pauses** until a human (or
+  another agent) supplies the node's outputs.
+- **`runtime: "opencode"`** — rents a real coding-agent CLI for one node, when a
+  node must genuinely build something. See [Agent backends](#agent-backends).
 
-**No subprocess, no external agent, nothing to install but this package.** The only
-credential is `OPENROUTER_API_KEY`.
+**The default path needs no subprocess and nothing installed but this package**, and
+the only credential is `OPENROUTER_API_KEY` — which is also all the `opencode`
+backend needs, if you reach for it.
 
 ```
 scenes/*.ts ──import──> Scene ──validate──> engine ──events──> terminal / browser
@@ -641,6 +649,81 @@ A node's `skills: [...]` are inlined into its system prompt.
 > **Scoping is by construction, not by policy.** We assemble each node's tool array
 > ourselves, so a tool a node did not ask for isn't *denied* — it is absent. There is
 > no deny-list to trust and nothing to misconfigure.
+
+## Agent backends
+
+`runtime: "agent"` is our own loop, and it is the right default: no subprocess,
+~250 tokens of scaffolding, and the node's prompt dominates. But a node that has
+to genuinely *build* something wants what other people have spent years on — a
+real editing loop, a permission model, LSP, verification. Rather than reimplement
+that, mount it:
+
+```ts
+nodes: {
+  plan:  { runtime: "agent",    prompt: "Read the code and plan the change.", outputs: ["plan"] },
+  build: { runtime: "opencode", prompt: "Make the change.", inputs: ["plan"], outputs: ["summary"] },
+  check: { runtime: "fn",       fn: (s) => ({ ok: String(s.summary).includes("PASS") }),
+           inputs: ["summary"], outputs: ["ok"] },
+},
+```
+
+`opencode` ships in the box because it is the only agent CLI that needs **nothing
+but the credential ensemble already requires**: it reads `OPENROUTER_API_KEY`
+straight from the environment, and its model namespace is
+`openrouter/<vendor>/<model>` — byte-identical to a scene's model ref, so it
+passes through with no translation. Install it with
+`brew install sst/tap/opencode`; `ensemble validate` tells you if it is missing,
+before anything spends.
+
+**Your scene's grants reach it too.** The same `defaults.skills` and
+`defaults.mcp` our own loop honours are injected into the CLI per call via
+`OPENCODE_CONFIG_CONTENT` — config as a string in the environment, so nothing is
+written to disk and no state survives the process. One grant, both agents.
+
+### Mounting another one
+
+A backend is an object: build an invocation, read the output back.
+
+```ts
+import { registerAgentBackend } from "@ghostmind-dev/ensemble";
+
+registerAgentBackend({
+  name: "codex",
+  summary: "OpenAI Codex CLI, sandboxed",
+  bin: "codex",
+  install: "npm i -g @openai/codex",
+  command: ({ model, prompt, cwd }) => ({
+    argv: ["codex", "exec", "--cd", cwd, "--sandbox", "workspace-write", "--json", prompt],
+    env: { CODEX_MODEL: model },
+  }),
+  parse: (res) => ({ text: res.stdout }),
+});
+// nodes may now declare { runtime: "codex", ... }
+```
+
+The backend's **name becomes the runtime name**, and the generated runtime is a
+*calling* one — so it inherits the output contract, the two-attempt retry,
+per-node cost accounting, the run budget, journalled resume and cancellation for
+free. You write an argv and a parser; the orchestration is already there.
+
+Backends verified to fit this shape, all headless with your own OpenRouter key:
+[Codex](https://github.com/openai/codex) (`codex exec`, real OS sandbox),
+[Qwen Code](https://github.com/QwenLM/qwen-code) (`qwen -p`, distinct exit codes
+for turn and budget limits), [Cline](https://github.com/cline/cline)
+(`cline --yolo`, but pass `-P openrouter` or it bills their backend), and
+[Continue](https://github.com/continuedev/continue) (`cn -p`, per-tool `--allow`).
+
+**Two things worth knowing before you reach for one.** An external CLI carries
+thousands of tokens of its own scaffolding per call — that is what made renting
+one expensive the first time, and it is why this is a per-node choice rather than
+a default. And where a CLI reports no usage, its spend is invisible to
+`--budget`; only what a backend can parse gets counted.
+
+**Not every agent CLI belongs here.** Anything that meters a first-party consumer
+subscription — Claude Pro/Max via a wrapper, an ad-supported free tier, a proxy
+pointed at someone's ChatGPT plan — violates the upstream terms when driven by an
+automated process, regardless of which agent points at it. Backends must be tools
+you can point at your own provider.
 
 ## Safety rails
 
