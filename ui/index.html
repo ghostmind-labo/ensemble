@@ -197,14 +197,24 @@
   .edge { stroke: var(--line); stroke-width: 1.6; fill: none; }
   .edge.back { stroke-dasharray: 5 4; }
   .edge.hot { stroke: var(--accent); stroke-width: 2.4; }
-  /* A condition is a thing ON the graph, not a caption. Drawn as a chip so it
-     reads at a glance and cannot be lost against a node behind it. */
-  .echip text { font-size: 10px; font-family: var(--mono); }
-  .echip rect { fill: var(--bg); stroke: var(--line); stroke-width: 1; }
-  .echip.cond rect { stroke: var(--accent); fill: color-mix(in srgb, var(--accent) 20%, var(--bg)); }
-  .echip.cond text { fill: var(--accent); }
-  .echip.loop rect { stroke: var(--warn); fill: color-mix(in srgb, var(--warn) 20%, var(--bg)); }
-  .echip.loop text { fill: var(--warn); }
+  /* Everything on the graph is a BOX. A condition is an object like a node is
+     an object, so it gets the same box — same radius, same border, same header
+     and body — just smaller. A pill would have been a second visual language
+     for a thing that is not a second kind of thing. */
+  #edgeobjs { position: absolute; inset: 0; pointer-events: none; }
+  .node.obj {
+    position: absolute; transform: translate(-50%, -50%);
+    min-width: 0; max-width: 220px; padding: 6px 9px; border-radius: 8px;
+    border-width: 1.5px; pointer-events: auto; cursor: default;
+  }
+  .node.obj:hover { transform: translate(-50%, -50%) translateY(-1px); }
+  .node.obj .nm { font-size: 10px; font-weight: 600; gap: 5px; }
+  .node.obj .md { font-size: 10px; margin-top: 2px; max-width: 200px; }
+  .node.obj .dot { width: 6px; height: 6px; }
+  .node.obj.cond { border-color: var(--accent); }
+  .node.obj.cond .dot { background: var(--accent); }
+  .node.obj.loop { border-color: var(--warn); }
+  .node.obj.loop .dot { background: var(--warn); }
 
   /* ---------- console ---------- */
   /* The work panel lives on the RIGHT: Log/State/Costs/Runs/Source and the node
@@ -396,7 +406,7 @@
   <div id="canvas">
     <div id="problems"></div>
     <div class="stage" id="stage">
-      <div id="viewport"><svg id="wires"></svg><div id="layers"></div></div>
+      <div id="viewport"><svg id="wires"></svg><div id="layers"></div><div id="edgeobjs"></div></div>
     </div>
   </div>
 </main>
@@ -1061,6 +1071,7 @@ function wires() {
   };
 
   const parts = [];
+  const objs = [];
   for (const e of state.layout.edges) {
     const a = box(e.from), b = box(e.to);
     if (!a || !b) continue;
@@ -1088,26 +1099,28 @@ function wires() {
     // A loop budget is worth seeing even on an unconditional edge — an edge with
     // maxLoops and no `when` used to draw no label at all, hiding the one thing
     // that decides whether the run terminates.
-    // Each is its own chip: an `if` you cannot see is an `if` you will misread,
-    // and a loop budget decides whether the run terminates at all. Stacked, so
-    // a conditional loop shows both without one hiding the other.
-    const chips = [];
-    if (e.when) chips.push({ text: `if ${e.when}`, cls: "cond" });
-    if (e.maxLoops) chips.push({ text: `⟲ max ${e.maxLoops}`, cls: "loop" });
+    // An edge carries objects of its own: the condition that decides whether it
+    // is taken, and the budget that decides how often. Both are boxes, drawn in
+    // HTML beside the node boxes rather than as SVG ornaments — a condition is
+    // not a caption on a line, it is a thing in the graph.
+    const carried = [];
+    if (e.when) carried.push({ cls: "cond", kind: "when", body: e.when });
+    if (e.maxLoops) carried.push({ cls: "loop", kind: "maxLoops", body: `at most ${e.maxLoops}×` });
 
-    const top = ly - (chips.length - 1) * 11;
-    chips.forEach((chip, i) => {
-      const label = chip.text.length > 34 ? `${chip.text.slice(0, 33)}…` : chip.text;
-      const w = label.length * 6.1 + 14;
-      const cy = top + i * 22;
-      parts.push(
-        `<g class="echip ${chip.cls}"><title>${esc(chip.text)}</title>` +
-        `<rect x="${lx - w / 2}" y="${cy - 9}" width="${w}" height="18" rx="9"/>` +
-        `<text x="${lx}" y="${cy + 3.5}" text-anchor="middle">${esc(label)}</text></g>`,
+    // 46px apart: a two-line box is ~40px tall, so anything tighter has the
+    // second box sitting on the first one's body text.
+    const top = ly - (carried.length - 1) * 23;
+    carried.forEach((obj, i) => {
+      objs.push(
+        `<div class="node obj ${obj.cls}" style="left:${lx}px;top:${top + i * 46}px"` +
+        ` title="${esc(obj.kind)}: ${esc(obj.body)}">` +
+        `<div class="nm"><span class="dot"></span>${esc(obj.kind)}</div>` +
+        `<div class="md">${esc(obj.body)}</div></div>`,
       );
     });
   }
 
+  $("edgeobjs").innerHTML = objs.join("");
   svg.innerHTML =
     `<defs><marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6"
        orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--line)"/></marker></defs>` +
