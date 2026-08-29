@@ -59,15 +59,21 @@ ensemble validate <scene>                          # free, and now checks the ke
 ```
 
 - Not installed → `npm i -g @ghostmind-dev/ensemble`.
-- **`OPENROUTER_API_KEY` is the only credential, and BOTH runtimes need it** — there
-  is no alternative provider path. `validate` (and `validate_scene`) report it as a
-  certain failure before anything spends, so you never learn this at run time.
+- **`OPENROUTER_API_KEY` is the only credential**, and there is no alternative
+  provider path — the `opencode` backend reads the same variable, so renting an
+  agent adds no second secret. Nodes that reach no model (`fn`, `ask`,
+  `experiment`) need no key at all, and a scene made only of those validates and
+  runs without one. `validate` (and `validate_scene`) ask each runtime object
+  whether it needs a model and report a missing key as a certain failure before
+  anything spends, so you never learn this at run time.
 - It is read from the environment or, failing that, from `.ensemble/.env`,
   `./.env`, `~/.config/ensemble/.env`, `~/.env` — a real env var always wins.
   **Prefer a file when driving through MCP:** the server inherits the host's
   environment at spawn, so a key exported later in some other terminal never
   reaches it, while a file is re-read on every call.
-- Node ≥ 22.18. No other install, no subprocess, no external agent.
+- Node ≥ 22.18. Nothing else to install and no subprocess — **unless** a scene
+  declares an agent-backend node (`runtime: "opencode"`), which needs that binary
+  on PATH. `validate` says so for free if it is missing.
 
 ### Where things go — everything under `.ensemble/`
 
@@ -183,11 +189,26 @@ the behaviour-carrying leaves on them (`edge.when`, `node.fn`, `runtime.call`,
 `fileRunStore` rather than replace it, or its runs stop being resumable (resume
 reads the journal from the run directory).
 
-Every `NodeSpec` field: `model`, `runtime` ("model" | "agent" | "ask" | "fn"),
-`prompt` (system-style instruction), `question` (ask only), `fn` (fn only),
-`inputs`, `outputs`, `skills`, `mcp`, `tools`, `maxTurns` (agent only, default
-12), `temperature`, `description`. Scene-level: `name`, `description`, `state`
-(zod shapes — see below), `defaults`, `nodes`, `groups`, `edges`, `entry`, `exit`.
+**Every node accepts** `runtime`, `inputs`, `outputs`, `description`. Everything
+else is declared by the runtime OBJECT, and a field its runtime does not accept
+is a validation error naming both — so this table is the whole surface:
+
+| runtime | badge | also accepts |
+|---|---|---|
+| `model` (default) | ⚡ | `model`, `prompt`, `temperature` |
+| `agent` | ⛭ | `model`, `prompt`, `temperature`, `skills`, `mcp`, `tools`, `maxTurns` (default 12, max 50) |
+| `opencode` | ⧉ | `model`, `prompt`, `skills`, `mcp`, `timeout` (seconds, default 600), `dir` (subdir of root) |
+| `ask` | ⏸ | `question`, `always` |
+| `fn` | λ | `fn` |
+| `experiment` | 🔬 | `note` (state key logged to `results.tsv`) |
+
+Any backend mounted with `registerAgentBackend` gets its own row with the same
+fields as `opencode` plus whatever it declares.
+
+**Scene-level:** `name`, `description`, `state` (zod shapes — see below),
+`defaults`, `nodes`, `groups`, `edges`, `entry`, `exit`, `edgeKind` (default
+`"sequential"`), and any mounted capability block (`research` is the one that
+ships).
 
 **`defaults` is how you say something once for the whole scene.** It carries
 `model`, `runtime`, `temperature`, and three that reach every **agent** node:
@@ -643,10 +664,20 @@ has a specific, repeated complaint about agent-node behaviour — the default is
 
 ## 6 · Library use (embedding in code)
 
-Everything is a mountable object: `registerRuntime` (new node kind),
-`registerTool` (new agent tool), `registerCapability` (new scene-level block —
-`research:` is the first; a capability owns its schema, checks, contributed
-tools, and guard tuning), `store` (artifact destination), `onEvent` (sink).
+Everything is a mountable object, and each is one call:
+
+| function | mounts | notes |
+|---|---|---|
+| `registerRuntime` | a new node kind | declares its own `fields`, `check`, and one of `park`/`compute`/`call` |
+| `registerAgentBackend` | a coding-agent CLI | the backend's NAME becomes the runtime name; you write an argv and a parser, the engine supplies the output contract, retries, cost accounting and resume |
+| `registerTool` | a built-in for agent nodes | re-registering a name REPLACES it — how research scopes `write_file` |
+| `registerEdgeKind` | how the next node is chosen | `"sequential"` is the built-in; a kind owns `when` evaluation and `maxLoops` counting |
+| `registerCapability` | a scene-level block (`research:`) | owns its schema, checks, contributed `tools`, `withdraws` (built-ins it removes), and guard `tune`ing |
+| `store` | where artifacts go | wrap `fileRunStore`, do not replace it, or runs stop being resumable |
+| `onEvent` | an event sink | |
+
+The engine holds zero runtime-name branches and zero edge branches: adding a
+node kind, a rented agent, a tool, or a topology never means editing it.
 
 
 ```ts
