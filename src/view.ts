@@ -9,6 +9,8 @@
 import type { Scene } from "./scene.ts";
 import { runtimeOf } from "./scene.ts";
 import { RUNTIMES } from "./runtimes/index.ts";
+import type { RuntimeObject } from "./runtimes/index.ts";
+import { AGENT_BACKENDS } from "./agents/index.ts";
 import { conditionLabel } from "./edges.ts";
 import { c } from "./log.ts";
 
@@ -95,12 +97,26 @@ export function toTerminal(scene: Scene): string {
     if (!spec) return;
     const model = shortModel(spec.model ?? scene.defaults.model ?? "?");
     const runtime = runtimeOf(scene, spec);
-    const badge = RUNTIMES[runtime]?.badge ?? "•";
+    const rt = RUNTIMES[runtime];
+    const badge = rt?.badge ?? "•";
+    // Coloured by cost, like the browser view: free is green, a rented CLI is
+    // loud, a plain call is quiet. Any registered runtime lands somewhere sane.
+    const cost = costOf(runtime, rt);
     const tag =
-      runtime === "agent" ? c.yellow(`${badge}agent`) : runtime === "model" ? c.dim(`${badge}model`) : c.cyan(`${badge}${runtime}`);
-    out.push(`${pad}${c.magenta(c.bold(name))} ${c.dim(model)} ${tag}`);
-    if ((spec.skills ?? []).length > 0) out.push(`${pad}  ${c.dim("skills:")} ${c.cyan((spec.skills ?? []).join(", "))}`);
-    if ((spec.mcp ?? []).length > 0) out.push(`${pad}  ${c.dim("mcp:")} ${c.cyan((spec.mcp ?? []).join(", "))}`);
+      cost === "free" ? c.green(`${badge}${runtime}`)
+      : cost === "wait" ? c.dim(`${badge}${runtime}`)
+      : cost === "rented" ? c.yellow(c.bold(`${badge}${runtime}`))
+      : cost === "loop" ? c.yellow(`${badge}${runtime}`)
+      : c.dim(`${badge}${runtime}`);
+    const free = cost === "free" || cost === "wait";
+    out.push(`${pad}${c.magenta(c.bold(name))} ${free ? "" : c.dim(model) + " "}${tag}`);
+    // Scene-wide grants are shown too — a node that never names a skill still has it.
+    const union = (a: string[] | undefined, b: string[] | undefined): string[] =>
+      [...new Set([...(b ?? []), ...(a ?? [])])];
+    const skills = union(spec.skills, scene.defaults.skills);
+    const mcp = union(spec.mcp, scene.defaults.mcp);
+    if (skills.length > 0) out.push(`${pad}  ${c.dim("skills:")} ${c.cyan(skills.join(", "))}`);
+    if (mcp.length > 0) out.push(`${pad}  ${c.dim("mcp:")} ${c.cyan(mcp.join(", "))}`);
     if ((spec.inputs ?? []).length > 0) out.push(`${pad}  ${c.dim(`in  ← ${(spec.inputs ?? []).join(", ")}`)}`);
     if ((spec.outputs ?? []).length > 0) out.push(`${pad}  ${c.dim(`out → ${(spec.outputs ?? []).join(", ")}`)}`);
   };
@@ -146,6 +162,12 @@ export interface LayoutNode {
   name: string;
   model: string;
   runtime: string;
+  /** The runtime object's own glyph — the UI never guesses one from the name. */
+  badge: string;
+  /** Its one-line summary, shown on hover and in the inspector. */
+  summary: string;
+  /** How this node spends: nothing, one call, a loop, a subprocess, or a wait. */
+  cost: "free" | "call" | "loop" | "rented" | "wait";
   skills: string[];
   mcp: string[];
   inputs: string[];
@@ -170,6 +192,26 @@ export interface Layout {
   exit: string | undefined;
   targets: LayoutTarget[];
   edges: Array<{ from: string; to: string; when?: string; maxLoops?: number; back: boolean }>;
+  /** Which edge kind selects the next node — "sequential" unless the scene says otherwise. */
+  edgeKind: string;
+}
+
+/**
+ * What a node costs, derived from the runtime OBJECT rather than its name.
+ *
+ * The viewer's job is to make spend legible before you press run, and the five
+ * shapes differ by orders of magnitude: an `fn` is free, a `model` is one call,
+ * an `agent` loops, a rented CLI spawns a subprocess with its own scaffolding.
+ * A registered runtime nobody here has heard of still classifies correctly,
+ * because the question asked is "which face does it implement", not "what is it
+ * called".
+ */
+function costOf(name: string, rt: RuntimeObject | undefined): LayoutNode["cost"] {
+  if (!rt) return "call";
+  if (rt.park) return "wait";
+  if (rt.compute) return "free";
+  if (AGENT_BACKENDS[name]) return "rented";
+  return name === "agent" ? "loop" : "call";
 }
 
 /**
@@ -183,12 +225,22 @@ export interface Layout {
 export function toLayout(scene: Scene): Layout {
   const describe = (name: string): LayoutNode => {
     const spec = scene.nodes[name];
+    const runtime = spec ? runtimeOf(scene, spec) : "model";
+    const rt = RUNTIMES[runtime];
+    // Scene-wide grants are real grants: a node that never names a skill still
+    // HAS it. Showing only spec.skills would draw a node as less capable than
+    // it is, which is exactly the sort of lie a viewer must not tell.
+    const union = (a: string[] | undefined, b: string[] | undefined): string[] =>
+      [...new Set([...(b ?? []), ...(a ?? [])])];
     return {
       name,
       model: spec?.model ?? scene.defaults.model ?? "",
-      runtime: spec ? runtimeOf(scene, spec) : "model",
-      skills: spec?.skills ?? [],
-      mcp: spec?.mcp ?? [],
+      runtime,
+      badge: rt?.badge ?? "•",
+      summary: rt?.summary ?? "unknown runtime",
+      cost: costOf(runtime, rt),
+      skills: union(spec?.skills, scene.defaults.skills),
+      mcp: union(spec?.mcp, scene.defaults.mcp),
       inputs: spec?.inputs ?? [],
       outputs: spec?.outputs ?? [],
       prompt: spec?.prompt ?? "",
@@ -249,7 +301,14 @@ export function toLayout(scene: Scene): Layout {
     };
   });
 
-  return { name: scene.name, entry: scene.entry, exit: scene.exit, targets, edges };
+  return {
+    name: scene.name,
+    entry: scene.entry,
+    exit: scene.exit,
+    targets,
+    edges,
+    edgeKind: scene.edgeKind ?? "sequential",
+  };
 }
 
 /**

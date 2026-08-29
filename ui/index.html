@@ -98,6 +98,13 @@
     flex: none; z-index: 5; display: flex; gap: 8px; align-items: center;
     padding: 20px 24px 14px; background: var(--bg);
   }
+  /* Only shown when the scene overrides the default selection strategy — a
+     non-default edge kind changes where the run goes next, so it belongs beside
+     the Run button rather than buried in a panel. */
+  #edgekind {
+    font-family: var(--mono); font-size: 10px; padding: 2px 7px; border-radius: 4px;
+    background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent);
+  }
   .toolbar input[type=text] {
     flex: 1; padding: 8px 11px; border: 1px solid var(--line); border-radius: 8px;
     background: var(--panel); color: var(--fg); font-size: 13px; min-width: 120px;
@@ -286,8 +293,13 @@
   .srcbar { display: flex; gap: 10px; align-items: center; padding: 8px 12px; border-top: 1px solid var(--line); }
   .srcbar .hint { font-size: 11px; color: var(--muted); }
   .badge { font-size: 9px; padding: 1px 5px; border-radius: 4px; margin-left: auto; font-family: var(--mono); }
-  .badge.model { background: var(--accent-soft); color: var(--accent); }
-  .badge.agent { background: color-mix(in srgb, var(--warn) 15%, transparent); color: var(--warn); }
+  /* Coloured by what a node COSTS, not by its name — a runtime registered by a
+     library user gets the right colour without the viewer knowing it exists. */
+  .badge.call   { background: var(--accent-soft); color: var(--accent); }
+  .badge.loop   { background: color-mix(in srgb, var(--warn) 15%, transparent); color: var(--warn); }
+  .badge.rented { background: color-mix(in srgb, var(--warn) 28%, transparent); color: var(--warn); font-weight: 600; }
+  .badge.free   { background: color-mix(in srgb, var(--ok, #3fb950) 15%, transparent); color: var(--ok, #3fb950); }
+  .badge.wait   { background: color-mix(in srgb, var(--muted) 20%, transparent); color: var(--muted); }
   .node.waiting { opacity: .55; }
   .node .wait { margin-top: 6px; font-size: 10px; color: var(--muted); }
   .stream { font-family: var(--mono); font-size: 10.5px; color: var(--muted); margin-top: 7px;
@@ -348,6 +360,7 @@
     <input type="number" id="budget" placeholder="$ cap" min="0" step="0.05"
            title="Optional hard cost cap (USD) for this run">
     <span id="spend" hidden></span>
+    <span id="edgekind" hidden title="How the next node is chosen after each step"></span>
     <button class="primary" id="run">Run</button>
     <button id="stop" disabled>Stop</button>
     <span id="zoombar">
@@ -874,16 +887,30 @@ function nodeCard(n) {
   const stat = st?.meta ? `<div class="stat">${esc(st.meta)}</div>` : "";
   const live = st?.state === "running" && st.stream
     ? `<div class="stream" data-stream="${esc(n.name)}">${esc(st.stream.slice(-800))}</div>` : "";
-  const badge = `<span class="badge ${n.runtime}">${n.runtime === "agent" ? "⛭ agent" : "⚡ model"}</span>`;
+  // The runtime object supplies its own glyph and summary; the viewer no longer
+  // guesses. Before this, every fn / ask / experiment / rented node rendered as
+  // "⚡ model", which was simply false.
+  const badge = `<span class="badge ${n.cost}" title="${esc(n.summary || "")}">${esc(n.badge || "•")} ${esc(n.runtime)}</span>`;
   return `<div class="node ${cls} ${state.selected === n.name ? "sel" : ""}" data-node="${esc(n.name)}">
     <div class="nm"><span class="dot"></span>${esc(n.name)}${badge}</div>
-    <div class="md">${esc(n.model.replace(/^openrouter\//, ""))}</div>
+    ${n.cost === "free" || n.cost === "wait" ? "" : `<div class="md">${esc(n.model.replace(/^openrouter\//, ""))}</div>`}
     ${skills}${wait}${stat}${live}
   </div>`;
 }
 
 function draw() {
   if (!state.layout) return;
+
+  // "sequential" is the default and saying so would be noise; anything else
+  // changes where the run goes next and must be visible.
+  const ek = $("edgekind");
+  const kind = state.layout.edgeKind;
+  if (ek) {
+    const custom = kind && kind !== "sequential";
+    ek.hidden = !custom;
+    if (custom) ek.textContent = `edges: ${kind}`;
+  }
+
   const layers = new Map();
   for (const t of state.layout.targets) {
     if (!layers.has(t.layer)) layers.set(t.layer, []);
@@ -1009,10 +1036,11 @@ function wires() {
     }
 
     parts.push(`<path class="edge ${e.back ? "back" : ""} ${hot ? "hot" : ""}" d="${d}" marker-end="url(#arw)"/>`);
-    if (e.when) {
-      const label = e.when + (e.maxLoops ? ` ⟲${e.maxLoops}` : "");
-      parts.push(`<text class="elabel" x="${lx}" y="${ly}">${esc(label)}</text>`);
-    }
+    // A loop budget is worth seeing even on an unconditional edge — an edge with
+    // maxLoops and no `when` used to draw no label at all, hiding the one thing
+    // that decides whether the run terminates.
+    const label = [e.when, e.maxLoops ? `⟲${e.maxLoops}` : ""].filter(Boolean).join(" ");
+    if (label) parts.push(`<text class="elabel" x="${lx}" y="${ly}">${esc(label)}</text>`);
   }
 
   svg.innerHTML =
@@ -1034,8 +1062,17 @@ function inspect(name) {
   if (!node) return;
   const st = state.status.get(name);
   const row = (k, v) => v ? `<dt>${k}</dt><dd>${esc(v)}</dd>` : "";
+  const COST = {
+    free:   "free — deterministic, no model call",
+    call:   "one model call",
+    loop:   "a tool-calling loop — many calls",
+    rented: "spawns an external agent CLI (its own scaffolding, its own spend)",
+    wait:   "no model call — the run pauses here",
+  };
   $("inspect").innerHTML = `<h3>${esc(node.name)}</h3><dl>
-    ${row("model", node.model)}
+    ${row("runtime", `${node.badge || ""} ${node.runtime}${node.summary ? ` — ${node.summary}` : ""}`)}
+    ${row("cost", COST[node.cost] || node.cost)}
+    ${node.cost === "free" || node.cost === "wait" ? "" : row("model", node.model)}
     ${row("skills", node.skills.join(", ") || "none")}
     ${row("mcp", node.mcp.join(", ") || "none")}
     ${row("inputs", node.inputs.join(", ") || "—")}
