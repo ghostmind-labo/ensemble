@@ -12,6 +12,7 @@ look like.
 | [03](./03-full-stack) | **Full Stack** — model node plans, agent node reads files via MCP, agent node applies a skill | Both runtimes · MCP setup · skills · where config lives · measured agent overhead | $0.04 |
 | [04](./04-decision-council) | **Decision Council** — orchestrator, four teams, an adjudicating gate | Composition at scale · 15 nodes | — |
 | [05](./05-autoresearch) | **Autoresearch** — an agent improves one file against a code-graded metric; keep or revert, logged | The sealed `research()` mode · `ensemble research` · scoped write tools · time budget · `results.tsv` | ~$0.03/iter |
+| [06](./06-rented-research) | **Rented Research** — the same loop, but **opencode** proposes the changes | Agent backends (`runtime: "opencode"`) · the research escape hatch · `dir` as the safety boundary · a tie reverts | $0.01 for 5 iterations |
 
 ## Before running any of them
 
@@ -21,8 +22,10 @@ ensemble mcp        # confirm which MCP servers actually connected (often none)
 ensemble models     # 300+ models reachable through OpenRouter
 ```
 
-You need `opencode` on PATH with an OpenRouter provider configured, and
-`OPENROUTER_API_KEY` set. See the [root README](../README.md).
+All you need is `OPENROUTER_API_KEY`. Nothing else is installed and no
+subprocess is spawned — unless a scene declares an agent-backend node
+(`runtime: "opencode"`), and `ensemble validate` tells you if that binary is
+missing before anything spends. See the [root README](../README.md).
 
 ## The habit worth forming
 
@@ -41,14 +44,14 @@ parallel state-key collisions, and skills declared on model nodes — before any
 ensemble run examples/01-model-jury/jury.mts "your question"
 ```
 
-Not from inside the example folder. opencode treats your **working directory** as the
-project root and installs ~61 MB of its own `node_modules` there — `cd`-ing into each
-example gives every one of them a separate copy. From the root, they share one.
+Not from inside the example folder. The working directory is the project root: it
+is what `read_file`, `glob` and the rest are confined to, and where MCP servers and
+skills are discovered from. Running from the root means every example sees the same
+one.
 
-Generated agents land in `.opencode/agents/ensemble-<scene>-<node>.md` and run artifacts
-in `.ensemble/runs/<timestamp>-<scene>/`, both at the root, both gitignored. Nothing is
-written into the example folder itself, so `examples/` stays exactly what you see in
-git.
+Run artifacts land in `.ensemble/runs/<timestamp>-<scene>/` at the root, gitignored.
+Nothing is written into the example folder itself, so `examples/` stays exactly what
+you see in git.
 
 ## Adding an example
 

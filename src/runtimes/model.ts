@@ -1,10 +1,11 @@
 /**
  * The "model" runtime — a direct OpenRouter call.
  *
- * For nodes that only think (prompt → text), opencode is pure overhead: a 61 MB
- * dependency tree and a server spawn to make one HTTP request. This runtime is
- * a single fetch with `stream: true`, which also buys the thing opencode cannot
- * provide at all: real token-by-token deltas for the live view.
+ * For nodes that only think (prompt → text), everything else is overhead: a
+ * tool-calling loop that will never call a tool, or a subprocess spawned to make
+ * one HTTP request. This runtime is a single fetch with `stream: true`, which
+ * also buys the thing neither of those can provide: real token-by-token deltas
+ * for the live view.
  *
  * Cost and token counts come from OpenRouter's `usage` object, which is included
  * automatically in the final SSE chunk of every response.
@@ -64,7 +65,7 @@ export async function callModel(req: ModelCallRequest): Promise<NodeResult> {
       authorization: `Bearer ${apiKey()}`,
       "content-type": "application/json",
       // Attribution headers OpenRouter asks integrations to send.
-      "x-title": "graph",
+      "x-title": "ensemble",
     },
     body: JSON.stringify({
       model,

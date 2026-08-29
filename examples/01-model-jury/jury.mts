@@ -6,7 +6,7 @@
 // them can be anchored by another's answer. Independence is the whole point.
 //
 // Every node here is runtime "model" (the default): a direct OpenRouter call.
-// No tools, no skills — so no opencode server is spawned at all for this scene.
+// No tools, no skills — pure model calls, no subprocess, nothing to install.
 import { scene } from "@ghostmind-dev/ensemble";
 
 const jurorPrompt = [

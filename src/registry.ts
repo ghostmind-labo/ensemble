@@ -56,6 +56,11 @@ export interface Registry {
  */
 export interface Sources {
   claudeSkills: boolean;
+  /**
+   * `.opencode/skills/` — still a real source, not leftover residue. It is the
+   * layout the `opencode` agent backend already reads, so a skill dropped there
+   * is seen by both our own loop and a rented one.
+   */
   opencodeSkills: boolean;
   agentsSkills: boolean;
   claudeMcp: boolean;

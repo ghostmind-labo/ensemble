@@ -2,6 +2,7 @@ import { parseArgs } from "node:util";
 import { existsSync } from "node:fs";
 import { loadRegistry } from "./registry.ts";
 import { loadScene, SceneError, runtimeOf } from "./scene.ts";
+import { RUNTIMES } from "./runtimes/index.ts";
 import { isProgram, ITERATION_EDGE } from "./autoresearch.ts";
 import { loadKeyFiles, hasApiKey, missingKeyMessage } from "./credentials.ts";
 import { runScene, readJournal, hashScene, cancelRun } from "./engine.ts";
@@ -155,7 +156,13 @@ async function cmdValidate(path: string | undefined): Promise<number> {
     // The scene is well-formed but cannot run: validate is the free pre-flight,
     // so a certain failure belongs here rather than after the first node spends.
     loadKeyFiles();
-    const callers = Object.entries(scene.nodes).filter(([, n]) => runtimeOf(scene, n) !== "ask");
+    // Which nodes actually need the key: ask the runtime object, never the name.
+    // "ask", "fn" and "experiment" all reach no model, so a scene made of them
+    // is runnable with no key at all — and an external agent backend needs one
+    // without being special-cased here.
+    const callers = Object.entries(scene.nodes).filter(
+      ([, n]) => RUNTIMES[runtimeOf(scene, n)]?.needsModel,
+    );
     if (callers.length > 0 && !hasApiKey()) {
       info("");
       error(missingKeyMessage());
@@ -868,8 +875,9 @@ async function main(): Promise<number> {
 
 /**
  * `serve` blocks forever by design; every other command should exit as soon as
- * its work is done. A run holds an SSE connection to opencode, and a stray open
- * handle would otherwise hang the process, so we exit explicitly after flushing.
+ * its work is done. A run may hold an open SSE connection or an MCP transport,
+ * and a stray handle would otherwise hang the process, so we exit explicitly
+ * after flushing.
  */
 function finish(code: number, keepAlive: boolean): void {
   process.exitCode = code;

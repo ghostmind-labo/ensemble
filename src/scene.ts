@@ -15,6 +15,9 @@ import type { Registry } from "./registry.ts";
 import type { SceneSpec, NodeSpec, EdgeSpec, State } from "./dsl.ts";
 import { CAPABILITIES } from "./capabilities.ts";
 import { RUNTIMES, COMMON_FIELDS } from "./runtimes/index.ts";
+// Mounts the shipped agent backend (runtime: "opencode"). Importing here means
+// every path that loads a scene knows about it — cli, serve and the MCP server.
+import "./agents/opencode.ts";
 
 export type { SceneSpec, NodeSpec, EdgeSpec, State };
 
@@ -79,6 +82,10 @@ const sceneSchema = z
         model: z.string().optional(),
         runtime: z.string().optional(),
         tools: z.record(z.boolean()).optional(),
+        // Granted to EVERY agent node, unioned with whatever the node names.
+        // The point is not having to re-list the same skill on ten nodes.
+        skills: z.array(z.string()).optional(),
+        mcp: z.array(z.string()).optional(),
         temperature: z.number().min(0).max(2).optional(),
       })
       .strict()
@@ -86,6 +93,7 @@ const sceneSchema = z
     nodes: z.record(nodeSchema),
     groups: z.record(z.array(z.string())).optional(),
     edges: z.array(edgeSchema).optional(),
+    edgeKind: z.string().optional(),
     entry: z.string(),
     exit: z.string().optional(),
   })

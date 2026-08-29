@@ -35,7 +35,7 @@ worth anything. The foreman is the only node that sees all three.
 
 | File | What it is |
 |---|---|
-| `jury.mts` | The scene — 4 nodes, 1 parallel group, 1 edge. Every node is `runtime: "model"` (a direct OpenRouter call), so **no opencode server is spawned at all** — and every juror streams its tokens live in `ensemble serve` |
+| `jury.mts` | The scene — 4 nodes, 1 parallel group, 1 edge. Every node is `runtime: "model"` (a direct OpenRouter call), so **no tools and no subprocess are involved at all** — and every juror streams its tokens live in `ensemble serve` |
 
 ---
 
@@ -57,10 +57,10 @@ Prefer to watch it happen:
 ensemble serve examples/01-model-jury    # opens a browser; nodes light up as they run
 ```
 
-> **Why from the root?** opencode treats your working directory as the project root
-> and installs ~61 MB of its own `node_modules` there. `cd`-ing into each example
-> gives every one of them its own copy. Running from the root keeps a single shared
-> one. Both work — this is disk, not correctness. (opencode gitignores it itself.)
+> **Why from the root?** The working directory is the project root — what file tools
+> are confined to, and where skills and MCP servers are discovered from. Running from
+> the root means every example sees the same one, and run artifacts collect in a
+> single `.ensemble/`.
 
 ### First, check your setup
 

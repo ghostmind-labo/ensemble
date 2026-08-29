@@ -1,0 +1,27 @@
+/**
+ * The evaluator. Lives OUTSIDE the artefact under study, on purpose.
+ *
+ * Rules it must keep:
+ *   - print a number the parser can find (last occurrence wins; `metric` names it)
+ *   - be deterministic — seed anything random, or the loop measures noise
+ *   - finish well inside `budget` — over budget is killed and scores NOTHING
+ *   - never be reachable from the artefact
+ *
+ * Exit code decides nothing. The metric does.
+ */
+import { isSpam as subject } from "./<artefact>.mjs";
+
+// Held out from the artefact. If it can read this, it will memorise it.
+const CASES = [
+  // { input: "...", expected: true },
+];
+
+let correct = 0;
+for (const { input, expected } of CASES) {
+  if (subject(input) === expected) correct++;
+}
+
+const score = CASES.length ? (correct / CASES.length) * 100 : 0;
+
+// The line the loop scrapes. Print it last.
+console.log(`score: ${score.toFixed(1)}`);

@@ -5,7 +5,7 @@
 //   write     runtime "agent"  — uses the project-local `release-notes` skill
 //
 // Note which nodes are which. Only the two that must *do* something pay for
-// opencode's ~8,800 tokens of scaffolding; the planner does not.
+// an external CLI's thousands of tokens of scaffolding; the planner does not.
 import { scene } from "@ghostmind-dev/ensemble";
 
 export default scene({
@@ -15,7 +15,7 @@ export default scene({
 
   nodes: {
     plan: {
-      // No runtime declared → "model" (the default). Pure HTTP, no opencode.
+      // No runtime declared → "model" (the default). Pure HTTP, no tools.
       model: "openrouter/google/gemini-2.5-flash",
       prompt: [
         "You are planning a small code audit. Given the goal, list the 3 most",
@@ -26,7 +26,7 @@ export default scene({
     },
 
     inspect: {
-      runtime: "agent", // ← opencode: gets tools + the MCP servers below
+      runtime: "agent", // ← our tool-calling loop: built-ins + the MCP servers below
       model: "openrouter/anthropic/claude-sonnet-5",
       mcp: ["fs"], // allowlist: only the `fs` server, nothing else
       skills: [], // no skills for this node
@@ -44,7 +44,7 @@ export default scene({
     },
 
     write: {
-      runtime: "agent", // ← opencode again, but scoped to a skill instead
+      runtime: "agent", // ← the same loop, but scoped to a skill instead
       mcp: [], // no MCP for this node — it should not touch the filesystem
       skills: ["release-notes"], // project-local skill, deny-all + this one
       prompt: [

@@ -15,16 +15,26 @@ The loop you own: **author a scene → `validate` (free) → `run` cheap → rea
 artifacts → revise the scene when the results say so.** Do not accept a weak result
 when a one-line change to a prompt, model, or threshold would fix it.
 
-## 0 · Is this autoresearch, a scene, or neither?
+## 0 · Route first: autoresearch, a scene, or neither?
 
-**Ask first: is the user trying to make one measurable thing better?** If there is
-(or can be) a command that scores it, this is **autoresearch** — use `research()` and
-`ensemble research` (§3), not a scene. Do not hand-author a propose/evaluate loop; the
-sealed mode exists so that the scaffolding is never a variable between experiments.
+**Ask before anything else: is the user trying to make ONE measurable thing
+better?** If there is (or could be) a command that scores it, this is
+**autoresearch**, not a scene — and two dedicated skills own it:
+
+| skill | for |
+|---|---|
+| **`autoresearch`** | the *concept* — what the loop is, why its constraints exist, and whether this goal qualifies |
+| **`autoresearch-build`** | the *implementation* — naming the three things, writing the evaluator, launching, reading `results.tsv` |
+
+Load those instead of continuing here. Do not hand-author an ordinary
+propose/evaluate scene: the sealed mode exists precisely so the scaffolding is not
+a variable between experiments, and a hand-rolled one throws that away. The single
+exception is §3's **escape hatch** — a jury of proposers, a human gate each round,
+or two metrics — which the sealed mode cannot express.
 
 If it is not that, ask whether it is a scene at all:
 
-## 0 · Should this be a scene at all?
+## 0.1 · Should this be a scene at all?
 
 Every scene costs real money on every run, so build one only when the shape of the
 work earns it. **One model answering one question is not a scene** — just answer it,
@@ -139,9 +149,12 @@ capability means adding an object — never editing the engine:
 |---|---|---|
 | node | a unit of work — the neuron | `nodes: {...}` in the scene |
 | edge | a connector — the synapse (`from`/`to`/`when`/`maxLoops`) | `edges: [...]` |
+| edge kind | how the NEXT edge is chosen | `registerEdgeKind({...})` |
 | schema | the shape a state key must respect | `state: {...}` (zod) |
 | runtime | how a node executes (fields + validation + park/call) | `registerRuntime({...})` |
 | tool | a capability offered to agent nodes | `registerTool({...})` |
+| agent | a coding-agent CLI, rented per node | `registerAgentBackend({...})` |
+| capability | a scene-level block (`research: {...}`) | `registerCapability({...})` |
 | store | where run artifacts go (files by default) | `runScene(..., { store })` |
 
 Built-in runtimes: `model` (stochastic neuron) / `agent` (tool-using) / `ask`
@@ -156,6 +169,12 @@ Free, instant, and held to the SAME `state` schema contract as model output —
 use it for arithmetic, formatting, tallies, and anything a model should never be
 paid to do. A throwing fn fails its node with the real message.
 
+Edge *selection* is an object too: `sequential` (declaration order, first match
+wins) is the default and the only built-in. `edgeKind: "..."` on the scene picks
+another; mount one with `registerEdgeKind({ name, summary, fields, select })`.
+The engine holds no edge branches — `maxLoops` counting, `when` evaluation and
+first-match all live in the kind.
+
 **Terminology — the condition on an edge is called `when`.** It is a
 function-valued *property* of the edge object, not a separately mounted object:
 in this paradigm, objects carry identity and composition, while functions are
@@ -164,11 +183,31 @@ the behaviour-carrying leaves on them (`edge.when`, `node.fn`, `runtime.call`,
 `fileRunStore` rather than replace it, or its runs stop being resumable (resume
 reads the journal from the run directory).
 
-Every `NodeSpec` field: `model`, `runtime` ("model" | "agent" | "ask"), `prompt`
-(system-style instruction), `question` (ask only), `inputs`, `outputs`, `skills`,
-`mcp`, `tools`, `maxTurns` (agent only, default 12), `temperature`, `description`.
-Scene-level: `name`, `description`, `state` (zod shapes — see below), `defaults`
-(`model`/`runtime`/`tools`/`temperature`), `nodes`, `groups`, `edges`, `entry`, `exit`.
+Every `NodeSpec` field: `model`, `runtime` ("model" | "agent" | "ask" | "fn"),
+`prompt` (system-style instruction), `question` (ask only), `fn` (fn only),
+`inputs`, `outputs`, `skills`, `mcp`, `tools`, `maxTurns` (agent only, default
+12), `temperature`, `description`. Scene-level: `name`, `description`, `state`
+(zod shapes — see below), `defaults`, `nodes`, `groups`, `edges`, `entry`, `exit`.
+
+**`defaults` is how you say something once for the whole scene.** It carries
+`model`, `runtime`, `temperature`, and three that reach every **agent** node:
+
+```ts
+defaults: {
+  model: "openrouter/anthropic/claude-sonnet-5",
+  skills: ["house-style"],      // GRANT: every agent node gets it, no re-listing
+  mcp: ["postgres"],            // GRANT: same
+  tools: { fetch_url: false },  // DISARM: scene-wide opt-out of a built-in
+},
+```
+
+The two directions are deliberate and opposite. `skills` and `mcp` are **grants
+and they union** — the scene list is a floor, a node adding its own widens it,
+and a node can never silently lose a scene-wide grant. `tools` is a **disarm**,
+because built-ins are all on already — so there the node-level map wins, and
+`tools: { fetch_url: true }` on one node opts back in. An unknown skill or
+server in `defaults` reports itself as `defaults (used by node "x")`, so you
+look in the right place.
 
 ### Typed state — pin the SHAPE of the blackboard (`state`)
 
@@ -273,9 +312,26 @@ the merge.
 - **`runtime: "model"` is the default** — one OpenRouter call, fast, streams. Model
   nodes may NOT declare `skills`/`mcp`/`tools`/`maxTurns` tooling (validation error).
 - **`runtime: "agent"`** loops — calls tools, reads results, calls more, until it
-  answers. Built-ins are read-only: `read_file`, `list_files`, `glob`, `grep`,
-  `fetch_url`; there is **no bash/write/edit** by design. Disable one with
-  `tools: { grep: false }`. Add MCP servers per node with `mcp: ["name"]`.
+  answers. Built-ins: `read_file`, `list_files`, `glob`, `grep`, `fetch_url`
+  (read) and `write_file`, `edit_file`, `bash` (write). All are confined to the
+  project root; `bash` also runs under a timeout with a process-group kill.
+  **`bash` does not sandbox the command itself** — a command that reaches
+  outside the root will do so, so disarm it where it has no business:
+  `defaults: { tools: { bash: false } }` for the scene, `tools: { bash: false }`
+  for one node. Use `bash` to VERIFY (run the tests you just changed), not just
+  to act. Add MCP servers per node with `mcp: ["name"]`, or scene-wide with
+  `defaults.mcp`.
+- **`runtime: "opencode"`** rents a real coding-agent CLI for ONE node. Reach for
+  it when a node must genuinely build something; stay on `"agent"` otherwise,
+  because an external CLI injects thousands of tokens of its own scaffolding per
+  call. Needs `opencode` on PATH (`brew install sst/tap/opencode`) — `ensemble
+  validate` says so before anything spends — and nothing else: it reads the same
+  `OPENROUTER_API_KEY`, and the scene's `defaults.skills`/`defaults.mcp` are
+  injected into it per call, so one grant covers both agents. Fields: `model`,
+  `prompt`, `skills`, `mcp`, `timeout` (seconds), `dir` (subdirectory of root).
+  Mount another CLI with `registerAgentBackend({ name, bin, command, parse })` —
+  the name becomes the runtime name. Never mount one that meters a first-party
+  consumer subscription; that violates the upstream terms when automated.
 - **`runtime: "ask"`** makes no model call at all — it **pauses the run** until
   someone supplies its `outputs`. Declares `question` (what to ask) and `outputs`
   (the state keys the answer must fill); never `model`/`prompt`/`mcp`/`skills`.
@@ -418,58 +474,22 @@ parallel group, one foreman synthesises with `consensus` / `dissent` / `stronges
 `feedback`; edge `when: (s) => Number(s["score"]) < TARGET, maxLoops: N` loops the
 feedback back into the worker (`inputs: ["feedback", "score"]`).
 
-**Autoresearch (improve ONE file against a code-graded metric) — USE THE SEALED MODE.**
-When the goal is "make X better" and X can be measured by a command, do NOT author a
-scene. Write a **program**: `research()` takes exactly three things and refuses
-everything else, and generates the loop for you.
+**Autoresearch (improve ONE file against a code-graded metric) — NOT A SCENE.**
+When the goal is "make X better" and a command can score X, do not author a scene.
+Two dedicated skills own this, and they are the source of truth:
 
-```ts
-import { research } from "@ghostmind-dev/ensemble";
+- **`autoresearch`** — the concept: the three things, why each constraint exists,
+  and whether the goal qualifies at all.
+- **`autoresearch-build`** — the implementation: seeding the artefact, writing the
+  evaluator, the program file, `ensemble research`, reading `results.tsv`.
 
-export default research({
-  modify:   "src/prompt.md",             // 1 · the ONE artefact that may change
-  evaluate: { command: "node bench.mjs", // 2 · how it is scored — code, never a judge
-              metric: "score",           //     default: last number in the output
-              minimize: false,           //     true for a loss
-              budget: "5m" },            //     per try; overrun = crash, not a longer try
-  instruction: `                         // 3 · the directive, constant forever
-Raise the score. Keep it a pure function. Generalisable changes only —
-hard-coding the benchmark's inputs is a fabricated result, not a finding.
-  `.trim(),
-});
-```
-
-```bash
-ensemble validate program.mts                        # free
-ensemble research program.mts --iterations 10        # NO goal argument
-```
-
-**Rules of the mode — do not try to route around these:**
-
-- **Three keys. Nothing else.** `nodes`, `edges`, `entry`, `exit`, `state`, `model`,
-  `prompt`, `iterations`, `threshold`, `name`, `goal` are all rejected by name with a
-  reason. They are not missing features; each one would be a confound that makes two
-  iterations incomparable.
-- **`ensemble research` takes no goal.** The directive lives in `instruction` and is
-  inlined verbatim every iteration. If the user gives you a goal sentence, it belongs
-  IN `instruction`, in the file.
-- **Session settings are flags, not keys:** `--iterations` (default 10), `--model`
-  (default sonnet), `--threshold` (default 0). Raise `--threshold` to the metric's
-  run-to-run spread whenever the metric is stochastic, or the loop will keep sampling
-  luck. Say this to the user when their metric involves a model or a timing.
-- **Write the `instruction` carefully — it is the whole prompt-engineering surface.**
-  State the objective, the invariants (purity, no I/O, don't touch the data), and
-  explicitly forbid special-casing the scorer. The proposer physically cannot edit the
-  evaluator, but it can still cheat *within* the artefact if you don't say not to.
-- **The evaluator must print a number** and be cheap enough to run every iteration.
-  If the user has no such command, building one is the first task — a loop without a
-  code-graded metric is not autoresearch, it is a vibe.
-- Read `results.tsv` when reporting: `iteration score best verdict ms note`. A
-  **revert is a result**, not a failure — say what was tried and rejected.
+Load one of those rather than improvising a propose/evaluate graph here. The one
+thing worth repeating: `ensemble research` takes **no goal argument** — the
+directive lives in `instruction`, in the file.
 
 **Escape hatch (only when the sealed mode genuinely cannot express the experiment** —
 a jury of proposers, a human gate each round, two metrics): drop to `scene()` with a
-scene-level `research` block and `runtime: "experiment"`, which is the same machinery
+scene-level `research` block and `runtime: "experiment"` — the same machinery
 with the guardrails off:
 
 ```ts
@@ -494,11 +514,15 @@ edges: [
 entry: "experiment", exit: "experiment",   // first pass = baseline, nothing to keep/revert
 ```
 
-Both forms buy the same enforcement: agent nodes get `write_file`/`edit_file` scoped
-to the artefact (they have NO write tools otherwise); the experiment node snapshots the
-incumbent, measures under the budget, keeps only a candidate that beats `best` by more
-than the threshold, restores the incumbent on revert or crash, and logs every try.
-`examples/05-autoresearch` is a complete, cheap instance of the sealed mode.
+Both forms buy the same enforcement: agent nodes get `write_file`/`edit_file`
+**narrowed** to the artefact — they override the general built-ins of the same name —
+and `bash` is withdrawn entirely, since a proposer that can shell out can rewrite its
+own evaluator. The experiment node snapshots the incumbent, measures under the budget,
+keeps only a candidate that beats `best` by more than the threshold, restores the
+incumbent on revert or crash, and logs every try.
+[`examples/05-autoresearch`](https://github.com/ghostmind-labo/ensemble/tree/main/examples/05-autoresearch) in the ensemble repo is a
+complete, cheap instance of the sealed mode. (Repo paths, not the user's project — do
+not try to read them locally unless you are inside a checkout of ensemble.)
 
 **Pipeline with rejection** — research → parallel review (critic + factchecker) →
 write, with `verdict === "reject"` looping back, capped by `maxLoops`.
@@ -507,7 +531,8 @@ write, with `verdict === "reject"` looping back, capped by `maxLoops`.
 node inside a `maxLoops` cycle parks EVERY round; a generator node writes fresh
 content each pass and the pause's context carries it to the answerer. Score or
 history accumulates on the blackboard across pauses. See
-`dev/.ensemble/scenes/trivia.mts` in the repo for a complete 5-round quiz.
+[`dev/.ensemble/scenes/trivia.mts`](https://github.com/ghostmind-labo/ensemble/tree/main/dev/.ensemble/scenes/trivia.mts) in the ensemble
+repo for a complete 5-round quiz.
 
 **Human — or agent — in the loop (`runtime: "ask"`)** — a node that stops the run and
 waits for an answer. The canonical shape is an approval gate:
@@ -611,7 +636,7 @@ ENSEMBLE_AGENT_PROMPT=/path/to/block.md ensemble run scene.mts "goal"
 ```
 
 The file replaces the built-in "how to use your tools" block (keep the literal
-`{toolCount}` placeholder). The repo's `bench/` is an autoresearch loop that
+`{toolCount}` placeholder). The ensemble repo's [`bench/`](https://github.com/ghostmind-labo/ensemble/tree/main/bench) is an autoresearch loop that
 measures candidates against 12 code-graded tasks and keeps only variants that beat
 the incumbent by more than the measured noise floor. Reach for this only if a user
 has a specific, repeated complaint about agent-node behaviour — the default is tuned.

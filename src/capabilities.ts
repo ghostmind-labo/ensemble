@@ -39,6 +39,17 @@ export interface CapabilityObject<V = unknown> {
    * because a research scene loops by design).
    */
   tune?: (value: V) => { maxNodeRuns?: number; timeoutMs?: number };
+  /**
+   * Built-in tools WITHDRAWN from every agent node while this capability is
+   * active — the counterpart to `tools`, and just as necessary.
+   *
+   * A capability that narrows the world has to be able to close doors, not
+   * only open them. Research mode is the case in point: it scopes writes to
+   * the artefact under study, which is worthless if the proposer can still
+   * reach `bash` and rewrite its own evaluator. Withdrawal beats denial —
+   * the tool is absent from the request, so there is no allowlist to defeat.
+   */
+  withdraws?: (value: V) => string[];
 }
 
 export const CAPABILITIES: Record<string, CapabilityObject> = {};

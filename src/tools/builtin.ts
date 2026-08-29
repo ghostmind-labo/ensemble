@@ -1,17 +1,31 @@
 /**
  * Built-in tools.
  *
- * Deliberately **read-only and few**. There is no `bash`, no `write`, no `edit`.
- * (The one exception is research mode — see research.ts — where a scene names
- * the single artefact under study and agents get write tools scoped to it.)
- * A shell tool is the single largest attack surface an agent can have, and a
- * hastily-written one is worse than none — anything that needs to mutate the
- * world should go through an MCP server whose author sandboxed it on purpose.
+ * Five read-only (`read_file`, `list_files`, `glob`, `grep`, `fetch_url`) and
+ * three that mutate (`write_file`, `edit_file`, `bash`).
  *
- * Every path is confined to the run's root directory.
+ * The write tools were held back for a long time on the argument that a shell
+ * is the single largest attack surface an agent can have. That argument is
+ * still true; what changed is the conclusion. Without them an agent node could
+ * read and report but never *build*, which meant the only way to get real work
+ * done was to rent someone else's coding agent — and renting one costs both
+ * money and control of the prompt. The bet is that a small, confined, auditable
+ * write surface we own beats a large one we do not.
+ *
+ * The confinement is the whole safety story, so it is worth stating plainly:
+ * every path goes through `confine()` and cannot leave the root, and `bash`
+ * runs with `cwd` at the root under a wall-clock timeout with a process-group
+ * kill. `bash` does NOT sandbox the command itself — a command that reaches
+ * outside the root (curl, ssh, a global npm install) will do so. Disarm it
+ * scene-wide with `defaults: { tools: { bash: false } }`, or per node.
+ *
+ * Research mode deliberately narrows this: it replaces `write_file`/`edit_file`
+ * with versions scoped to the artefact under study and removes `bash` outright,
+ * because a proposer that can shell out can rewrite its own evaluator.
  */
-import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
-import { resolve, join, relative, sep } from "node:path";
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, existsSync } from "node:fs";
+import { resolve, join, relative, dirname, sep } from "node:path";
+import { spawnBounded } from "../process.ts";
 
 export interface BuiltinTool {
   name: string;
@@ -37,6 +51,14 @@ function confine(root: string, candidate: string): string {
  * with a narrower query.
  */
 const MAX_BYTES = 20_000;
+
+/**
+ * How long a `bash` command may run before it is killed, and the ceiling on a
+ * per-call override. Long enough for a test suite, short enough that a command
+ * waiting on input dies rather than consuming the node's whole wall clock.
+ */
+const BASH_TIMEOUT_MS = 120_000;
+const BASH_TIMEOUT_MAX_MS = 600_000;
 
 /** Turns `**\/*.ts` style patterns into a RegExp. Supports **, *, ?. */
 function globToRegExp(pattern: string): RegExp {
@@ -210,6 +232,90 @@ export const BUILTIN_TOOLS: BuiltinTool[] = [
       } catch (err) {
         return `fetch failed: ${err instanceof Error ? err.message : String(err)}`;
       }
+    },
+  },
+  /* ─────────────────────────── the write half ─────────────────────────── */
+  {
+    name: "write_file",
+    description:
+      "Write a file, replacing it entirely if it exists. Creates parent directories. " +
+      "Confined to the project root. Prefer edit_file for a small change to a large file.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Path relative to the project root" },
+        content: { type: "string", description: "The complete new file contents" },
+      },
+      required: ["path", "content"],
+    },
+    run: (args, root) => {
+      const file = confine(root, String(args["path"] ?? ""));
+      const content = String(args["content"] ?? "");
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, content, "utf8");
+      return `wrote ${relative(root, file)} (${content.length} chars)`;
+    },
+  },
+  {
+    name: "edit_file",
+    description:
+      "Replace one exact, unique snippet in a file with new text. Fails if the snippet is " +
+      "missing or appears more than once — widen it to disambiguate. Confined to the project root.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Path relative to the project root" },
+        find: { type: "string", description: "Exact text to replace (must occur exactly once)" },
+        replace: { type: "string", description: "Replacement text" },
+      },
+      required: ["path", "find", "replace"],
+    },
+    run: (args, root) => {
+      const file = confine(root, String(args["path"] ?? ""));
+      const find = String(args["find"] ?? "");
+      if (!find) return "find must not be empty";
+      if (!existsSync(file)) return `no such file: ${relative(root, file)} — use write_file to create it`;
+      const body = readFileSync(file, "utf8");
+      const first = body.indexOf(find);
+      if (first === -1) return `snippet not found in ${relative(root, file)} — read the file and copy the text exactly`;
+      if (body.indexOf(find, first + 1) !== -1) {
+        return `snippet occurs more than once in ${relative(root, file)} — include more surrounding text`;
+      }
+      writeFileSync(file, body.slice(0, first) + String(args["replace"] ?? "") + body.slice(first + find.length), "utf8");
+      return `edited ${relative(root, file)}`;
+    },
+  },
+  {
+    name: "bash",
+    description:
+      "Run a shell command from the project root and return its combined output. " +
+      "Use it to build, test, typecheck, or inspect — this is how you VERIFY a change " +
+      "you just made rather than assuming it worked. Times out; there is no interactive " +
+      "input, so never run a command that waits for a prompt.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        command: { type: "string", description: "The shell command, e.g. \"npm test\"" },
+        timeout: { type: "number", description: `Seconds before the command is killed (default ${BASH_TIMEOUT_MS / 1000})` },
+      },
+      required: ["command"],
+    },
+    run: async (args, root) => {
+      const command = String(args["command"] ?? "").trim();
+      if (!command) return "command must not be empty";
+      const seconds = Number(args["timeout"]);
+      const timeoutMs = Number.isFinite(seconds) && seconds > 0
+        ? Math.min(seconds * 1000, BASH_TIMEOUT_MAX_MS)
+        : BASH_TIMEOUT_MS;
+
+      const res = await spawnBounded(command, { cwd: root, timeoutMs, shell: true, maxOutput: MAX_BYTES });
+      // Exit status is part of the answer, not an exception: a failing test run
+      // is exactly the signal the agent asked for.
+      const status = res.timedOut
+        ? `timed out after ${Math.round(res.ms / 1000)}s (killed)`
+        : `exit ${res.exitCode ?? "signal"}`;
+      const body = res.output.trim();
+      return body ? `[${status}]\n${body}` : `[${status}] (no output)`;
     },
   },
 ];

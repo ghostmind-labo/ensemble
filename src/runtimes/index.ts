@@ -52,13 +52,22 @@ export interface RuntimeParkArgs {
 export interface RuntimeCallArgs {
   node: string;
   spec: NodeSpec;
-  defaults: { model?: string; temperature?: number };
+  /** Scene-level defaults. `tools` is merged under the node's own map. */
+  defaults: {
+    model?: string;
+    temperature?: number;
+    tools?: Record<string, boolean>;
+    skills?: string[];
+    mcp?: string[];
+  };
   messages: Array<{ role: "user" | "assistant"; content: string }>;
   registry: Registry;
   hub: () => Promise<McpHub>;
   root: string;
   /** Tools contributed by the scene's active capabilities (e.g. research's scoped writes). */
   extraTools?: BuiltinTool[];
+  /** Built-in tool names an active capability has withdrawn (e.g. research removes bash). */
+  withdrawnTools?: string[];
   costLimit?: number;
   onDelta: (delta: string) => void;
   onToolCall: (event: ToolCallEvent) => void;
@@ -89,7 +98,7 @@ export interface RuntimeObject {
   /** Runtime-specific validation problems (messages, not exceptions). */
   check?: (name: string, spec: NodeSpec, scene: Scene, registry: Registry) => string[];
   /** MCP servers a node of this runtime wants prewarmed (engine connects lazily). */
-  mcpServers?: (spec: NodeSpec) => string[];
+  mcpServers?: (spec: NodeSpec, scene: Scene) => string[];
   /** Waiting runtimes: park the run or pass through — no model call. */
   park?: (args: RuntimeParkArgs) => { values: State } | { pending: PendingAsk };
   /** Computing runtimes: a deterministic function over state — no model call. */
@@ -134,6 +143,18 @@ const modelRuntime: RuntimeObject = {
 
 /* ────────────────────────────── agent ────────────────────────────── */
 
+/**
+ * Scene-wide grants union with the node's own — they are not overridden.
+ *
+ * `defaults: { skills: ["house-style"] }` means every agent node has it without
+ * re-listing it ten times; a node adding `skills: ["sql"]` gets both. Union
+ * rather than override because these are *grants*: the scene-level list is the
+ * floor, and a node can only widen it. (Built-in `tools` work the other way —
+ * they are all on by default, so there the node-level map overrides.)
+ */
+const granted = (nodeList: string[] | undefined, sceneList: string[] | undefined): string[] =>
+  [...new Set([...(sceneList ?? []), ...(nodeList ?? [])])];
+
 const agentRuntime: RuntimeObject = {
   name: "agent",
   summary: "our tool-calling loop: built-ins + allowlisted MCP — pure do",
@@ -148,28 +169,33 @@ const agentRuntime: RuntimeObject = {
     tools: z.record(z.boolean()),
     maxTurns: z.number().int().positive().max(50),
   },
-  mcpServers: (spec) => spec.mcp ?? [],
-  check: (name, spec, _defaults, registry) => {
+  mcpServers: (spec, scene) => granted(spec.mcp, scene?.defaults.mcp),
+  check: (name, spec, scene, registry) => {
     const problems: string[] = [];
-    for (const skill of spec.skills ?? []) {
+    // A grant that came from defaults is named as such, so the fix is obvious
+    // when the offending list is nowhere near the node that reports it.
+    const where = (list: string[] | undefined, item: string): string =>
+      (list ?? []).includes(item) ? `node "${name}"` : `defaults (used by node "${name}")`;
+
+    for (const skill of granted(spec.skills, scene.defaults.skills)) {
       if (!registry.skills.has(skill)) {
         const known = [...registry.skills.keys()].sort().join(", ") || "none installed";
-        problems.push(`node "${name}" requests unknown skill "${skill}" — registry has: ${known}`);
+        problems.push(`${where(spec.skills, skill)} requests unknown skill "${skill}" — registry has: ${known}`);
       }
     }
-    for (const server of spec.mcp ?? []) {
+    for (const server of granted(spec.mcp, scene.defaults.mcp)) {
       if (!registry.mcp.has(server)) {
         const known = [...registry.mcp.keys()].sort().join(", ") || "none configured";
-        problems.push(`node "${name}" requests unknown MCP server "${server}" — registry has: ${known}`);
+        problems.push(`${where(spec.mcp, server)} requests unknown MCP server "${server}" — registry has: ${known}`);
       }
     }
     return problems;
   },
   call: async (a) => {
     const temperature = a.spec.temperature ?? a.defaults.temperature;
-    const wanted = a.spec.mcp ?? [];
+    const wanted = granted(a.spec.mcp, a.defaults.mcp);
     const hub = wanted.length > 0 ? await a.hub() : undefined;
-    const skills = (a.spec.skills ?? [])
+    const skills = granted(a.spec.skills, a.defaults.skills)
       .map((name) => a.registry.skills.get(name))
       .filter((s): s is Skill => Boolean(s));
 
@@ -181,7 +207,14 @@ const agentRuntime: RuntimeObject = {
       ...(a.costLimit !== undefined ? { costLimit: a.costLimit } : {}),
       mcp: wanted,
       // `tools: { grep: false }` opts a built-in out; default is all of them.
-      builtins: BUILTIN_TOOLS.map((tool) => tool.name).filter((n) => a.spec.tools?.[n] !== false),
+      // Scene defaults first, node second — so `defaults: { tools: { bash: false } }`
+      // disarms a tool across every agent node and a node can still opt back in.
+      // A capability's withdrawal is not a default a node can argue with: it is
+      // the scene declaring that this tool has no business in this run.
+      builtins: BUILTIN_TOOLS.map((tool) => tool.name).filter(
+        (n) => !(a.withdrawnTools ?? []).includes(n)
+          && (a.spec.tools?.[n] ?? a.defaults.tools?.[n]) !== false,
+      ),
       // Capability-contributed tools (research's scoped writes are the first).
       // Per-node opt-out works the same way as for built-ins.
       extraTools: (a.extraTools ?? []).filter((t) => a.spec.tools?.[t.name] !== false),

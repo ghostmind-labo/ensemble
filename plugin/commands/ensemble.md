@@ -3,18 +3,22 @@ description: Author or run a multi-model agent scene with @ghostmind-dev/ensembl
 argument-hint: "[what the ensemble should do, or a scene file + goal]"
 ---
 
-Use the **ensemble** skill (bundled with this plugin) to handle this request.
-
 The user wants to work with `@ghostmind-dev/ensemble` — multi-model agent scenes. Their
 arguments (if any): $ARGUMENTS
 
-Follow the skill's workflow:
+**0a. Route before doing anything else.** Is the user trying to make ONE measurable
+   thing better, where a command can score it? Then this is autoresearch, not a scene:
 
-0a. **First decide: is this autoresearch?** If the user wants ONE measurable thing made
-   better and a command can score it, use the sealed mode — `research({ modify,
-   evaluate, instruction })` and `ensemble research <file>` — never a hand-authored
-   loop. It accepts exactly those three keys and refuses all others by design, and the
-   command takes no goal argument (the directive lives in `instruction`).
+   - to explain the method, when it applies, or why it refuses something →
+     load the **`autoresearch`** skill (the concept)
+   - to actually build, launch, resume or interpret a loop →
+     load the **`autoresearch-build`** skill (the implementation)
+
+   Never hand-author a propose/evaluate loop as a scene. The sealed mode exists so the
+   scaffolding is not a variable between experiments.
+
+   Otherwise, use the **ensemble** skill (bundled with this plugin) and follow its
+   workflow:
 
 0. If the `ensemble` MCP tools are available (run_scene, run_status, …), prefer them
    over the CLI — runs start async and can be peeked, stopped, and resumed as tools.

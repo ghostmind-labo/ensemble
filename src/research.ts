@@ -26,12 +26,12 @@
  * engine. `experiment` is a runtime OBJECT like `fn`; the write tools are
  * ordinary built-in tool objects, assembled per node with a path allowlist.
  */
-import { spawn } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from "node:fs";
 import { basename, join, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import type { State } from "./dsl.ts";
 import type { BuiltinTool } from "./tools/builtin.ts";
+import { spawnBounded } from "./process.ts";
 import type { RuntimeObject } from "./runtimes/index.ts";
 import { registerCapability, type CapabilityObject } from "./capabilities.ts";
 
@@ -116,48 +116,24 @@ export interface MeasureResult {
 }
 
 /** Runs the measure command under the budget; never throws — a crash is a result. */
-export function measure(r: ResearchSpec, root: string, signal?: AbortSignal): Promise<MeasureResult> {
-  const budgetMs = parseBudget(r.budget);
-  return new Promise((done) => {
-    const started = Date.now();
-    // Detached = its own process group, so the kill reaches everything the
-    // shell started. Killing only the shell would leave a training script
-    // running past the budget with the pipes still open.
-    const child = spawn(r.measure, { cwd: root, shell: true, detached: true, stdio: ["ignore", "pipe", "pipe"] });
-    const kill = (sig: NodeJS.Signals): void => {
-      try {
-        if (child.pid) process.kill(-child.pid, sig);
-        else child.kill(sig);
-      } catch {
-        // already gone
-      }
-    };
-    let output = "";
-    let timedOut = false;
-    const keep = (chunk: Buffer): void => {
-      output += chunk.toString("utf8");
-      if (output.length > 200_000) output = output.slice(-200_000);
-    };
-    child.stdout.on("data", keep);
-    child.stderr.on("data", keep);
-    const timer = setTimeout(() => {
-      timedOut = true;
-      kill("SIGTERM");
-      setTimeout(() => kill("SIGKILL"), 5000).unref();
-    }, budgetMs);
-    const onAbort = (): void => kill("SIGTERM");
-    signal?.addEventListener("abort", onAbort, { once: true });
-    child.on("close", (exitCode) => {
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", onAbort);
-      const score = timedOut ? undefined : parseMetric(output, r.metric);
-      done({ ...(score !== undefined && Number.isFinite(score) ? { score } : {}), output, ms: Date.now() - started, timedOut, exitCode });
-    });
-    child.on("error", (err) => {
-      clearTimeout(timer);
-      done({ output: `${output}\n${err.message}`, ms: Date.now() - started, timedOut, exitCode: null });
-    });
+export async function measure(r: ResearchSpec, root: string, signal?: AbortSignal): Promise<MeasureResult> {
+  const res = await spawnBounded(r.measure, {
+    cwd: root,
+    timeoutMs: parseBudget(r.budget),
+    shell: true,
+    ...(signal ? { signal } : {}),
   });
+  // A timed-out run has no score by definition: whatever it printed before the
+  // kill describes an unfinished experiment, and scoring it would reward
+  // whichever candidate happened to print early.
+  const score = res.timedOut ? undefined : parseMetric(res.output, r.metric);
+  return {
+    ...(score !== undefined && Number.isFinite(score) ? { score } : {}),
+    output: res.output,
+    ms: res.ms,
+    timedOut: res.timedOut,
+    exitCode: res.exitCode,
+  };
 }
 
 /* ───────────────────────── the incumbent snapshot ───────────────────────── */
@@ -412,6 +388,13 @@ export const researchCapability: CapabilityObject<ResearchSpec> = {
     return problems;
   },
   tools: (value, { runDir }) => researchTools(value, runDir),
+  // The scoped write tools above are pointless if the proposer can shell out:
+  // `bash` would let it edit the evaluator, install a package, or `mv` the
+  // artefact — every cheat the artefact scoping exists to prevent. An
+  // experiment is measured by code the agent cannot touch, or it is not an
+  // experiment. The measure command itself still runs; that is the experiment
+  // runtime's job, not a tool the model can reach.
+  withdraws: () => ["bash"],
   tune: () => ({ maxNodeRuns: 10_000, timeoutMs: 24 * 60 * 60_000 }),
 };
 

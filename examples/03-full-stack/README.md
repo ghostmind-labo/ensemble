@@ -128,7 +128,7 @@ reporting that a glob for `tsconfig*.json` found nothing. **The skill really sha
 the output** — the `write` node produced notes in the house style, and no other node
 could see that skill.
 
-**Zero subprocesses.** `pgrep opencode` during the run: 0.
+**Zero subprocesses.** `pgrep opencode` during the run: 0 — this scene rents nothing.
 
 ---
 

@@ -58,6 +58,18 @@
   .runrow b { font-weight: 600; color: var(--fg); font-size: 11px; }
   .runrow span { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .runrow .when { margin-left: auto; color: var(--muted); }
+  /* Small header affordances. The runs list is machine-wide by design, which is
+     right for finding a run and wrong for reading one scene — so scope is a
+     toggle rather than a decision made for you. */
+  .section.runsec { display: flex; align-items: center; gap: 6px; }
+  .mini {
+    margin-left: auto; font-size: 9px; font-family: var(--mono); cursor: pointer;
+    background: transparent; color: var(--muted); border: 1px solid var(--line);
+    border-radius: 4px; padding: 1px 6px; line-height: 1.5;
+  }
+  .mini + .mini { margin-left: 0; }
+  .mini:hover { color: var(--fg); border-color: var(--muted); }
+  .mini.on { color: var(--accent); border-color: var(--accent); }
   .scene {
     padding: 8px 16px; cursor: pointer; border-left: 2px solid transparent;
     display: flex; flex-direction: column; gap: 1px;
@@ -97,6 +109,13 @@
   .toolbar {
     flex: none; z-index: 5; display: flex; gap: 8px; align-items: center;
     padding: 20px 24px 14px; background: var(--bg);
+  }
+  /* Only shown when the scene overrides the default selection strategy — a
+     non-default edge kind changes where the run goes next, so it belongs beside
+     the Run button rather than buried in a panel. */
+  #edgekind {
+    font-family: var(--mono); font-size: 10px; padding: 2px 7px; border-radius: 4px;
+    background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent);
   }
   .toolbar input[type=text] {
     flex: 1; padding: 8px 11px; border: 1px solid var(--line); border-radius: 8px;
@@ -178,7 +197,14 @@
   .edge { stroke: var(--line); stroke-width: 1.6; fill: none; }
   .edge.back { stroke-dasharray: 5 4; }
   .edge.hot { stroke: var(--accent); stroke-width: 2.4; }
-  .elabel { font-size: 10px; fill: var(--muted); font-family: var(--mono); }
+  /* A condition is a thing ON the graph, not a caption. Drawn as a chip so it
+     reads at a glance and cannot be lost against a node behind it. */
+  .echip text { font-size: 10px; font-family: var(--mono); }
+  .echip rect { fill: var(--bg); stroke: var(--line); stroke-width: 1; }
+  .echip.cond rect { stroke: var(--accent); fill: color-mix(in srgb, var(--accent) 20%, var(--bg)); }
+  .echip.cond text { fill: var(--accent); }
+  .echip.loop rect { stroke: var(--warn); fill: color-mix(in srgb, var(--warn) 20%, var(--bg)); }
+  .echip.loop text { fill: var(--warn); }
 
   /* ---------- console ---------- */
   /* The work panel lives on the RIGHT: Log/State/Costs/Runs/Source and the node
@@ -286,8 +312,13 @@
   .srcbar { display: flex; gap: 10px; align-items: center; padding: 8px 12px; border-top: 1px solid var(--line); }
   .srcbar .hint { font-size: 11px; color: var(--muted); }
   .badge { font-size: 9px; padding: 1px 5px; border-radius: 4px; margin-left: auto; font-family: var(--mono); }
-  .badge.model { background: var(--accent-soft); color: var(--accent); }
-  .badge.agent { background: color-mix(in srgb, var(--warn) 15%, transparent); color: var(--warn); }
+  /* Coloured by what a node COSTS, not by its name — a runtime registered by a
+     library user gets the right colour without the viewer knowing it exists. */
+  .badge.call   { background: var(--accent-soft); color: var(--accent); }
+  .badge.loop   { background: color-mix(in srgb, var(--warn) 15%, transparent); color: var(--warn); }
+  .badge.rented { background: color-mix(in srgb, var(--warn) 28%, transparent); color: var(--warn); font-weight: 600; }
+  .badge.free   { background: color-mix(in srgb, var(--ok, #3fb950) 15%, transparent); color: var(--ok, #3fb950); }
+  .badge.wait   { background: color-mix(in srgb, var(--muted) 20%, transparent); color: var(--muted); }
   .node.waiting { opacity: .55; }
   .node .wait { margin-top: 6px; font-size: 10px; color: var(--muted); }
   .stream { font-family: var(--mono); font-size: 10.5px; color: var(--muted); margin-top: 7px;
@@ -337,7 +368,10 @@
   <div class="brand">ensemble<small id="conn">connecting…</small></div>
   <div class="section">Scenes</div>
   <div class="scenes" id="scenes"></div>
-  <div class="section runsec">Runs <span id="runcount"></span></div>
+  <div class="section runsec">Runs <span id="runcount"></span>
+    <button class="mini" id="runscope" title="Show only runs of the selected scene, or every run on this machine">this scene</button>
+    <button class="mini" id="refresh" title="Reload scenes and runs (r)">↻</button>
+  </div>
   <div class="scenes" id="runlist"></div>
   <div class="reg" id="registry"></div>
 </aside>
@@ -348,6 +382,7 @@
     <input type="number" id="budget" placeholder="$ cap" min="0" step="0.05"
            title="Optional hard cost cap (USD) for this run">
     <span id="spend" hidden></span>
+    <span id="edgekind" hidden title="How the next node is chosen after each step"></span>
     <button class="primary" id="run">Run</button>
     <button id="stop" disabled>Stop</button>
     <span id="zoombar">
@@ -411,6 +446,9 @@ const state = {
   stepAt: 0,          // which step the Timeline is showing
   lastTarget: null,
   zoom: Number(localStorage.getItem("ensemble:zoom")) || 1,
+  // "scene" (default) or "all". Persisted: whichever you prefer, you prefer it
+  // every time, and re-choosing it on each reload is friction for no reason.
+  runScope: localStorage.getItem("ensemble:runScope") || "scene",
 };
 
 // ---------------------------------------------------------------- zoom
@@ -722,12 +760,33 @@ async function loadRuns() {
       p.scenes.flatMap((s) => s.runs.map((run) => ({ ...run, project: p.label, here: p.project === r.thisProject }))),
     ).sort((a, b) => (a.startedAt < b.startedAt ? 1 : -1));
 
-    state.runList = all.map((x) => x.runId);
-    $("runcount").textContent = all.length ? String(all.length) : "";
+    // Machine-wide is right for FINDING a run and wrong for READING one scene:
+    // a few real runs drown in a few hundred from tests and other projects.
+    // Scoped by default, with the full list one click away.
+    const scene = state.layout?.name;
+    const scoped = state.runScope === "scene" && scene
+      ? all.filter((run) => run.scene === scene)
+      : all;
+
+    const scopeBtn = $("runscope");
+    if (scopeBtn) {
+      scopeBtn.textContent = state.runScope === "scene" ? "this scene" : "all";
+      scopeBtn.classList.toggle("on", state.runScope === "scene");
+      scopeBtn.title = state.runScope === "scene"
+        ? `Showing ${scoped.length} of ${all.length} runs — click for every run on this machine`
+        : `Showing all ${all.length} runs — click to scope to the selected scene`;
+    }
+
+    state.runList = scoped.map((x) => x.runId);
+    $("runcount").textContent = scoped.length
+      ? (scoped.length === all.length ? String(all.length) : `${scoped.length}/${all.length}`)
+      : "";
     renderCtx();
 
-    if (all.length === 0) {
-      pane.innerHTML = '<div class="empty" style="padding:12px">No runs yet.</div>';
+    if (scoped.length === 0) {
+      pane.innerHTML = all.length
+        ? `<div class="empty" style="padding:12px">No runs of this scene yet — ${all.length} elsewhere.</div>`
+        : '<div class="empty" style="padding:12px">No runs yet.</div>';
       return;
     }
 
@@ -735,7 +794,7 @@ async function loadRuns() {
       const d = new Date(iso);
       return Number.isNaN(+d) ? "" : `${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`;
     };
-    pane.innerHTML = all.map((run) => `
+    pane.innerHTML = scoped.map((run) => `
       <div class="runrow ${esc(run.status)} ${state.viewingRun === run.runId ? "sel" : ""}"
            data-run="${esc(run.runId)}" title="${esc(run.runId)} · ${esc(run.runDir)}">
         <span class="dot"></span>
@@ -845,6 +904,7 @@ async function select(file) {
   $("srctext").value = data.source ?? "";
   draw();
   centerGraph();   // a different scene is the one case that re-frames the view
+  loadRuns();      // the runs list is scoped to the selected scene, so re-scope it
 }
 
 // ---------------------------------------------------------------- render
@@ -874,16 +934,30 @@ function nodeCard(n) {
   const stat = st?.meta ? `<div class="stat">${esc(st.meta)}</div>` : "";
   const live = st?.state === "running" && st.stream
     ? `<div class="stream" data-stream="${esc(n.name)}">${esc(st.stream.slice(-800))}</div>` : "";
-  const badge = `<span class="badge ${n.runtime}">${n.runtime === "agent" ? "⛭ agent" : "⚡ model"}</span>`;
+  // The runtime object supplies its own glyph and summary; the viewer no longer
+  // guesses. Before this, every fn / ask / experiment / rented node rendered as
+  // "⚡ model", which was simply false.
+  const badge = `<span class="badge ${n.cost}" title="${esc(n.summary || "")}">${esc(n.badge || "•")} ${esc(n.runtime)}</span>`;
   return `<div class="node ${cls} ${state.selected === n.name ? "sel" : ""}" data-node="${esc(n.name)}">
     <div class="nm"><span class="dot"></span>${esc(n.name)}${badge}</div>
-    <div class="md">${esc(n.model.replace(/^openrouter\//, ""))}</div>
+    ${n.cost === "free" || n.cost === "wait" ? "" : `<div class="md">${esc(n.model.replace(/^openrouter\//, ""))}</div>`}
     ${skills}${wait}${stat}${live}
   </div>`;
 }
 
 function draw() {
   if (!state.layout) return;
+
+  // "sequential" is the default and saying so would be noise; anything else
+  // changes where the run goes next and must be visible.
+  const ek = $("edgekind");
+  const kind = state.layout.edgeKind;
+  if (ek) {
+    const custom = kind && kind !== "sequential";
+    ek.hidden = !custom;
+    if (custom) ek.textContent = `edges: ${kind}`;
+  }
+
   const layers = new Map();
   for (const t of state.layout.targets) {
     if (!layers.has(t.layer)) layers.set(t.layer, []);
@@ -999,7 +1073,9 @@ function wires() {
       const x = Math.min(a.x, b.x) - 30;
       const ay = a.y + a.h / 2, by = b.y + b.h / 2;
       d = `M ${a.x} ${ay} C ${x} ${ay}, ${x} ${by}, ${b.x} ${by}`;
-      lx = x + 4; ly = (ay + by) / 2;
+      // Centred ON the curve. Anchored 4px left of the leftmost node, a chip
+      // fell outside the drawn area and clipped against the node behind it.
+      lx = x + 26; ly = (ay + by) / 2;
     } else {
       const ax = a.x + a.w / 2, ay = a.y + a.h;
       const bx = b.x + b.w / 2, by = b.y;
@@ -1009,10 +1085,27 @@ function wires() {
     }
 
     parts.push(`<path class="edge ${e.back ? "back" : ""} ${hot ? "hot" : ""}" d="${d}" marker-end="url(#arw)"/>`);
-    if (e.when) {
-      const label = e.when + (e.maxLoops ? ` ⟲${e.maxLoops}` : "");
-      parts.push(`<text class="elabel" x="${lx}" y="${ly}">${esc(label)}</text>`);
-    }
+    // A loop budget is worth seeing even on an unconditional edge — an edge with
+    // maxLoops and no `when` used to draw no label at all, hiding the one thing
+    // that decides whether the run terminates.
+    // Each is its own chip: an `if` you cannot see is an `if` you will misread,
+    // and a loop budget decides whether the run terminates at all. Stacked, so
+    // a conditional loop shows both without one hiding the other.
+    const chips = [];
+    if (e.when) chips.push({ text: `if ${e.when}`, cls: "cond" });
+    if (e.maxLoops) chips.push({ text: `⟲ max ${e.maxLoops}`, cls: "loop" });
+
+    const top = ly - (chips.length - 1) * 11;
+    chips.forEach((chip, i) => {
+      const label = chip.text.length > 34 ? `${chip.text.slice(0, 33)}…` : chip.text;
+      const w = label.length * 6.1 + 14;
+      const cy = top + i * 22;
+      parts.push(
+        `<g class="echip ${chip.cls}"><title>${esc(chip.text)}</title>` +
+        `<rect x="${lx - w / 2}" y="${cy - 9}" width="${w}" height="18" rx="9"/>` +
+        `<text x="${lx}" y="${cy + 3.5}" text-anchor="middle">${esc(label)}</text></g>`,
+      );
+    });
   }
 
   svg.innerHTML =
@@ -1034,8 +1127,17 @@ function inspect(name) {
   if (!node) return;
   const st = state.status.get(name);
   const row = (k, v) => v ? `<dt>${k}</dt><dd>${esc(v)}</dd>` : "";
+  const COST = {
+    free:   "free — deterministic, no model call",
+    call:   "one model call",
+    loop:   "a tool-calling loop — many calls",
+    rented: "spawns an external agent CLI (its own scaffolding, its own spend)",
+    wait:   "no model call — the run pauses here",
+  };
   $("inspect").innerHTML = `<h3>${esc(node.name)}</h3><dl>
-    ${row("model", node.model)}
+    ${row("runtime", `${node.badge || ""} ${node.runtime}${node.summary ? ` — ${node.summary}` : ""}`)}
+    ${row("cost", COST[node.cost] || node.cost)}
+    ${node.cost === "free" || node.cost === "wait" ? "" : row("model", node.model)}
     ${row("skills", node.skills.join(", ") || "none")}
     ${row("mcp", node.mcp.join(", ") || "none")}
     ${row("inputs", node.inputs.join(", ") || "—")}
@@ -1167,7 +1269,7 @@ function onEvent(e) {
       state.spent += e.cost;
       updateSpend();
       if (!state.viewingRun) renderCosts();   // do not clobber a run being inspected
-      // opencode gives no incremental text, so the reply lands here in one piece.
+      // Agent and backend nodes do not stream, so the reply lands here in one piece.
       if (e.text) log(esc(e.text.trim()), "m");
       log(`└ ${esc(e.node)} ${e.ok ? "ok" : "failed"} <span class="m">${esc(meta)}</span>`, e.ok ? "g" : "r");
       if (!e.ok && e.error) log(`  ${esc(e.error)}`, "r");
@@ -1377,6 +1479,16 @@ function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, (ch) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
 }
+
+// Refresh: the viewer hot-reloads scene FILES, but a run started from the CLI,
+// an agent over MCP, or another project only lands in the index — so there has
+// to be a way to pull without reloading the page and losing the live socket.
+$("refresh").onclick = () => { loadScenes(); loadRegistry(); loadRuns(); };
+$("runscope").onclick = () => {
+  state.runScope = state.runScope === "scene" ? "all" : "scene";
+  localStorage.setItem("ensemble:runScope", state.runScope);
+  loadRuns();
+};
 
 loadScenes(); loadRegistry(); loadRuns(); renderCtx(); connect();
 </script>

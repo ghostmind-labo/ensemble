@@ -139,12 +139,21 @@ export interface SceneSpec<S extends StateSchema = StateSchema> {
     model?: string;
     runtime?: NodeRuntime;
     tools?: Record<string, boolean>;
+    /** Skills granted to every agent node, unioned with the node's own list. */
+    skills?: string[];
+    /** MCP servers granted to every agent node, unioned with the node's own. */
+    mcp?: string[];
     temperature?: number;
   };
   nodes: Record<string, NodeSpec>;
   /** Named sets of nodes that run concurrently, with a fan-in barrier. */
   groups?: Record<string, string[]>;
   edges?: Array<EdgeSpec<S>>;
+  /**
+   * How the next edge is chosen. Default "sequential": declaration order,
+   * first match wins. Mount another with `registerEdgeKind({...})`.
+   */
+  edgeKind?: string;
   entry: string;
   exit?: string;
 }

@@ -2,10 +2,14 @@
  * The shared blackboard passed between nodes, plus the extraction layer that
  * turns free-form model output into typed state.
  *
- * Why parsing and not structured output: @opencode-ai/sdk 1.18.15's prompt body
- * has no `format` field (verified in dist/gen/types.gen.d.ts), so JSON-schema
- * enforcement is unavailable. We ask for a trailing ```json fence, parse it, and
- * reprompt once with the parser error if it does not arrive.
+ * Why parsing and not structured output: a text contract is the portable floor.
+ * OpenRouter does support `response_format`, but not every model behind it does,
+ * and an agent-backend node is a CLI subprocess whose output we do not control
+ * at all — so the one thing that works everywhere is asking for a trailing
+ * ```json fence, parsing it, and reprompting once with the parser error if it
+ * does not arrive. (The original reason was narrower: the SDK we used to drive
+ * had no `format` field. That SDK is gone; the conclusion outlived it, and
+ * renting agents again makes the portable floor matter more, not less.)
  */
 
 export type State = Record<string, unknown>;

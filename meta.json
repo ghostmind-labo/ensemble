@@ -48,7 +48,7 @@
                 },
                 {
                   "name": "shell",
-                  "description": "Free shell for ad-hoc work \u2014 editing scenes, inspecting .ensemble/runs/<id>/state.json, or checking `opencode models`. Kept empty so the run pane is never interrupted."
+                  "description": "Free shell for ad-hoc work \u2014 editing scenes, inspecting .ensemble/runs/<id>/state.json, or checking `ensemble models`. Kept empty so the run pane is never interrupted."
                 }
               ]
             }
