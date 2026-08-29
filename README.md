@@ -593,11 +593,29 @@ An agent node **loops** — call tools, read results, call more, until it can an
 `maxTurns` (default 12) bounds it. Tool calls the model requests together run
 concurrently.
 
-**Built-in tools** are read-only by design: `read_file`, `list_files`, `glob`, `grep`,
-`fetch_url`. There is deliberately **no `bash`, no `write`, no `edit`** — a shell tool
-is the largest attack surface an agent can have, and anything that must mutate the
-world should go through an MCP server whose author sandboxed it on purpose. Every path
-is confined to the project root. Opt one out with `tools: { grep: false }`.
+**Built-in tools** come in two halves. Read: `read_file`, `list_files`, `glob`,
+`grep`, `fetch_url`. Write: `write_file`, `edit_file`, `bash`.
+
+The write half was held back for a long time on the argument that a shell is the
+largest attack surface an agent can have. That is still true; what changed is the
+conclusion. Without it an agent node could read and report but never *build*, so the
+only way to do real work was to rent someone else's coding agent — which costs money
+and control of the prompt. A small, confined, auditable write surface we own beats a
+large one we do not.
+
+Every path is confined to the project root, and `bash` runs from the root under a
+timeout with a process-group kill. But **`bash` does not sandbox the command** — a
+command that reaches outside the root (`curl`, `ssh`, a global install) will do so.
+Disarm it where it has no business:
+
+```ts
+defaults: { tools: { bash: false } },   // the whole scene
+tools: { bash: false },                 // one node
+```
+
+Research mode does this for you: it withdraws `bash` outright and replaces the write
+tools with versions scoped to the artefact under study, because a proposer that can
+shell out can rewrite its own evaluator.
 
 **MCP servers** live in `ensemble.json` (project) or `~/.config/ensemble/ensemble.json`
 (global):

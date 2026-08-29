@@ -212,9 +212,16 @@ export async function callAgent(req: AgentCallRequest): Promise<NodeResult & { t
   const model = apiModel(req.model);
 
   // --- assemble this node's tools. Omission is the access control. ---
+  //
+  // A capability's tool REPLACES a built-in of the same name rather than
+  // sitting behind it: research mode ships a `write_file` scoped to the one
+  // artefact under study, and it must be the one that runs. Appending would
+  // leave the general built-in first, and first is what dispatch finds.
+  const extra = req.extraTools ?? [];
+  const overridden = new Set(extra.map((t) => t.name));
   const builtins: BuiltinTool[] = [
-    ...BUILTIN_TOOLS.filter((t) => req.builtins.includes(t.name)),
-    ...(req.extraTools ?? []),
+    ...BUILTIN_TOOLS.filter((t) => req.builtins.includes(t.name) && !overridden.has(t.name)),
+    ...extra,
   ];
   const mcpTools: McpTool[] = req.hub ? req.hub.toolsFor(req.mcp) : [];
 

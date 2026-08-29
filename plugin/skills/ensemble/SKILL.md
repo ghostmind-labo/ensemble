@@ -293,9 +293,15 @@ the merge.
 - **`runtime: "model"` is the default** — one OpenRouter call, fast, streams. Model
   nodes may NOT declare `skills`/`mcp`/`tools`/`maxTurns` tooling (validation error).
 - **`runtime: "agent"`** loops — calls tools, reads results, calls more, until it
-  answers. Built-ins are read-only: `read_file`, `list_files`, `glob`, `grep`,
-  `fetch_url`; there is **no bash/write/edit** by design. Disable one with
-  `tools: { grep: false }`. Add MCP servers per node with `mcp: ["name"]`.
+  answers. Built-ins: `read_file`, `list_files`, `glob`, `grep`, `fetch_url`
+  (read) and `write_file`, `edit_file`, `bash` (write). All are confined to the
+  project root; `bash` also runs under a timeout with a process-group kill.
+  **`bash` does not sandbox the command itself** — a command that reaches
+  outside the root will do so, so disarm it where it has no business:
+  `defaults: { tools: { bash: false } }` for the scene, `tools: { bash: false }`
+  for one node. Use `bash` to VERIFY (run the tests you just changed), not just
+  to act. Add MCP servers per node with `mcp: ["name"]`, or scene-wide with
+  `defaults.mcp`.
 - **`runtime: "ask"`** makes no model call at all — it **pauses the run** until
   someone supplies its `outputs`. Declares `question` (what to ask) and `outputs`
   (the state keys the answer must fill); never `model`/`prompt`/`mcp`/`skills`.

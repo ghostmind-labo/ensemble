@@ -66,6 +66,8 @@ export interface RuntimeCallArgs {
   root: string;
   /** Tools contributed by the scene's active capabilities (e.g. research's scoped writes). */
   extraTools?: BuiltinTool[];
+  /** Built-in tool names an active capability has withdrawn (e.g. research removes bash). */
+  withdrawnTools?: string[];
   costLimit?: number;
   onDelta: (delta: string) => void;
   onToolCall: (event: ToolCallEvent) => void;
@@ -207,8 +209,11 @@ const agentRuntime: RuntimeObject = {
       // `tools: { grep: false }` opts a built-in out; default is all of them.
       // Scene defaults first, node second — so `defaults: { tools: { bash: false } }`
       // disarms a tool across every agent node and a node can still opt back in.
+      // A capability's withdrawal is not a default a node can argue with: it is
+      // the scene declaring that this tool has no business in this run.
       builtins: BUILTIN_TOOLS.map((tool) => tool.name).filter(
-        (n) => (a.spec.tools?.[n] ?? a.defaults.tools?.[n]) !== false,
+        (n) => !(a.withdrawnTools ?? []).includes(n)
+          && (a.spec.tools?.[n] ?? a.defaults.tools?.[n]) !== false,
       ),
       // Capability-contributed tools (research's scoped writes are the first).
       // Per-node opt-out works the same way as for built-ins.

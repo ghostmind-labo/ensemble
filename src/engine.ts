@@ -301,6 +301,8 @@ interface NodeCallCtx {
   capabilities: Record<string, unknown>;
   /** Tools contributed by active capabilities, offered to every agent node. */
   capabilityTools: import("./tools/builtin.ts").BuiltinTool[];
+  /** Built-in tool names an active capability has withdrawn from every node. */
+  capabilityWithdraws: string[];
   signal?: AbortSignal;
 }
 
@@ -325,6 +327,7 @@ async function callOnce(
     hub: () => ctx.hub.get(),
     root: resolve(process.cwd()),
     ...(ctx.capabilityTools.length > 0 ? { extraTools: ctx.capabilityTools } : {}),
+    ...(ctx.capabilityWithdraws.length > 0 ? { withdrawnTools: ctx.capabilityWithdraws } : {}),
     ...(costLimit !== undefined ? { costLimit } : {}),
     onDelta: (delta) => ctx.emit({ type: "node:delta", node, delta }),
     onToolCall: (event) => ctx.emit({ type: "node:tool", node, ...event }),
@@ -657,6 +660,7 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
     runDir,
     capabilities: Object.fromEntries(capsActive.map(({ cap, value }) => [cap.name, value])),
     capabilityTools: capsActive.flatMap(({ cap, value }) => cap.tools?.(value, { runDir }) ?? []),
+    capabilityWithdraws: capsActive.flatMap(({ cap, value }) => cap.withdraws?.(value) ?? []),
     ...(opts.signal ? { signal: opts.signal } : {}),
   };
 
