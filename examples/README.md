@@ -12,6 +12,7 @@ look like.
 | [03](./03-full-stack) | **Full Stack** — model node plans, agent node reads files via MCP, agent node applies a skill | Both runtimes · MCP setup · skills · where config lives · measured agent overhead | $0.04 |
 | [04](./04-decision-council) | **Decision Council** — orchestrator, four teams, an adjudicating gate | Composition at scale · 15 nodes | — |
 | [05](./05-autoresearch) | **Autoresearch** — an agent improves one file against a code-graded metric; keep or revert, logged | The sealed `research()` mode · `ensemble research` · scoped write tools · time budget · `results.tsv` | ~$0.03/iter |
+| [06](./06-rented-research) | **Rented Research** — the same loop, but **opencode** proposes the changes | Agent backends (`runtime: "opencode"`) · the research escape hatch · `dir` as the safety boundary · a tie reverts | $0.01 for 5 iterations |
 
 ## Before running any of them
 

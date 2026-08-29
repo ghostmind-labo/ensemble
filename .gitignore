@@ -29,3 +29,7 @@ examples/**/.opencode/node_modules/
 # autoresearch run artifacts (baseline.md and best.md ARE tracked)
 bench/prompts/candidate-*.md
 bench/log.jsonl
+
+# Research-loop ledgers are run artifacts: regenerated on every run, and
+# committing one would make a rerun look like a diff.
+examples/**/results.tsv
