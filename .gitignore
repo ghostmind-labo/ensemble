@@ -14,9 +14,6 @@ dev/.ensemble/node_modules/
 # it stays out of git. `plugin/.mcp.json` (the one that ships) is NOT ignored.
 /.mcp.json
 
-# Generated opencode agents — derived from scenes, never hand-edited.
-.opencode/agents/ensemble-*.md
-
 # opencode installs its own ~61MB dependency tree per project root.
 # It writes its own .opencode/.gitignore too; this is belt and braces.
 .opencode/node_modules/

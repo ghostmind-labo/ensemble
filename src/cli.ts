@@ -875,8 +875,9 @@ async function main(): Promise<number> {
 
 /**
  * `serve` blocks forever by design; every other command should exit as soon as
- * its work is done. A run holds an SSE connection to opencode, and a stray open
- * handle would otherwise hang the process, so we exit explicitly after flushing.
+ * its work is done. A run may hold an open SSE connection or an MCP transport,
+ * and a stray handle would otherwise hang the process, so we exit explicitly
+ * after flushing.
  */
 function finish(code: number, keepAlive: boolean): void {
   process.exitCode = code;

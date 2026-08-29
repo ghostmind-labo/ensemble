@@ -1,5 +1,5 @@
 /**
- * The "agent" runtime — our own tool-calling loop. No opencode, no subprocess.
+ * The "agent" runtime — our own tool-calling loop. No subprocess, no rented agent.
  *
  * The mechanism is a `while`: send the model its tools, execute whatever it asks
  * for, feed the results back, repeat until it answers with content instead of

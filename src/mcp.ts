@@ -1,7 +1,7 @@
 /**
  * Native MCP client.
  *
- * Replaces the opencode dependency for tool access. Servers are declared in
+ * Our own client, so tool access needs no external agent. Servers are declared in
  * `ensemble.json` (project, then global) and connected on demand — a scene with
  * no MCP nodes never starts a server.
  *

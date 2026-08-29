@@ -3,7 +3,8 @@
  *
  * Both runtimes call OpenRouter, so both need `OPENROUTER_API_KEY`; there is no
  * alternative provider path. (An older message claimed a node could "go through
- * opencode" instead — opencode was removed, and that advice never worked.)
+ * opencode" instead, advice that never worked and named a dependency we no
+ * longer have.)
  *
  * The subtle failure this module exists for: an MCP server is spawned by its
  * host, so it inherits the host's environment at launch. A key exported in some

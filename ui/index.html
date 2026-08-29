@@ -1167,7 +1167,7 @@ function onEvent(e) {
       state.spent += e.cost;
       updateSpend();
       if (!state.viewingRun) renderCosts();   // do not clobber a run being inspected
-      // opencode gives no incremental text, so the reply lands here in one piece.
+      // Agent and backend nodes do not stream, so the reply lands here in one piece.
       if (e.text) log(esc(e.text.trim()), "m");
       log(`└ ${esc(e.node)} ${e.ok ? "ok" : "failed"} <span class="m">${esc(meta)}</span>`, e.ok ? "g" : "r");
       if (!e.ok && e.error) log(`  ${esc(e.error)}`, "r");
