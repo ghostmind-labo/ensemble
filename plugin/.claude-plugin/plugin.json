@@ -1,6 +1,6 @@
 {
   "name": "ensemble",
-  "version": "0.21.0",
+  "version": "0.22.0",
   "description": "Author, run, observe, and revise multi-model agent scenes with @ghostmind-dev/ensemble \u2014 including sealed autoresearch loops that iterate one artefact toward a measured goal. Bundles the ensemble MCP server \u2014 installing the plugin is all the setup there is.",
   "author": {
     "name": "ghostmind",
