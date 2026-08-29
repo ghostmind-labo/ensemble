@@ -14,7 +14,7 @@ across model versions, temperature, and a prompt that reads differently once the
 artefact is longer, so iteration 40 stops being comparable to iteration 3, and
 nothing tells you it happened.
 
-Tracked as issue #28. Doing it properly means a pinned rubric, a pinned judge
+Tracked as [ensemble issue #28](https://github.com/ghostmind-labo/ensemble/issues/28). Doing it properly means a pinned rubric, a pinned judge
 model, temperature 0, median-of-N, and active drift detection — a real design,
 not a config flag.
 
@@ -35,6 +35,11 @@ If two things vary and the number moves, you have learned nothing about either.
 `modify` accepts an array, but only for paths that **must move together** — a file
 and its header. Genuinely independent knobs mean you have not decided what the
 experiment is yet.
+
+Note the distinction: several *artefacts* is usually a confused experiment,
+whereas several *proposers*, a human gate, or two metrics are legitimate shapes
+the sealed mode simply cannot express — those get the escape hatch
+(`runtime: "experiment"`), documented in `autoresearch-build`.
 
 ## You want a decision, not an optimisation
 

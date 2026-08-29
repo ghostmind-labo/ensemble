@@ -1,15 +1,14 @@
 ---
 name: autoresearch
 description: >-
-  The autoresearch philosophy — Karpathy's overnight experiment loop, and how it shapes
-  ensemble. Explains WHAT a research loop is and WHY its constraints exist: one artefact
-  may change, one command scores it, one instruction never varies, and every change is
-  kept or reverted against a code-graded number. Use this skill to decide whether a goal
-  is a research loop at all, to understand why the sealed mode refuses things, or when
-  the user says "autoresearch", "Karpathy", "iterate until it's good", "keep trying until
-  it improves", "optimize this overnight", "loop until the score goes up", or asks how
-  ensemble thinks about self-improving workflows. This skill is the CONCEPT; to actually
-  build and run one, use the `autoresearch-build` skill instead.
+  The autoresearch METHOD — Karpathy's overnight experiment loop, and why its constraints
+  exist. Explains what a research loop is, why only one artefact may change, why the
+  budget is fixed, why the metric must be code and not a judge, and whether a given goal
+  qualifies as a research loop at all. Use when the user asks "what is autoresearch",
+  "why can only one file change", "why won't it let me set X", "is this even a research
+  loop", "should this be a loop or a scene", questions the design, or mentions Karpathy.
+  This skill is the WHY, and it is not enough to build from — to create, launch, resume
+  or interpret an actual loop, use the `autoresearch-build` skill.
 ---
 
 # The autoresearch philosophy
@@ -113,13 +112,21 @@ Be honest about this up front:
 **No, when:**
 
 - *You cannot score it with code.* "Make this page nice", "write a good skill" —
-  a real gap, tracked in issue #28. Do not fake it by having the evaluator call a
+  a real gap, tracked in [ensemble issue #28](https://github.com/ghostmind-labo/ensemble/issues/28). Do not fake it by having the evaluator call a
   model and print a number; that satisfies the parser and quietly destroys the
   ledger.
 - *One run is expensive or slow.* Ten experiments is not a search, and if each
   costs an hour the fixed-budget logic stops paying for itself.
 - *Several things must change together.* Then either it is one artefact spread
   across a few files (`modify` accepts an array), or it is not a loop yet.
+
+**"The sealed mode refuses it" is not "ensemble cannot do it."** Three real
+experiment shapes fall outside the three keys — a jury of proposers, a human gate
+each round, and two metrics traded off. Those drop to a `scene()` with a
+scene-level `research: {}` block and `runtime: "experiment"`: the same
+measure/keep/revert machinery with the guardrails off. See the "escape hatch"
+section in `autoresearch-build`, and reach for it only when one of those three
+actually applies.
 - *You want a decision, not an optimisation.* Many models weighing one question is
   a **jury**; stages that each refine the last is a **pipeline**. Both are
   ordinary `scene()` graphs. Load the `ensemble` skill for those.

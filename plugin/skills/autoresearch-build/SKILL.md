@@ -1,15 +1,16 @@
 ---
 name: autoresearch-build
 description: >-
-  Build and run an autoresearch loop with ensemble — the implementation half. Takes a goal
-  from "I want X to get better" to a running, resumable loop: name the three things, seed
-  the artefact, write an evaluator that prints a scrapeable number, write the sealed program
-  file, validate for free, launch with `ensemble research`, then read results.tsv and revise
-  the INSTRUCTION. Use when the user wants to actually create, set up, launch, debug, resume
-  or interpret a research loop, says "build me an autoresearch", "set up the loop", "make it
-  iterate on X", "run the experiment", "why did it revert", "read the results", or hands you
-  a .mts file using `research({...})`. For WHY the loop is shaped this way, load the
-  `autoresearch` skill first.
+  Build and run an autoresearch loop with ensemble. Takes a goal from "I want X to get
+  better" to a running, resumable loop: name the three things, seed the artefact, write an
+  evaluator that prints a scrapeable number, write the sealed program file, launch with
+  `ensemble research`, then read results.tsv. Use whenever the user wants a loop that
+  improves something measurable — "iterate until it's good", "keep trying until it
+  improves", "optimize this overnight", "loop until the score goes up", "make it iterate
+  on X", "build me an autoresearch", "set up the loop", "run the experiment", "why did it
+  revert", "read the results" — or hands you a .mts file using `research({...})`. If the
+  user instead asks WHY a constraint exists, or whether their goal qualifies as a loop at
+  all, load the `autoresearch` skill.
 ---
 
 # Building an autoresearch loop
@@ -35,7 +36,7 @@ echo "${OPENROUTER_API_KEY:+set}"   # the only credential
 Do this in prose with the user before writing any file. If you cannot fill all
 three lines, you are not ready.
 
-```
+```text
 modify      — ONE artefact (a path, or a few paths that must move together)
 evaluate    — a shell command that prints a number
 instruction — what to aim for, and what is off limits
@@ -88,7 +89,7 @@ export default research({
     command: "node path/to/measure.mjs",
     metric: "score",        // omit → the last number printed
     minimize: false,        // true when lower is better (a loss)
-    budget: "30s",          // wall clock per experiment
+    budget: "5m",           // wall clock per experiment (this is the default)
   },
 
   instruction: `
@@ -148,11 +149,29 @@ When the run disappoints, the fix is almost always one of:
 Do **not** reach into the artefact by hand, and do not edit the instruction
 mid-run. Both invalidate every row above them in the ledger.
 
+## When the seal genuinely does not fit
+
+The sealed mode is narrow on purpose, but "the mode refuses it" is not the same as
+"ensemble cannot do it." Three shapes are real experiments the three keys cannot
+express:
+
+- **a jury of proposers** — several models proposing, not one
+- **a human gate each round** — approval before every experiment runs
+- **two metrics** — a trade-off rather than a single scalar
+
+For these, drop to `scene()` with a scene-level `research: {}` block and
+`runtime: "experiment"` — the same measure/keep/revert machinery with the
+guardrails off. The `ensemble` skill documents that form under "Escape hatch".
+
+Reach for it only when one of the above actually applies. You are giving up the
+property that makes the sealed mode worth having: that the scaffolding is not a
+variable between experiments.
+
 ## Common failures
 
 | Symptom | Cause |
 |---|---|
-| `research.edit names "x" but it does not exist` | seed the artefact (step 2) |
+| `research.edit names "x" but it does not exist` | seed the artefact (step 2). `research.edit` **is** your `modify` key — the sealed mode compiles to the scene-level block, whose key is `edit` |
 | every iteration reverts | threshold too high, metric too noisy, or instruction too vague |
 | score jumps then plateaus instantly | the agent found a shortcut — read the diff, then forbid it |
 | the metric improves but the thing got worse | the metric is wrong; this is the real failure mode |
@@ -160,8 +179,12 @@ mid-run. Both invalidate every row above them in the ledger.
 
 ## Worked example
 
-`examples/05-autoresearch/` is a complete, cheap one: a spam heuristic
-(`heuristic.mjs`) scored by 24 labelled messages (`measure.mjs`), baseline 54.2.
-Read `research.mts` — it is 30 lines and shows the shape of a good `instruction`,
-including the explicit "hard-coding the sample sentences is a fabricated result,
-not a finding."
+A complete, cheap one lives in the ensemble repo at
+<https://github.com/ghostmind-labo/ensemble/tree/main/examples/05-autoresearch>:
+a spam heuristic (`heuristic.mjs`) scored by 24 labelled messages
+(`measure.mjs`), baseline 54.2. Its `research.mts` is 30 lines and shows the
+shape of a good `instruction`, including the explicit "hard-coding the sample
+sentences is a fabricated result, not a finding."
+
+(Those paths are in the ensemble repo, not in the user's project — do not try to
+read them locally unless you are working inside a checkout of ensemble itself.)

@@ -82,7 +82,7 @@ Exit code decides nothing. A non-zero exit that still printed a number counts.
 ## When code genuinely cannot score it
 
 Do **not** have the evaluator call a model and print its verdict. It satisfies
-the parser and destroys the ledger — see issue #28, which tracks doing this
+the parser and destroys the ledger — see [ensemble issue #28](https://github.com/ghostmind-labo/ensemble/issues/28), which tracks doing this
 properly with a pinned rubric, a pinned judge, and drift detection.
 
 Until then, the honest options are: find a proxy that code *can* measure, score a

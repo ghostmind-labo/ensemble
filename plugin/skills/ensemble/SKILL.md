@@ -26,9 +26,11 @@ better?** If there is (or could be) a command that scores it, this is
 | **`autoresearch`** | the *concept* — what the loop is, why its constraints exist, and whether this goal qualifies |
 | **`autoresearch-build`** | the *implementation* — naming the three things, writing the evaluator, launching, reading `results.tsv` |
 
-Load those instead of continuing here. Never hand-author a propose/evaluate loop
-as a scene: the sealed mode exists precisely so the scaffolding is not a variable
-between experiments, and a hand-rolled one throws that away.
+Load those instead of continuing here. Do not hand-author an ordinary
+propose/evaluate scene: the sealed mode exists precisely so the scaffolding is not
+a variable between experiments, and a hand-rolled one throws that away. The single
+exception is §3's **escape hatch** — a jury of proposers, a human gate each round,
+or two metrics — which the sealed mode cannot express.
 
 If it is not that, ask whether it is a scene at all:
 
@@ -518,7 +520,9 @@ and `bash` is withdrawn entirely, since a proposer that can shell out can rewrit
 own evaluator. The experiment node snapshots the incumbent, measures under the budget,
 keeps only a candidate that beats `best` by more than the threshold, restores the
 incumbent on revert or crash, and logs every try.
-`examples/05-autoresearch` is a complete, cheap instance of the sealed mode.
+[`examples/05-autoresearch`](https://github.com/ghostmind-labo/ensemble/tree/main/examples/05-autoresearch) in the ensemble repo is a
+complete, cheap instance of the sealed mode. (Repo paths, not the user's project — do
+not try to read them locally unless you are inside a checkout of ensemble.)
 
 **Pipeline with rejection** — research → parallel review (critic + factchecker) →
 write, with `verdict === "reject"` looping back, capped by `maxLoops`.
@@ -527,7 +531,8 @@ write, with `verdict === "reject"` looping back, capped by `maxLoops`.
 node inside a `maxLoops` cycle parks EVERY round; a generator node writes fresh
 content each pass and the pause's context carries it to the answerer. Score or
 history accumulates on the blackboard across pauses. See
-`dev/.ensemble/scenes/trivia.mts` in the repo for a complete 5-round quiz.
+[`dev/.ensemble/scenes/trivia.mts`](https://github.com/ghostmind-labo/ensemble/tree/main/dev/.ensemble/scenes/trivia.mts) in the ensemble
+repo for a complete 5-round quiz.
 
 **Human — or agent — in the loop (`runtime: "ask"`)** — a node that stops the run and
 waits for an answer. The canonical shape is an approval gate:
@@ -631,7 +636,7 @@ ENSEMBLE_AGENT_PROMPT=/path/to/block.md ensemble run scene.mts "goal"
 ```
 
 The file replaces the built-in "how to use your tools" block (keep the literal
-`{toolCount}` placeholder). The repo's `bench/` is an autoresearch loop that
+`{toolCount}` placeholder). The ensemble repo's [`bench/`](https://github.com/ghostmind-labo/ensemble/tree/main/bench) is an autoresearch loop that
 measures candidates against 12 code-graded tasks and keeps only variants that beat
 the incumbent by more than the measured noise floor. Reach for this only if a user
 has a specific, repeated complaint about agent-node behaviour — the default is tuned.
