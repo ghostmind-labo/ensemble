@@ -929,15 +929,31 @@ registerCapability({
 // with zero engine or validator edits.
 ```
 
-So the registries are: **runtimes** (what a node can be), **tools** (what an agent
-can do), **capabilities** (what a scene can declare), **stores** (where artifacts
-go), **sinks** (who watches). The engine is a walk over a blackboard; everything
-else arrives as a block.
+Since 0.21, **edge selection** is an object too. `sequential` — declaration
+order, first match wins, per-index `maxLoops` — is the default and was lifted
+verbatim out of the engine, which now holds no edge branches at all:
+
+```ts
+registerEdgeKind({
+  name: "fanout",
+  summary: "take every matching edge",
+  fields: {},
+  select: ({ edges, cursor, state, emit }) => { /* ... */ },
+});
+// scenes may now declare { edgeKind: "fanout" }
+```
+
+So the registries are: **runtimes** (what a node can be), **agent backends** (whose
+coding loop a node rents), **tools** (what an agent can do), **edge kinds** (how the
+next node is chosen), **capabilities** (what a scene can declare), **stores** (where
+artifacts go), **sinks** (who watches). The engine is a walk over a blackboard;
+everything else arrives as a block.
 
 Since 0.18 the same is true of **tools** (`registerTool({...})` — offered to every
 agent node) and the **run store** (`runScene(..., { store })` — every artifact write
 goes through a store object; wrap `fileRunStore` to mirror runs elsewhere while
-keeping them resumable). The engine contains zero runtime-name branches.
+keeping them resumable). The engine contains zero runtime-name branches, and since
+0.21 zero edge branches either.
 
 The payoff is that adding a capability means adding an object:
 

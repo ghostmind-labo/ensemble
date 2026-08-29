@@ -149,6 +149,11 @@ export interface SceneSpec<S extends StateSchema = StateSchema> {
   /** Named sets of nodes that run concurrently, with a fan-in barrier. */
   groups?: Record<string, string[]>;
   edges?: Array<EdgeSpec<S>>;
+  /**
+   * How the next edge is chosen. Default "sequential": declaration order,
+   * first match wins. Mount another with `registerEdgeKind({...})`.
+   */
+  edgeKind?: string;
   entry: string;
   exit?: string;
 }

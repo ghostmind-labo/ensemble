@@ -9,7 +9,7 @@
 import type { Scene } from "./scene.ts";
 import { runtimeOf } from "./scene.ts";
 import { RUNTIMES } from "./runtimes/index.ts";
-import { conditionLabel } from "./engine.ts";
+import { conditionLabel } from "./edges.ts";
 import { c } from "./log.ts";
 
 /** `openrouter/anthropic/claude-haiku-4.5` → `anthropic/claude-haiku-4.5` */

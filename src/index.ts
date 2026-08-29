@@ -56,6 +56,10 @@ export { opencodeBackend } from "./agents/opencode.ts";
 export { spawnBounded } from "./process.ts";
 export type { BoundedResult, BoundedOptions } from "./process.ts";
 
+// --- edges: how the next node is chosen, as an object ------------------------
+export { registerEdgeKind, EDGE_KINDS, sequentialEdges, conditionLabel } from "./edges.ts";
+export type { EdgeKind, EdgeSelectArgs, EdgeSelection } from "./edges.ts";
+
 // --- capabilities: what a SCENE can declare, as objects -----------------------
 export { registerCapability, CAPABILITIES, activeCapabilities } from "./capabilities.ts";
 export type { CapabilityObject } from "./capabilities.ts";

@@ -93,6 +93,7 @@ const sceneSchema = z
     nodes: z.record(nodeSchema),
     groups: z.record(z.array(z.string())).optional(),
     edges: z.array(edgeSchema).optional(),
+    edgeKind: z.string().optional(),
     entry: z.string(),
     exit: z.string().optional(),
   })

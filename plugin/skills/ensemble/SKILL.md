@@ -139,6 +139,7 @@ capability means adding an object — never editing the engine:
 |---|---|---|
 | node | a unit of work — the neuron | `nodes: {...}` in the scene |
 | edge | a connector — the synapse (`from`/`to`/`when`/`maxLoops`) | `edges: [...]` |
+| edge kind | how the NEXT edge is chosen | `registerEdgeKind({...})` |
 | schema | the shape a state key must respect | `state: {...}` (zod) |
 | runtime | how a node executes (fields + validation + park/call) | `registerRuntime({...})` |
 | tool | a capability offered to agent nodes | `registerTool({...})` |
@@ -157,6 +158,12 @@ counter: { runtime: "fn", fn: (s) => ({ round: Number(s.round) + 1 }),
 Free, instant, and held to the SAME `state` schema contract as model output —
 use it for arithmetic, formatting, tallies, and anything a model should never be
 paid to do. A throwing fn fails its node with the real message.
+
+Edge *selection* is an object too: `sequential` (declaration order, first match
+wins) is the default and the only built-in. `edgeKind: "..."` on the scene picks
+another; mount one with `registerEdgeKind({ name, summary, fields, select })`.
+The engine holds no edge branches — `maxLoops` counting, `when` evaluation and
+first-match all live in the kind.
 
 **Terminology — the condition on an edge is called `when`.** It is a
 function-valued *property* of the edge object, not a separately mounted object:

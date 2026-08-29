@@ -33,6 +33,7 @@ import {
 } from "./state.ts";
 import { loadKeyFiles } from "./credentials.ts";
 import { fileRunStore, type RunStore } from "./store.ts";
+import { EDGE_KINDS, conditionLabel } from "./edges.ts";
 import { activeCapabilities } from "./capabilities.ts";
 import type { EventSink, NodeMeta } from "./events.ts";
 
@@ -751,37 +752,16 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
       // Outgoing edges are consulted BEFORE the exit check, so a node can be both
       // the terminal node and a looping one. Terminating early here would make
       // any edge out of the exit node silently dead.
-      let next: string | undefined;
-      for (const [index, edge] of scene.edges.entries()) {
-        const matchesSource = edge.from === cursor || members.includes(edge.from);
-        if (!matchesSource) continue;
-
-        if (edge.when) {
-          let holds: boolean;
-          try {
-            holds = Boolean(edge.when({ ...state }));
-          } catch (err) {
-            return fail(
-              `condition on ${edge.from}→${edge.to} threw: ${(err as Error).message} — ` +
-                `when() must be a pure predicate over state`,
-            );
-          }
-          if (!holds) continue;
-        }
-
-        if (edge.maxLoops !== undefined) {
-          const taken = edgeLoops.get(index) ?? 0;
-          if (taken >= edge.maxLoops) {
-            emit({ type: "edge", from: edge.from, to: edge.to, skipped: true });
-            continue;
-          }
-          edgeLoops.set(index, taken + 1);
-        }
-
-        next = edge.to;
-        emit({ type: "edge", from: cursor, to: edge.to, ...(edge.when ? { when: conditionLabel(edge.when) } : {}) });
-        break;
+      const kindName = scene.edgeKind ?? "sequential";
+      const kind = EDGE_KINDS[kindName];
+      if (!kind) {
+        return fail(
+          `scene declares edgeKind "${kindName}" — registered: ${Object.keys(EDGE_KINDS).join(", ")}`,
+        );
       }
+      const chosen = kind.select({ edges: scene.edges, cursor, members, state, taken: edgeLoops, emit });
+      if (chosen.error) return fail(chosen.error);
+      const next = chosen.next;
 
       if (!next) {
         // Running out of edges at the exit — or anywhere, when no exit is
@@ -828,12 +808,6 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
 }
 
 /** `(s) => s.verdict === "accept"` → `s.verdict === "accept"` for display. */
-export function conditionLabel(fn: (state: State) => boolean): string {
-  return String(fn)
-    .replace(/^\s*\(?[\w$]*\)?\s*=>\s*/, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
 
 function renderResult(scene: Scene, state: State): string {
   const lines = [`# ${scene.name}`, "", `**Goal:** ${String(state["goal"] ?? "")}`, ""];
