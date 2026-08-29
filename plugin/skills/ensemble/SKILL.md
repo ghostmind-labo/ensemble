@@ -164,11 +164,31 @@ the behaviour-carrying leaves on them (`edge.when`, `node.fn`, `runtime.call`,
 `fileRunStore` rather than replace it, or its runs stop being resumable (resume
 reads the journal from the run directory).
 
-Every `NodeSpec` field: `model`, `runtime` ("model" | "agent" | "ask"), `prompt`
-(system-style instruction), `question` (ask only), `inputs`, `outputs`, `skills`,
-`mcp`, `tools`, `maxTurns` (agent only, default 12), `temperature`, `description`.
-Scene-level: `name`, `description`, `state` (zod shapes — see below), `defaults`
-(`model`/`runtime`/`tools`/`temperature`), `nodes`, `groups`, `edges`, `entry`, `exit`.
+Every `NodeSpec` field: `model`, `runtime` ("model" | "agent" | "ask" | "fn"),
+`prompt` (system-style instruction), `question` (ask only), `fn` (fn only),
+`inputs`, `outputs`, `skills`, `mcp`, `tools`, `maxTurns` (agent only, default
+12), `temperature`, `description`. Scene-level: `name`, `description`, `state`
+(zod shapes — see below), `defaults`, `nodes`, `groups`, `edges`, `entry`, `exit`.
+
+**`defaults` is how you say something once for the whole scene.** It carries
+`model`, `runtime`, `temperature`, and three that reach every **agent** node:
+
+```ts
+defaults: {
+  model: "openrouter/anthropic/claude-sonnet-5",
+  skills: ["house-style"],      // GRANT: every agent node gets it, no re-listing
+  mcp: ["postgres"],            // GRANT: same
+  tools: { fetch_url: false },  // DISARM: scene-wide opt-out of a built-in
+},
+```
+
+The two directions are deliberate and opposite. `skills` and `mcp` are **grants
+and they union** — the scene list is a floor, a node adding its own widens it,
+and a node can never silently lose a scene-wide grant. `tools` is a **disarm**,
+because built-ins are all on already — so there the node-level map wins, and
+`tools: { fetch_url: true }` on one node opts back in. An unknown skill or
+server in `defaults` reports itself as `defaults (used by node "x")`, so you
+look in the right place.
 
 ### Typed state — pin the SHAPE of the blackboard (`state`)
 

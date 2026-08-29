@@ -527,7 +527,7 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
   // MCP servers connect only if some node actually names one — and which nodes
   // can name one is the runtime OBJECT's business, not an engine branch.
   const wantedServers = new Set(
-    Object.values(scene.nodes).flatMap((n) => RUNTIMES[runtimeOf(scene, n)]?.mcpServers?.(n) ?? []),
+    Object.values(scene.nodes).flatMap((n) => RUNTIMES[runtimeOf(scene, n)]?.mcpServers?.(n, scene) ?? []),
   );
   const servers = [...registry.mcp.values()].filter((s) => wantedServers.has(s.name));
 

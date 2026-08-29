@@ -139,6 +139,10 @@ export interface SceneSpec<S extends StateSchema = StateSchema> {
     model?: string;
     runtime?: NodeRuntime;
     tools?: Record<string, boolean>;
+    /** Skills granted to every agent node, unioned with the node's own list. */
+    skills?: string[];
+    /** MCP servers granted to every agent node, unioned with the node's own. */
+    mcp?: string[];
     temperature?: number;
   };
   nodes: Record<string, NodeSpec>;

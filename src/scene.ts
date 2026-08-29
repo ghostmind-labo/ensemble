@@ -79,6 +79,10 @@ const sceneSchema = z
         model: z.string().optional(),
         runtime: z.string().optional(),
         tools: z.record(z.boolean()).optional(),
+        // Granted to EVERY agent node, unioned with whatever the node names.
+        // The point is not having to re-list the same skill on ten nodes.
+        skills: z.array(z.string()).optional(),
+        mcp: z.array(z.string()).optional(),
         temperature: z.number().min(0).max(2).optional(),
       })
       .strict()
