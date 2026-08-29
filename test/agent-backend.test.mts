@@ -85,11 +85,17 @@ console.log("ok · 3 a missing binary fails validate, with the fix in the messag
 // The fake CLI answers with the fenced json the output contract demands — the
 // point being that a rented agent is held to the SAME contract as our own loop.
 const fake = join(work, "fake-agent");
+// The event shape here is REAL — captured from opencode 1.18.21's --format json,
+// not invented. Everything hangs off `part`; a parser that reads top-level
+// `text`/`usage` (as an earlier one did) silently extracts nothing.
+//
 // printf '%s', not echo: /bin/sh's echo expands backslash escapes, which would
 // break the JSON across lines before the parser ever saw it.
 writeFileSync(fake, `#!/bin/sh
-printf '%s\\n' "{\\"argv\\": \\"$*\\", \\"skills\\": \\"$OC_TEST_SKILLS\\"}"
-printf '%s\\n' '{"text": "I made the change.\\n\\n\`\`\`json\\n{\\"verdict\\": \\"done\\"}\\n\`\`\`", "usage": {"input": 120, "output": 8}, "cost": 0.004}'
+printf '%s\\n' '{"type":"step_start","part":{"type":"step-start"}}'
+printf '%s\\n' "{\\"type\\":\\"argv-probe\\",\\"argv\\":\\"$*\\",\\"skills\\":\\"$OC_TEST_SKILLS\\"}"
+printf '%s\\n' '{"type":"text","part":{"type":"text","text":"I made the change.\\n\\n\`\`\`json\\n{\\"verdict\\": \\"done\\"}\\n\`\`\`"}}'
+printf '%s\\n' '{"type":"step_finish","part":{"type":"step-finish","tokens":{"input":120,"output":8},"cost":0.004}}'
 `, "utf8");
 chmodSync(fake, 0o755);
 

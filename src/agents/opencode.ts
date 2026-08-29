@@ -78,84 +78,83 @@ export const opencodeBackend: AgentBackend = {
       };
     }
 
-    // `--format json` emits one JSON value per line. We want the assistant text
-    // and, if it is reported, the usage. Be forgiving: an unparseable line is
-    // noise from a tool, not a reason to fail a node that did the work.
-    let text = "";
+    // `--format json` emits one event per line, and everything real hangs off
+    // `part` — verified against opencode 1.18.21, not guessed:
+    //
+    //   {"type":"text",        "part":{"type":"text","text":"PONG"}}
+    //   {"type":"step_finish", "part":{"tokens":{"input":6864,"output":4},"cost":0.0006}}
+    //
+    // Text parts are concatenated in order rather than last-one-wins: a run with
+    // tool calls emits several, and the engine's extractOutputs takes the LAST
+    // fenced json block anyway, so keeping the prose costs nothing and keeps the
+    // node's reported answer readable.
+    const chunks: string[] = [];
     let cost = 0;
     let tokensIn = 0;
     let tokensOut = 0;
+    let failure = "";
 
     for (const line of res.stdout.split("\n")) {
       const trimmed = line.trim();
-      if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) continue;
-      let event: unknown;
-      try { event = JSON.parse(trimmed); } catch { continue; }
-      text = harvestText(event) ?? text;
-      const usage = harvestUsage(event);
-      if (usage) {
-        cost += usage.cost ?? 0;
-        tokensIn += usage.input ?? 0;
-        tokensOut += usage.output ?? 0;
+      if (!trimmed.startsWith("{")) continue;
+      let event: OpencodeEvent;
+      try {
+        event = JSON.parse(trimmed) as OpencodeEvent;
+      } catch {
+        continue; // a tool's own stray output, not our business
+      }
+
+      const part = event.part ?? {};
+      if (event.type === "text" && typeof part.text === "string") chunks.push(part.text);
+      if (typeof part.cost === "number") cost += part.cost;
+      if (part.tokens) {
+        tokensIn += part.tokens.input ?? 0;
+        tokensOut += part.tokens.output ?? 0;
+      }
+      if (event.type === "error") {
+        failure = typeof part.message === "string" ? part.message : "opencode reported an error";
       }
     }
 
+    const text = chunks.join("\n").trim();
+
     // Nothing recognisable in the stream: hand the raw stdout to the engine's
-    // extractor rather than throwing away a run that may well have answered.
-    if (!text) text = res.stdout;
+    // extractor rather than discarding a run that may well have answered.
+    if (!text && !failure) {
+      return {
+        text: res.stdout,
+        cost,
+        tokensIn,
+        tokensOut,
+        ...(res.exitCode !== 0
+          ? { error: `opencode exited ${res.exitCode} and emitted no text: ${res.stderr.trim().slice(0, 400)}` }
+          : {}),
+      };
+    }
 
     return {
       text,
       cost,
       tokensIn,
       tokensOut,
-      ...(res.exitCode !== 0 && !text.trim()
+      ...(failure ? { error: `opencode: ${failure}` } : {}),
+      ...(!failure && res.exitCode !== 0 && !text
         ? { error: `opencode exited ${res.exitCode}: ${res.stderr.trim().slice(0, 400)}` }
         : {}),
     };
   },
 };
 
-/** Pulls assistant prose out of whatever event shape the stream is using. */
-function harvestText(event: unknown): string | undefined {
-  if (typeof event === "string") return event;
-  if (!event || typeof event !== "object") return undefined;
-  const e = event as Record<string, unknown>;
-
-  for (const key of ["text", "content", "message", "result", "output"]) {
-    const v = e[key];
-    if (typeof v === "string" && v.trim()) return v;
-    if (v && typeof v === "object") {
-      const nested = harvestText(v);
-      if (nested) return nested;
-    }
-  }
-  if (Array.isArray(e["parts"])) {
-    const joined = e["parts"].map((p) => harvestText(p) ?? "").filter(Boolean).join("\n");
-    if (joined) return joined;
-  }
-  return undefined;
-}
-
-function harvestUsage(event: unknown): { cost?: number; input?: number; output?: number } | undefined {
-  if (!event || typeof event !== "object") return undefined;
-  const e = event as Record<string, unknown>;
-  const usage = (e["usage"] ?? e["tokens"]) as Record<string, unknown> | undefined;
-  const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
-
-  if (usage && typeof usage === "object") {
-    return {
-      ...(num(e["cost"]) !== undefined ? { cost: num(e["cost"]) } : {}),
-      ...(num(usage["input"] ?? usage["prompt_tokens"] ?? usage["input_tokens"]) !== undefined
-        ? { input: num(usage["input"] ?? usage["prompt_tokens"] ?? usage["input_tokens"]) }
-        : {}),
-      ...(num(usage["output"] ?? usage["completion_tokens"] ?? usage["output_tokens"]) !== undefined
-        ? { output: num(usage["output"] ?? usage["completion_tokens"] ?? usage["output_tokens"]) }
-        : {}),
-    };
-  }
-  const cost = num(e["cost"]);
-  return cost !== undefined ? { cost } : undefined;
+/** The subset of opencode's `--format json` events we read. */
+interface OpencodeEvent {
+  type?: string;
+  part?: {
+    type?: string;
+    text?: string;
+    message?: string;
+    cost?: number;
+    tokens?: { input?: number; output?: number };
+  };
 }
 
 registerAgentBackend(opencodeBackend);
