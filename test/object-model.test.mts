@@ -33,6 +33,9 @@ process.chdir(work);
 const seen: string[] = [];
 const spyStore: RunStore = {
   name: "spy",
+  // Wrapping means wrapping ALL of it: `prepare` is where the file store makes
+  // the run directory, so a wrapper that skips it has nowhere to write.
+  prepare: (d) => { seen.push("prepare"); fileRunStore.prepare?.(d); },
   writeState: (d, s) => { seen.push("state"); fileRunStore.writeState(d, s); },
   writeCosts: (d, c) => { seen.push("costs"); fileRunStore.writeCosts(d, c); },
   writeJournal: (d, j) => { seen.push("journal"); fileRunStore.writeJournal(d, j); },
@@ -80,7 +83,7 @@ assert.equal(run.state["found"], "OBJECTLAND");
 console.log("ok · 1 registerTool: mounted, offered to the agent, executed, result used");
 
 // the store saw the whole lifecycle, and the wrapped file store kept resume real
-for (const mark of ["index", "state", "costs", "journal", "result", "event:run:start", "event:run:end"]) {
+for (const mark of ["prepare", "index", "state", "costs", "journal", "result", "event:run:start", "event:run:end"]) {
   assert.ok(seen.includes(mark), `store observed ${mark}`);
 }
 assert.ok(existsSync(join(run.runDir, "journal.json")), "wrapping kept the files (resumability)");

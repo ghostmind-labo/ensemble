@@ -59,10 +59,14 @@ export type TypedState<S extends StateSchema> = { [K in keyof S]: TypeOf<S[K]> }
  * - `"experiment"`: the autoresearch step. Requires a scene-level `research`
  *   block. Measures the artefact under study, keeps or reverts it, appends to
  *   results.tsv. Pure measure.
+ * - `"refine"`: the same keep-or-revert, on the blackboard. Compares the
+ *   `candidate` key's `score` with the incumbent's, keeps a winner, writes the
+ *   incumbent back over a regression, and sets `converged` when the score
+ *   stops rising (`patience`) or reaches `target`. Pure select.
  */
 // The built-ins keep autocomplete; `string & {}` admits any runtime mounted
 // with registerRuntime() — a runtime is an object, not a member of an enum.
-export type NodeRuntime = "model" | "agent" | "ask" | "fn" | "experiment" | (string & {});
+export type NodeRuntime = "model" | "agent" | "ask" | "fn" | "experiment" | "refine" | (string & {});
 
 export interface NodeSpec {
   /** `openrouter/<vendor>/<model>`, e.g. "openrouter/anthropic/claude-sonnet-5". */
@@ -102,6 +106,18 @@ export interface NodeSpec {
   maxTurns?: number;
   /** experiment nodes only — state key logged as the note in results.tsv (e.g. "hypothesis"). */
   note?: string;
+  /** refine nodes only — the state key under refinement; the loop's artefact. */
+  candidate?: string;
+  /** refine nodes only — the state key holding the judge's number (default "score"). */
+  score?: string;
+  /** refine nodes only — true when lower is better. */
+  minimize?: boolean;
+  /** refine nodes only — a candidate must beat the incumbent by MORE than this to be kept (default 0). */
+  threshold?: number;
+  /** refine nodes only — consecutive non-improving rounds before `converged` (default 2). */
+  patience?: number;
+  /** refine nodes only — once `best` reaches this, `converged` (the score-gate's target). */
+  target?: number;
   description?: string;
   temperature?: number;
 }
@@ -154,6 +170,13 @@ export interface SceneSpec<S extends StateSchema = StateSchema> {
    * first match wins. Mount another with `registerEdgeKind({...})`.
    */
   edgeKind?: string;
+  /**
+   * State keys supplied from OUTSIDE the workflow — seeded at launch or
+   * injected mid-run through `answers` — rather than produced by a node.
+   * `goal` is always one. Declaring the rest is what lets validation prove
+   * every input has an origin, and what lets the viewer draw them.
+   */
+  inputs?: string[];
   entry: string;
   exit?: string;
 }

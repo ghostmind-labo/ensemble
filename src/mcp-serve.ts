@@ -216,14 +216,18 @@ export function buildEnsembleServer(root = process.cwd()): McpServer {
     "run_scene",
     {
       description:
-        "Start a scene against a goal. Returns the runId IMMEDIATELY — the run continues in the background; poll run_status. Set budget (USD) to cap spend; a budget-stopped run is resumable.",
+        "Start a scene against a goal. Returns the runId IMMEDIATELY — the run continues in the background; poll run_status. Set budget (USD) to cap spend; a budget-stopped run is resumable. Pass `answers` to seed the scene's declared `inputs` at launch — e.g. the draft a refine loop should improve.",
       inputSchema: {
         file: z.string().describe("Path to the scene file"),
         goal: z.string().describe("The goal the scene runs against"),
         budget: z.number().positive().optional().describe("Hard USD cap for the run"),
+        answers: z
+          .record(z.unknown())
+          .optional()
+          .describe("State keys seeded before the first node runs — the scene's declared `inputs` (e.g. { draft: \"…\" })"),
       },
     },
-    async ({ file, goal, budget }) => {
+    async ({ file, goal, budget, answers }) => {
       // This server is scoped to the project it was spawned in (its cwd): that is
       // where runs land and where ensemble.json / skills are read from. Running a
       // scene from a DIFFERENT project would silently use the wrong config and
@@ -251,8 +255,22 @@ export function buildEnsembleServer(root = process.cwd()): McpServer {
       } catch (err) {
         return failure(`invalid scene: ${sceneProblems(err)}`);
       }
-      const { runId } = await launch(scene, goal, { ...(budget !== undefined ? { budget } : {}) });
-      return json({ runId, scene: scene.name, started: true, next: "poll run_status; peek_state reads the blackboard mid-run" });
+      // A seed the scene never declared is almost always a typo; it still lands
+      // in state, but the caller should know nothing is wired to read it.
+      const declared = scene.inputs ?? [];
+      const undeclared = Object.keys(answers ?? {}).filter((k) => !declared.includes(k));
+      const { runId } = await launch(scene, goal, {
+        ...(budget !== undefined ? { budget } : {}),
+        ...(answers ? { answers: answers as State } : {}),
+      });
+      return json({
+        runId,
+        scene: scene.name,
+        started: true,
+        ...(answers ? { seeded: Object.keys(answers) } : {}),
+        ...(undeclared.length ? { warning: `seeded keys not declared in the scene's inputs: ${undeclared.join(", ")} — nothing is wired to read them` } : {}),
+        next: "poll run_status; peek_state reads the blackboard mid-run",
+      });
     },
   );
 

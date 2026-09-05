@@ -32,6 +32,11 @@ a variable between experiments, and a hand-rolled one throws that away. The sing
 exception is §3's **escape hatch** — a jury of proposers, a human gate each round,
 or two metrics — which the sealed mode cannot express.
 
+**If the thing to improve is a VALUE, not a file** — a draft, a plan, a prompt, a
+tagline, anything that lives on the blackboard and is scored by a judge node rather
+than by a command — it is a **refine loop**: an ordinary scene with a `refine` node
+(§3). Same keep-or-revert discipline as autoresearch, no files, no shell.
+
 If it is not that, ask whether it is a scene at all:
 
 ## 0.1 · Should this be a scene at all?
@@ -201,14 +206,35 @@ is a validation error naming both — so this table is the whole surface:
 | `ask` | ⏸ | `question`, `always` |
 | `fn` | λ | `fn` |
 | `experiment` | 🔬 | `note` (state key logged to `results.tsv`) |
+| `refine` | ⬆ | `candidate` (state key under refinement), `score` (key holding its number, default `"score"`), `minimize`, `threshold` (default 0), `patience` (default 2), `target` |
 
 Any backend mounted with `registerAgentBackend` gets its own row with the same
 fields as `opencode` plus whatever it declares.
 
 **Scene-level:** `name`, `description`, `state` (zod shapes — see below),
 `defaults`, `nodes`, `groups`, `edges`, `entry`, `exit`, `edgeKind` (default
-`"sequential"`), and any mounted capability block (`research` is the one that
-ships).
+`"sequential"`), `inputs` (keys supplied from OUTSIDE the workflow — see
+below), and any mounted capability block (`research` is the one that ships).
+
+**The data graph is proved, not hoped for.** State keys have exactly three
+origins — `goal`, a node's declared `outputs`, and the scene's declared
+`inputs` — so `validate` can prove that every key a node's `inputs` or an
+edge's `when` reads has one. A key nothing produces is an ERROR naming the
+node, the key, and every key that IS produced (so a typo is obvious). Before
+this, such a node ran anyway with the model simply not told, and a workflow
+that "worked" may have worked by luck.
+
+```ts
+inputs: ["house_rules"],   // arrives from outside — seeded at launch, or
+                           // injected mid-run through `answers`. No node
+                           // produces it, and that is now declared, not smuggled.
+```
+
+A node that reads a key only it produces (a loop counter) is fine — WHEN a key
+is first written is a runtime matter, and the proof does not pretend otherwise.
+`ensemble serve` draws the data graph (dotted, toggle `data`) beside the
+control edges: what depends on what, including which keys each `when` reads
+and where the scene's inputs enter.
 
 **`defaults` is how you say something once for the whole scene.** It carries
 `model`, `runtime`, `temperature`, and three that reach every **agent** node:
@@ -491,9 +517,44 @@ Warnings to act on:
 parallel group, one foreman synthesises with `consensus` / `dissent` / `strongest` /
 `answer` outputs. Tell the foreman "do not invent conflict."
 
-**Score gate (improve-until-good)** — worker → judge that emits a NUMBER `score` +
-`feedback`; edge `when: (s) => Number(s["score"]) < TARGET, maxLoops: N` loops the
-feedback back into the worker (`inputs: ["feedback", "score"]`).
+**Refine loop (improve until the score stops rising)** — the score gate, done
+right. worker → judge (emits a NUMBER `score` + `feedback`) → a `refine` node →
+loop back while `!converged`:
+
+```ts
+state: { score: z.number(), converged: z.boolean() },
+nodes: {
+  writer: { inputs: ["draft", "feedback", "best", "verdict", "reason"], outputs: ["draft"] },
+  judge:  { inputs: ["draft"], outputs: ["score", "feedback"] },
+  keep:   { runtime: "refine", candidate: "draft", patience: 2, target: 9,
+            outputs: ["draft", "best", "verdict", "reason", "converged"] },
+},
+edges: [
+  { from: "writer", to: "judge" },
+  { from: "judge", to: "keep" },
+  { from: "keep", to: "writer", when: (s) => !s.converged, maxLoops: 8 },
+],
+entry: "writer", exit: "keep",
+```
+
+The refine node is free (no model). Each round it KEEPS the candidate if its score
+beats the incumbent's (`best`) by more than `threshold`, or writes the incumbent
+BACK over `draft` — so the writer always revises the best version, never a
+regression — and sets `converged` after `patience` straight non-improvements or
+once `best` reaches `target`. Whatever ends the loop (converged, target, or
+`maxLoops`), `draft` holds the best version seen; a plain `score < N` gate ends
+with the LAST attempt. Outputs it writes: the candidate key, `incumbent`, `best`,
+`round`, `verdict` (`baseline`/`keep`/`revert`), `kept`, `reason`, `converged`,
+`stalled`, `history` (every round's score + verdict), `summary` — declare the ones
+the graph reads. Tell the writer in its prompt that on a revert `feedback` is about
+the attempt that was DISCARDED and `draft` is the best so far. **To improve an
+INPUT rather than generate one**: declare `inputs: ["draft"]` on the scene, seed it
+(`answers: { draft }` on `run_scene`), and make `judge` the entry so the seed is
+scored as the baseline — and a later run can be seeded with this run's winner.
+
+**Score gate** — the simpler ancestor: `when: (s) => Number(s["score"]) < TARGET,
+maxLoops: N` looping `feedback` back into the worker. Only when shipping the LAST
+attempt is acceptable; otherwise use the refine loop.
 
 **Autoresearch (improve ONE file against a code-graded metric) — NOT A SCENE.**
 When the goal is "make X better" and a command can score X, do not author a scene.

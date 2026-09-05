@@ -29,6 +29,10 @@ export { loadScene, validateSpec, SceneError, splitModel, resolveTarget, runtime
 export type { Scene, NodeSpec, EdgeSpec } from "./scene.ts";
 export type { ResearchSpec } from "./research.ts";
 export { experimentRuntime, researchTools, parseMetric, parseBudget, measure, runExperiment } from "./research.ts";
+// Refine — keep-or-revert on the blackboard: the same discipline as research
+// mode, for a state key scored by a node instead of a file scored by a command.
+export { refineRuntime, decideRefine, REFINE_OUTPUTS } from "./refine.ts";
+export type { RefineSpec, RefineRound, RefineVerdict } from "./refine.ts";
 
 // --- the registry: skills and MCP servers discovered on disk -----------------
 export { loadRegistry } from "./registry.ts";
@@ -55,6 +59,10 @@ export type { AgentBackend, AgentCliRequest, AgentCliResult } from "./agents/ind
 export { opencodeBackend } from "./agents/opencode.ts";
 export { spawnBounded } from "./process.ts";
 export type { BoundedResult, BoundedOptions } from "./process.ts";
+
+// --- the data graph: what depends on what, derived and proved ----------------
+export { dataflow, checkDataflow, probeReads, readsOf, SEEDED } from "./dataflow.ts";
+export type { Dataflow } from "./dataflow.ts";
 
 // --- edges: how the next node is chosen, as an object ------------------------
 export { registerEdgeKind, EDGE_KINDS, sequentialEdges, conditionLabel } from "./edges.ts";
@@ -87,3 +95,9 @@ export type { ServeOptions } from "./serve.ts";
 
 // --- ensemble as an MCP server ----------------------------------------------
 export { buildEnsembleServer, serveMcpStdio } from "./mcp-serve.ts";
+
+// Replay — the free re-run: a recorded run played back through the real engine.
+export { replayRun, readTape, routeLabel } from "./replay.ts";
+export { nullRunStore } from "./store.ts";
+export type { NodeCaller } from "./engine.ts";
+export type { ReplayReport, ReplayOptions, Tape, RouteStep } from "./replay.ts";

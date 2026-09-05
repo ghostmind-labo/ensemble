@@ -11,6 +11,7 @@ import { runtimeOf } from "./scene.ts";
 import { RUNTIMES } from "./runtimes/index.ts";
 import type { RuntimeObject } from "./runtimes/index.ts";
 import { AGENT_BACKENDS } from "./agents/index.ts";
+import { dataflow, readsOf } from "./dataflow.ts";
 import { conditionLabel } from "./edges.ts";
 import { c } from "./log.ts";
 
@@ -117,7 +118,8 @@ export function toTerminal(scene: Scene): string {
     const mcp = union(spec.mcp, scene.defaults.mcp);
     if (skills.length > 0) out.push(`${pad}  ${c.dim("skills:")} ${c.cyan(skills.join(", "))}`);
     if (mcp.length > 0) out.push(`${pad}  ${c.dim("mcp:")} ${c.cyan(mcp.join(", "))}`);
-    if ((spec.inputs ?? []).length > 0) out.push(`${pad}  ${c.dim(`in  ← ${(spec.inputs ?? []).join(", ")}`)}`);
+    const reads = readsOf(scene, spec);
+    if (reads.length > 0) out.push(`${pad}  ${c.dim(`in  ← ${reads.join(", ")}`)}`);
     if ((spec.outputs ?? []).length > 0) out.push(`${pad}  ${c.dim(`out → ${(spec.outputs ?? []).join(", ")}`)}`);
   };
 
@@ -191,9 +193,25 @@ export interface Layout {
   entry: string;
   exit: string | undefined;
   targets: LayoutTarget[];
-  edges: Array<{ from: string; to: string; when?: string; maxLoops?: number; back: boolean }>;
+  edges: Array<{
+    from: string;
+    to: string;
+    when?: string;
+    maxLoops?: number;
+    back: boolean;
+    /** State keys the `when` reads — a condition's place in the data graph. */
+    reads?: string[];
+  }>;
   /** Which edge kind selects the next node — "sequential" unless the scene says otherwise. */
   edgeKind: string;
+  /**
+   * The DATA graph, separate from the control edges above: key K flows from the
+   * node that produces it — or from `input:K`, the outside world — to each node
+   * or `edge:<i>` condition that reads it.
+   */
+  data: Array<{ key: string; from: string; to: string }>;
+  /** Keys the scene takes from outside, beyond `goal`. Drawn as input boxes. */
+  inputs: string[];
 }
 
 /**
@@ -241,7 +259,9 @@ export function toLayout(scene: Scene): Layout {
       cost: costOf(runtime, rt),
       skills: union(spec?.skills, scene.defaults.skills),
       mcp: union(spec?.mcp, scene.defaults.mcp),
-      inputs: spec?.inputs ?? [],
+      // What the node reads, including what its runtime reads for it — a
+      // refine node's candidate and score are real dependencies to draw.
+      inputs: spec ? readsOf(scene, spec) : [],
       outputs: spec?.outputs ?? [],
       prompt: spec?.prompt ?? "",
     };
@@ -288,17 +308,42 @@ export function toLayout(scene: Scene): Layout {
     return node;
   };
 
-  const edges = scene.edges.map((edge) => {
+  const flow = dataflow(scene);
+  const edges = scene.edges.map((edge, i) => {
     const from = targetOf(edge.from);
     const fromLayer = layerOf.get(from) ?? 0;
     const toLayer = layerOf.get(edge.to) ?? 0;
+    const reads = flow.reads[i] ?? [];
     return {
       from,
       to: edge.to,
       ...(edge.when ? { when: conditionLabel(edge.when) } : {}),
       ...(edge.maxLoops ? { maxLoops: edge.maxLoops } : {}),
       back: toLayer <= fromLayer,
+      ...(reads.length ? { reads } : {}),
     };
+  });
+
+  // Data edges: producer → consumer for every key, and producer → condition
+  // for every key a `when` reads. A node that feeds itself (a loop counter)
+  // is not drawn — it is a fact about the node, not a relationship.
+  const data: Layout["data"] = [];
+  const inputs = (scene.inputs ?? []).filter((k) => k !== "goal");
+  const sourcesOf = (key: string): string[] => [
+    ...(inputs.includes(key) ? [`input:${key}`] : []),
+    ...(flow.producers[key] ?? []),
+  ];
+  for (const [key, consumers] of Object.entries(flow.consumers)) {
+    for (const to of consumers) {
+      for (const from of sourcesOf(key)) {
+        if (from !== to) data.push({ key, from, to });
+      }
+    }
+  }
+  flow.reads.forEach((keys, i) => {
+    for (const key of keys) {
+      for (const from of sourcesOf(key)) data.push({ key, from, to: `edge:${i}` });
+    }
   });
 
   return {
@@ -308,6 +353,8 @@ export function toLayout(scene: Scene): Layout {
     targets,
     edges,
     edgeKind: scene.edgeKind ?? "sequential",
+    data,
+    inputs,
   };
 }
 

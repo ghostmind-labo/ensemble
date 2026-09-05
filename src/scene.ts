@@ -14,6 +14,7 @@ import { z } from "zod";
 import type { Registry } from "./registry.ts";
 import type { SceneSpec, NodeSpec, EdgeSpec, State } from "./dsl.ts";
 import { CAPABILITIES } from "./capabilities.ts";
+import { checkDataflow } from "./dataflow.ts";
 import { RUNTIMES, COMMON_FIELDS } from "./runtimes/index.ts";
 // Mounts the shipped agent backend (runtime: "opencode"). Importing here means
 // every path that loads a scene knows about it — cli, serve and the MCP server.
@@ -94,6 +95,7 @@ const sceneSchema = z
     groups: z.record(z.array(z.string())).optional(),
     edges: z.array(edgeSchema).optional(),
     edgeKind: z.string().optional(),
+    inputs: z.array(z.string().min(1)).optional(),
     entry: z.string(),
     exit: z.string().optional(),
   })
@@ -164,6 +166,11 @@ function checkReferences(scene: Scene, reg: Registry): string[] {
     const value = (scene as unknown as Record<string, unknown>)[cap.name];
     if (value !== undefined) problems.push(...(cap.check?.(value, scene) ?? []));
   }
+
+  // The data graph: every key a node or a `when` reads must be produced by
+  // SOME node (or be `goal`). A workflow that runs with an input silently
+  // missing is not one that works — it is one that got lucky.
+  problems.push(...checkDataflow(scene));
 
   for (const [name, node] of Object.entries(scene.nodes)) {
     const runtimeName = runtimeOf(scene, node);
