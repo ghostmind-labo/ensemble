@@ -6,6 +6,7 @@ import { RUNTIMES } from "./runtimes/index.ts";
 import { isProgram, ITERATION_EDGE } from "./autoresearch.ts";
 import { loadKeyFiles, hasApiKey, missingKeyMessage } from "./credentials.ts";
 import { runScene, readJournal, hashScene, cancelRun } from "./engine.ts";
+import { replayRun, routeLabel, type ReplayReport } from "./replay.ts";
 import { createTerminalReporter } from "./reporter.ts";
 import { toMermaid, toTerminal, toHtml } from "./view.ts";
 import { c, info, error, duration } from "./log.ts";
@@ -21,6 +22,9 @@ ${c.bold("Usage")}
                                        evaluate → keep or revert, until the
                                        iteration budget runs out
   ensemble resume <run-dir>            Continue a stopped run from its checkpoint
+  ensemble replay <run-dir>            Re-run a recorded run through the real
+                                       engine, models answered from the tape —
+                                       free, offline, and edits show as findings
   ensemble cancel <run-dir> [reason]   Close a parked run for good (artifacts kept)
   ensemble serve [scenes-dir]          Live viewer + run console in the browser
   ensemble view <scene.ts>           Draw the graph (terminal, mermaid, or html)
@@ -40,6 +44,11 @@ ${c.bold("Options")}
   --max-runs <n>    Global node-execution cap (default 50)
   --timeout <min>   Wall-clock limit in minutes (default 20)
   --budget <usd>    Hard cost cap for the run, e.g. --budget 0.50
+  --answer k=v      run: seed a scene input at launch (repeatable) —
+                    resume: answer the ask node the run is parked on
+  --scene <file>    replay: use this scene file instead of the recorded one
+  --strict          replay: exit non-zero when the route or state differs from
+                    the recording — for CI, where any drift is the signal
   --iterations <n>  research: experiments to run after the baseline (default 10)
   --model <ref>     research: the proposing model (default claude-sonnet-5)
   --threshold <n>   research: metric gain required to keep a change (default 0) —
@@ -391,15 +400,39 @@ async function cmdView(
   return 0;
 }
 
+/**
+ * `--answer key=value`, repeatable. Everything after the first "=" is the
+ * value, so answers may contain "=" freely. Shared by `run` (seeding a scene
+ * input at launch) and `resume` (answering a parked ask node): both are the
+ * outside world writing a state key, and the engine treats them identically.
+ */
+function parseAnswers(
+  pairs: string[] | undefined,
+): { ok: true; answers: Record<string, unknown> } | { ok: false; error: string } {
+  const answers: Record<string, unknown> = {};
+  for (const pair of pairs ?? []) {
+    const eq = pair.indexOf("=");
+    if (eq === -1) return { ok: false, error: `--answer must be key=value, got "${pair}"` };
+    answers[pair.slice(0, eq)] = pair.slice(eq + 1);
+  }
+  return { ok: true, answers };
+}
+
 async function cmdRun(
   path: string | undefined,
   goal: string | undefined,
-  opts: { maxRuns?: number; timeout?: number; budget?: number; verbose: boolean },
+  opts: { maxRuns?: number; timeout?: number; budget?: number; answers?: string[]; verbose: boolean },
 ): Promise<number> {
   if (!path || !goal) {
     error('run needs a scene and a goal: ensemble run <scene.ts> "<goal>"');
     return 2;
   }
+  const parsed = parseAnswers(opts.answers);
+  if (!parsed.ok) {
+    error(parsed.error);
+    return 2;
+  }
+  const answers = parsed.answers;
 
   const reg = loadRegistry();
   let scene;
@@ -428,11 +461,24 @@ async function cmdRun(
     return 2;
   }
 
+  // A seed the scene never declared is almost always a typo — and a declared
+  // input the seed does not supply is what the data graph would have warned
+  // about, so say so here rather than let a node run with it silently missing.
+  const seeded = Object.keys(answers);
+  const declared = scene.inputs ?? [];
+  for (const key of seeded) {
+    if (!declared.includes(key)) {
+      info(`${c.yellow("!")} ${c.yellow(`--answer ${key}`)} ${c.dim(`is not one of the scene's declared inputs (${declared.length ? declared.join(", ") : "none"}) — it lands in state, but nothing is wired to read it`)}`);
+    }
+  }
+  if (seeded.length > 0) info(c.dim(`seeding: ${seeded.join(", ")}`));
+
   const started = Date.now();
   const result = await runScene(scene, goal, {
     maxNodeRuns: opts.maxRuns,
     timeoutMs: opts.timeout ? opts.timeout * 60_000 : undefined,
     ...(opts.budget !== undefined ? { budget: opts.budget } : {}),
+    ...(seeded.length > 0 ? { answers } : {}),
     onEvent: createTerminalReporter({ verbose: opts.verbose }),
   });
 
@@ -622,17 +668,12 @@ async function cmdResume(
     );
   }
 
-  // --answer key=value, repeatable. Everything after the first "=" is the value,
-  // so answers may contain "=" freely.
-  const answers: Record<string, unknown> = {};
-  for (const pair of opts.answers ?? []) {
-    const eq = pair.indexOf("=");
-    if (eq === -1) {
-      error(`--answer must be key=value, got "${pair}"`);
-      return 2;
-    }
-    answers[pair.slice(0, eq)] = pair.slice(eq + 1);
+  const parsed = parseAnswers(opts.answers);
+  if (!parsed.ok) {
+    error(parsed.error);
+    return 2;
   }
+  const answers = parsed.answers;
 
   // A parked run needs its answer, or it parks again on the same question.
   if (journal.pending) {
@@ -695,6 +736,126 @@ async function cmdModels(filter: string | undefined): Promise<number> {
   }
 }
 
+/**
+ * `ensemble replay <run-dir>` — the free re-run.
+ *
+ * The recording is played back through the real engine: predicates, schemas,
+ * loops and fn nodes all execute for real; only the model answers come from
+ * the tape. Nothing is spent, nothing is written, no key is needed. A route or
+ * state that differs from the recording is reported as a finding — and under
+ * --strict it fails the command, which is what CI wants.
+ */
+async function cmdReplay(
+  dir: string | undefined,
+  opts: { scene?: string; strict: boolean; verbose: boolean },
+): Promise<number> {
+  if (!dir) {
+    error("replay needs a run directory: ensemble replay .ensemble/runs/<id>");
+    return 2;
+  }
+
+  let report: ReplayReport;
+  try {
+    report = await replayRun(dir, {
+      ...(opts.scene !== undefined ? { sceneFile: opts.scene } : {}),
+      ...(opts.verbose ? { onEvent: createTerminalReporter({ verbose: true }) } : {}),
+    });
+  } catch (err) {
+    if (err instanceof SceneError) {
+      error(`the scene is not valid:
+`);
+      for (const problem of err.problems) console.error(`  • ${problem}`);
+      console.error("");
+      return 1;
+    }
+    error(err instanceof Error ? err.message : String(err));
+    return 1;
+  }
+
+  info(
+    `${c.bold("replay")} ${report.runId} ${c.dim("·")} scene ${c.bold(report.scene)} ` +
+      c.dim(`· tape: ${report.segments} segment${report.segments === 1 ? "" : "s"}`),
+  );
+  info(c.dim(`goal: ${report.goal}`));
+  if (report.sceneChanged) {
+    info(
+      `${c.yellow("!")} ${c.yellow("the scene changed since the recording")} — ` +
+        c.dim("replaying the edited scene against the old tape is the point"),
+    );
+  }
+
+  const recorded = report.recordedCost > 0 ? `$${report.recordedCost.toFixed(4)}` : "$0";
+  info(
+    `  ${c.dim("answered from tape")}  ${report.replayedCalls} call${report.replayedCalls === 1 ? "" : "s"} ` +
+      c.dim(`· recording cost ${recorded} · replay cost`) + ` ${c.green("$0")}`,
+  );
+  if (report.recomputed > 0) info(`  ${c.dim("recomputed live")}     ${report.recomputed} fn node run${report.recomputed === 1 ? "" : "s"}`);
+
+  // The route, honestly: identical is one line; divergence names the last
+  // agreed target and shows what each side did next.
+  const steps = (route: typeof report.recordedRoute): string =>
+    route.length === 0 ? c.dim("(no edges)") : route.map((r) => `${r.from} → ${r.to}`).join(c.dim(" · "));
+  if (report.routeMatches) {
+    info(`  ${c.dim("route")}               ${steps(report.replayedRoute)}  ${c.green("✓ matches the recording")}`);
+  } else {
+    info(`  ${c.dim("route")}               ${c.yellow(`diverged after "${report.divergedAfter ?? "?"}"`)}`);
+    const shared = report.recordedRoute.findIndex(
+      (r, i) => report.replayedRoute[i]?.from !== r.from || report.replayedRoute[i]?.to !== r.to,
+    );
+    const at = shared === -1 ? report.recordedRoute.length : shared;
+    const next = (route: typeof report.recordedRoute, label: string): void => {
+      const step = route[at];
+      info(
+        `      ${c.dim(label)}  ${
+          step ? routeLabel(step) : c.dim("(ended here)")
+        }${route.length > at + 1 ? c.dim(` · +${route.length - at - 1} more`) : ""}`,
+      );
+    };
+    next(report.recordedRoute, "recording then took");
+    next(report.replayedRoute, "replay took       ");
+  }
+
+  const diffs = report.stateChanged.length + report.stateAdded.length + report.stateRemoved.length;
+  if (diffs === 0) {
+    info(`  ${c.dim("state")}               ${report.stateSame} key${report.stateSame === 1 ? "" : "s"}  ${c.green("✓ matches the recording")}`);
+  } else {
+    const part = (label: string, keys: string[]): string | undefined =>
+      keys.length > 0 ? `${label}: ${keys.join(", ")}` : undefined;
+    info(
+      `  ${c.dim("state")}               ${c.yellow(
+        [part("changed", report.stateChanged), part("added", report.stateAdded), part("removed", report.stateRemoved)]
+          .filter(Boolean)
+          .join(" · "),
+      )} ${c.dim(`(${report.stateSame} unchanged)`)}`,
+    );
+  }
+
+  if (report.waiting) {
+    info(
+      `
+${c.cyan("⏸")} replay parked on ${c.bold(report.waiting.node)} — the recording never answered it
+` +
+        `   ${c.dim(report.waiting.question)}`,
+    );
+    return opts.strict ? 1 : 0;
+  }
+
+  if (!report.ok) {
+    error(`replay failed: ${report.reason ?? "unknown"}`);
+    return 1;
+  }
+
+  const drift = !report.routeMatches || diffs > 0;
+  info(
+    drift
+      ? `
+${c.yellow("✓ replay complete, with drift")} ${c.dim("— nothing spent, nothing written; the differences above are what your edit changed")}`
+      : `
+${c.green("✓ replay complete")} ${c.dim("— nothing spent, nothing written, nothing drifted")}`,
+  );
+  return opts.strict && drift ? 1 : 0;
+}
+
 async function main(): Promise<number> {
   let parsed;
   try {
@@ -710,6 +871,8 @@ async function main(): Promise<number> {
       "max-runs": { type: "string" },
       timeout: { type: "string" },
       budget: { type: "string" },
+      scene: { type: "string" },
+      strict: { type: "boolean", default: false },
       iterations: { type: "string" },
       model: { type: "string" },
       threshold: { type: "string" },
@@ -779,6 +942,7 @@ async function main(): Promise<number> {
         maxRuns: num(values["max-runs"]),
         timeout: num(values.timeout),
         budget: num(values.budget),
+        ...(values.answer ? { answers: values.answer } : {}),
         verbose: values.verbose ?? false,
       });
     case "cancel": {
@@ -801,6 +965,12 @@ async function main(): Promise<number> {
         timeout: num(values.timeout),
         budget: num(values.budget),
         ...(values.answer ? { answers: values.answer } : {}),
+        verbose: values.verbose ?? false,
+      });
+    case "replay":
+      return cmdReplay(rest[0], {
+        ...(values.scene !== undefined ? { scene: values.scene } : {}),
+        strict: values.strict ?? false,
         verbose: values.verbose ?? false,
       });
     case "serve": {

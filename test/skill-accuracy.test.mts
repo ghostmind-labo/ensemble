@@ -49,6 +49,7 @@ const CLAIMED: Record<string, string[]> = {
   ask: ["question", "always"],
   fn: ["fn"],
   experiment: ["note"],
+  refine: ["candidate", "score", "minimize", "threshold", "patience", "target"],
 };
 for (const [name, claimed] of Object.entries(CLAIMED)) {
   const actual = Object.keys(RUNTIMES[name]?.fields ?? {}).sort();

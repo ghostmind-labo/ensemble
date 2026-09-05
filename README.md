@@ -15,6 +15,10 @@ whichever kind of worker the job needs:
 - **`runtime: "fn"`** — a plain function over state. Free, instant, deterministic,
   and held to the same schema contract as model output. Use it for arithmetic,
   tallies and formatting, and never pay a model to count.
+- **`runtime: "refine"`** — the keep-or-revert step for a **value**: compares the
+  candidate's score with the incumbent's, keeps a winner, writes the incumbent back
+  over a regression, and says when the score has stopped rising. Free. The score
+  gate, done right. See [Refine mode](#refine-mode-keep-or-revert-on-the-blackboard).
 - **`runtime: "ask"`** — no model call at all: the run **pauses** until a human (or
   another agent) supplies the node's outputs.
 - **`runtime: "opencode"`** — rents a real coding-agent CLI for one node, when a
@@ -78,6 +82,37 @@ export default scene({
   exit: "writer",
 });
 ```
+
+## Two graphs, and the one that matters is proved
+
+Edges route the cursor — that is **control** flow. Data lives on the shared
+blackboard, and `inputs`/`outputs` describe how it moves — that is the **data**
+graph, and it is the one that decides whether a workflow is a recipe or an
+accident.
+
+State keys have exactly three origins: `goal`, a node's declared `outputs`, and
+the scene's declared `inputs` (keys that arrive from outside — seeded at launch,
+or injected mid-run through `answers`). So `validate` **proves** that every key
+a node reads, and every key a `when` reads, has one:
+
+```
+node "judge" reads "house_rules" but nothing in the scene produces it — the node
+would run with that context silently missing. Keys produced in this scene: "answers"
+(by collect), "round" (by open_board, judge), … If it is meant to come from outside
+the workflow, declare it: inputs: ["…"] at the scene level.
+```
+
+Before this check existed, that node ran anyway — the model was simply not told —
+and the scene it was found in had been doing so for weeks. A workflow that works
+with an input silently missing did not work; it got lucky. The fix is one line:
+
+```ts
+inputs: ["house_rules"],
+```
+
+`ensemble serve` draws both graphs: control edges solid, data edges dotted
+(toggle **data**). A `when` box shows which keys it reads, and the scene's
+inputs appear as boxes in the left gutter — the outside world, as an object.
 
 ## Typed state: pin the shape of the blackboard
 
@@ -223,6 +258,109 @@ Three things carry the design:
 - **`scene()` is an identity function carrying types.** A model authoring a scene
   gets its mistakes flagged by the type checker before a single token is spent —
   which is the point: this format is designed to be *generated*.
+
+## Refine mode: keep-or-revert on the blackboard
+
+The score-gate pattern — writer → judge → loop while `score < 8`, `maxLoops: 3` —
+has a flaw its own [example](./examples/02-score-gate) admits. When the budget runs
+out, the run ends with the **last** attempt, not the best one. And every revision
+builds on the previous attempt even when that attempt was a regression, so a loop
+can drift *away* from its best work while looking busy.
+
+Research mode already has the fix — snapshot the incumbent, keep a candidate only if
+it beats it, restore otherwise — but only for a file on disk scored by a command.
+`runtime: "refine"` is the same discipline for a **state key** scored by a **node**:
+
+```ts
+import { scene, z } from "@ghostmind-dev/ensemble";
+
+export default scene({
+  name: "refine-tagline",
+  defaults: { model: "openrouter/anthropic/claude-haiku-4.5" },
+  state: { score: z.number(), converged: z.boolean() },
+
+  nodes: {
+    writer: {
+      prompt: "Write a one-sentence tagline. If `tagline` is present it is the best so far — improve on it. " +
+              "`feedback` is the judge's critique of the most recent attempt; on a revert that attempt was discarded.",
+      inputs: ["tagline", "feedback", "best", "verdict", "reason"],
+      outputs: ["tagline"],
+    },
+    judge: {
+      model: "openrouter/anthropic/claude-sonnet-5",
+      prompt: "Score the tagline 0-10 as a NUMBER in `score`; put actionable critique in `feedback`.",
+      inputs: ["tagline"],
+      outputs: ["score", "feedback"],
+    },
+    keep: {
+      runtime: "refine",          // ⬆ free: no model call
+      candidate: "tagline",       // the state key under refinement
+      patience: 2,                // two straight non-improvements → converged
+      target: 9,                  // or stop as soon as best reaches 9
+      outputs: ["tagline", "best", "verdict", "reason", "converged"],
+    },
+  },
+
+  edges: [
+    { from: "writer", to: "judge" },
+    { from: "judge", to: "keep" },
+    { from: "keep", to: "writer", when: (s) => !s.converged, maxLoops: 8 },
+  ],
+  entry: "writer",
+  exit: "keep",
+});
+```
+
+```
+   ┌──────────┐  tagline   ┌─────────┐  score, feedback  ┌────────────┐
+   │  writer  │ ─────────► │  judge  │ ────────────────► │  keep  ⬆   │ ──► exit
+   └──────────┘            └─────────┘                   │ keep/revert│
+        ▲                                                └─────┬──────┘
+        │        tagline (the incumbent), best, verdict, reason │  !converged
+        └──────────────────────────────────────────────────────┘  (⟲ max 8)
+```
+
+Each round the refine node compares the candidate's `score` with the incumbent's
+(`best`). A winner — by more than `threshold` — is **kept** and becomes the
+incumbent. Anything else is **reverted**: the incumbent is written back over the
+candidate key, so the writer's next revision starts from the best version, never
+from the regression it just produced. `converged` turns true after `patience`
+consecutive non-improvements, or as soon as `best` reaches `target`.
+
+Two guarantees follow, and neither holds for a plain gate:
+
+- **Whatever ends the loop — converged, target, or `maxLoops` — the candidate key
+  holds the best version seen.** The refine node just put it there.
+- **Every attempt is scored against the incumbent it was asked to improve**, so a
+  score that moves is attributable to the change that moved it.
+
+What it writes, every round: the candidate key, `incumbent`, `best`, `round`,
+`verdict` (`baseline` / `keep` / `revert`), `kept`, `reason`, `converged`, `stalled`,
+`history` (every round's score and verdict), and a one-line `summary`. Declare the
+ones your graph reads. `minimize: true` flips the direction for a loss; `threshold`
+is the noise floor a candidate must clear; `score: "grade"` names a different key.
+
+Everything the node remembers lives on the blackboard, so a refine loop **survives a
+stop and resume**, and **a run can start from an earlier run's winner**. To improve
+an input rather than generate one, declare the candidate as a scene input, seed it,
+and make the judge the entry — the seed is scored as the baseline:
+
+```ts
+inputs: ["draft"],                     // arrives from outside — the thing to improve
+entry: "judge",                        // score it first: that is the baseline
+```
+
+```bash
+ensemble run improve.mts "tighten this" --answer draft="$(cat draft.md)"
+```
+
+`validate` proves the wiring before anything spends: the candidate must be produced
+by some *other* node (or arrive as an input), the score key must be produced by a
+node, and both appear on the data graph as the refine node's reads. A judge that
+writes `"7/10"` instead of a number fails the round with the one-line fix in the
+message (`state: { score: z.number() }`).
+
+[`examples/07-refine-loop`](./examples/07-refine-loop) is the scene above, ready to run.
 
 ## Getting started from scratch
 
@@ -914,8 +1052,8 @@ the object it names.
 Since 0.19, nodes have a **deterministic** form too: `runtime: "fn"` makes the node
 a plain function over state — free, instant, schema-checked like model output.
 Nodes are the neurons (`model` stochastic, `fn` deterministic, `ask` external
-input, `experiment` measurement); edges are the synapses, gated by their `when`
-property.
+input, `experiment` measurement, `refine` selection — keep the fitter candidate,
+discard the other); edges are the synapses, gated by their `when` property.
 
 Since 0.20 the rule reaches the **scene level** too: a top-level block like
 `research:` is a mounted **capability object**. A capability declares its block's

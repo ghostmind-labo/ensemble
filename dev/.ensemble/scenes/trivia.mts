@@ -13,6 +13,10 @@ import { scene, z } from "@ghostmind-dev/ensemble";
 
 export default scene({
   name: "trivia",
+  // Supplied from OUTSIDE the game, mid-run, through `answers` — no node
+  // produces it. Declaring it here is what makes the judge's optional read
+  // an honest dependency rather than a silently-missing one.
+  inputs: ["house_rules"],
   description: "5-question quiz: questions generated on the fly, first correct answer takes the point.",
   defaults: { model: "openrouter/deepseek/deepseek-v4-flash" },
 

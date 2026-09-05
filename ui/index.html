@@ -197,17 +197,31 @@
   .edge { stroke: var(--line); stroke-width: 1.6; fill: none; }
   .edge.back { stroke-dasharray: 5 4; }
   .edge.hot { stroke: var(--accent); stroke-width: 2.4; }
+  /* The DATA graph: what depends on what. Drawn faint and dotted so control
+     flow (where the cursor goes) stays the dominant reading, but always
+     available — a workflow whose dependencies you cannot see is one you cannot
+     judge, let alone reproduce. */
+  .edge.data { stroke: var(--muted); stroke-width: 1.1; stroke-dasharray: 2 3; opacity: .65; }
+  .dlabel { font-size: 9px; fill: var(--muted); font-family: var(--mono); }
+  #datatoggle.on { color: var(--accent); border-color: var(--accent); }
   /* Everything on the graph is a BOX. A condition is an object like a node is
      an object, so it gets the same box — same radius, same border, same header
      and body — just smaller. A pill would have been a second visual language
      for a thing that is not a second kind of thing. */
   #edgeobjs { position: absolute; inset: 0; pointer-events: none; }
-  .node.obj {
+  /* A stack of boxes an edge carries, centred on a point of the curve. Flex
+     column, so a box growing a line (a `when` that lists what it reads) pushes
+     its neighbour down instead of covering it. */
+  .objstack {
     position: absolute; transform: translate(-50%, -50%);
+    display: flex; flex-direction: column; gap: 6px; align-items: center;
+    pointer-events: none;
+  }
+  .node.obj {
     min-width: 0; max-width: 220px; padding: 6px 9px; border-radius: 8px;
     border-width: 1.5px; pointer-events: auto; cursor: default;
   }
-  .node.obj:hover { transform: translate(-50%, -50%) translateY(-1px); }
+  .node.obj:hover { transform: translateY(-1px); }
   .node.obj .nm { font-size: 10px; font-weight: 600; gap: 5px; }
   .node.obj .md { font-size: 10px; margin-top: 2px; max-width: 200px; }
   .node.obj .dot { width: 6px; height: 6px; }
@@ -215,6 +229,11 @@
   .node.obj.cond .dot { background: var(--accent); }
   .node.obj.loop { border-color: var(--warn); }
   .node.obj.loop .dot { background: var(--warn); }
+  /* A scene's external input: the outside world, as a box. Drawn in the left
+     gutter, since that is where things enter. */
+  .node.obj.input { position: absolute; transform: translate(0, -50%); border-color: var(--ok, #3fb950); border-style: dashed; }
+  .node.obj.input:hover { transform: translate(0, -50%) translateY(-1px); }
+  .node.obj.input .dot { background: var(--ok, #3fb950); }
 
   /* ---------- console ---------- */
   /* The work panel lives on the RIGHT: Log/State/Costs/Runs/Source and the node
@@ -395,6 +414,7 @@
     <span id="edgekind" hidden title="How the next node is chosen after each step"></span>
     <button class="primary" id="run">Run</button>
     <button id="stop" disabled>Stop</button>
+    <button id="datatoggle" title="Show the data graph: which node produces what another reads (d)">data</button>
     <span id="zoombar">
       <button id="zoomout" title="Zoom out (⌘−)">−</button>
       <span id="zoomlabel">100%</span>
@@ -459,6 +479,8 @@ const state = {
   // "scene" (default) or "all". Persisted: whichever you prefer, you prefer it
   // every time, and re-choosing it on each reload is friction for no reason.
   runScope: localStorage.getItem("ensemble:runScope") || "scene",
+  // Data edges on by default: they are the point. Off is remembered.
+  showData: localStorage.getItem("ensemble:data") !== "off",
 };
 
 // ---------------------------------------------------------------- zoom
@@ -1059,7 +1081,13 @@ function wires() {
   const origin = $("viewport").getBoundingClientRect();
   const z = state.zoom || 1;
   const box = (name) => {
-    const el = document.querySelector(`[data-target="${CSS.escape(name)}"]`);
+    // Control edges anchor to targets (a group is one box). Data edges reach
+    // INTO a group to the member that actually produced the key, and to the
+    // condition box of an edge when a `when` is what reads it.
+    const el = name.startsWith("edge:")
+      ? document.querySelector(`[data-edgeobj="${CSS.escape(name.slice(5))}"]`)
+      : document.querySelector(`[data-target="${CSS.escape(name)}"]`)
+        ?? document.querySelector(`[data-node="${CSS.escape(name)}"]`);
     if (!el) return null;
     const r = el.getBoundingClientRect();
     return {
@@ -1072,7 +1100,7 @@ function wires() {
 
   const parts = [];
   const objs = [];
-  for (const e of state.layout.edges) {
+  for (const [idx, e] of state.layout.edges.entries()) {
     const a = box(e.from), b = box(e.to);
     if (!a || !b) continue;
 
@@ -1084,9 +1112,10 @@ function wires() {
       const x = Math.min(a.x, b.x) - 30;
       const ay = a.y + a.h / 2, by = b.y + b.h / 2;
       d = `M ${a.x} ${ay} C ${x} ${ay}, ${x} ${by}, ${b.x} ${by}`;
-      // Centred ON the curve. Anchored 4px left of the leftmost node, a chip
-      // fell outside the drawn area and clipped against the node behind it.
-      lx = x + 26; ly = (ay + by) / 2;
+      // Centred just left of the curve's outermost point. Any closer and a
+      // ~90px box overlaps the node it is looping past; any further and it
+      // stops reading as belonging to the curve.
+      lx = x - 20; ly = (ay + by) / 2;
     } else {
       const ax = a.x + a.w / 2, ay = a.y + a.h;
       const bx = b.x + b.w / 2, by = b.y;
@@ -1104,23 +1133,70 @@ function wires() {
     // HTML beside the node boxes rather than as SVG ornaments — a condition is
     // not a caption on a line, it is a thing in the graph.
     const carried = [];
-    if (e.when) carried.push({ cls: "cond", kind: "when", body: e.when });
+    if (e.when) carried.push({ cls: "cond", kind: "when", body: e.when, anchor: idx, reads: e.reads ?? [] });
     if (e.maxLoops) carried.push({ cls: "loop", kind: "maxLoops", body: `at most ${e.maxLoops}×` });
 
     // 46px apart: a two-line box is ~40px tall, so anything tighter has the
     // second box sitting on the first one's body text.
-    const top = ly - (carried.length - 1) * 23;
-    carried.forEach((obj, i) => {
-      objs.push(
-        `<div class="node obj ${obj.cls}" style="left:${lx}px;top:${top + i * 46}px"` +
-        ` title="${esc(obj.kind)}: ${esc(obj.body)}">` +
-        `<div class="nm"><span class="dot"></span>${esc(obj.kind)}</div>` +
-        `<div class="md">${esc(obj.body)}</div></div>`,
-      );
-    });
+    if (carried.length) {
+      const boxes = carried.map((obj) => {
+        const reads = obj.reads?.length ? `<div class="md">reads ${esc(obj.reads.join(", "))}</div>` : "";
+        return `<div class="node obj ${obj.cls}"` +
+          `${obj.anchor !== undefined ? ` data-edgeobj="${obj.anchor}"` : ""}` +
+          ` title="${esc(obj.kind)}: ${esc(obj.body)}">` +
+          `<div class="nm"><span class="dot"></span>${esc(obj.kind)}</div>` +
+          `<div class="md">${esc(obj.body)}</div>${reads}</div>`;
+      });
+      objs.push(`<div class="objstack" style="left:${lx}px;top:${ly}px">${boxes.join("")}</div>`);
+    }
   }
 
+  // The scene's external inputs are objects too — one box each, in the left
+  // gutter, spaced down the height of the graph. `goal` is not drawn: every
+  // prompt carries it, so an edge from it to everything would say nothing.
+  const layersBox = $("layers").getBoundingClientRect();
+  const gh = layersBox.height / z;
+  (state.layout.inputs ?? []).forEach((key, i, all) => {
+    const y = gh * ((i + 1) / (all.length + 1));
+    objs.push(
+      `<div class="node obj input" style="left:12px;top:${y}px" data-edgeobj="input:${esc(key)}"` +
+      ` title="input: ${esc(key)} — supplied from outside the workflow">` +
+      `<div class="nm"><span class="dot"></span>input</div>` +
+      `<div class="md">${esc(key)}</div></div>`,
+    );
+  });
+
+  // Edge-borne boxes must be in the DOM before a data edge can anchor to one.
   $("edgeobjs").innerHTML = objs.join("");
+
+  $("datatoggle").classList.toggle("on", state.showData);
+  if (state.showData) {
+    // Several keys along the same producer→consumer pair are ONE relationship
+    // with several names, not several overlapping curves with colliding labels.
+    const byPair = new Map();
+    for (const d of state.layout.data ?? []) {
+      const k = `${d.from}\u0000${d.to}`;
+      if (!byPair.has(k)) byPair.set(k, { from: d.from, to: d.to, keys: [] });
+      byPair.get(k).keys.push(d.key);
+    }
+    for (const d of byPair.values()) {
+      const a = box(d.from), b = box(d.to);
+      if (!a || !b) continue;
+      const key = d.keys.join(", ");
+      // Right edge of the producer to the left edge of the consumer, so data
+      // edges leave and arrive on the sides while control edges use top and
+      // bottom — the two graphs stay visually separable even where they cross.
+      const ax = a.x + a.w, ay = a.y + a.h / 2;
+      const bx = b.x, by = b.y + b.h / 2;
+      const dx = Math.max(40, Math.abs(bx - ax) / 2);
+      parts.push(
+        `<path class="edge data" d="M ${ax} ${ay} C ${ax + dx} ${ay}, ${bx - dx} ${by}, ${bx} ${by}">` +
+        `<title>${esc(key)}: ${esc(d.from)} → ${esc(d.to)}</title></path>`,
+      );
+      parts.push(`<text class="dlabel" x="${(ax + bx) / 2}" y="${(ay + by) / 2 - 4}" text-anchor="middle">${esc(key)}</text>`);
+    }
+  }
+
   svg.innerHTML =
     `<defs><marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6"
        orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--line)"/></marker></defs>` +
@@ -1497,6 +1573,11 @@ function esc(s) {
 // an agent over MCP, or another project only lands in the index — so there has
 // to be a way to pull without reloading the page and losing the live socket.
 $("refresh").onclick = () => { loadScenes(); loadRegistry(); loadRuns(); };
+$("datatoggle").onclick = () => {
+  state.showData = !state.showData;
+  localStorage.setItem("ensemble:data", state.showData ? "on" : "off");
+  wires();
+};
 $("runscope").onclick = () => {
   state.runScope = state.runScope === "scene" ? "all" : "scene";
   localStorage.setItem("ensemble:runScope", state.runScope);

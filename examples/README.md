@@ -13,6 +13,7 @@ look like.
 | [04](./04-decision-council) | **Decision Council** — orchestrator, four teams, an adjudicating gate | Composition at scale · 15 nodes | — |
 | [05](./05-autoresearch) | **Autoresearch** — an agent improves one file against a code-graded metric; keep or revert, logged | The sealed `research()` mode · `ensemble research` · scoped write tools · time budget · `results.tsv` | ~$0.03/iter |
 | [06](./06-rented-research) | **Rented Research** — the same loop, but **opencode** proposes the changes | Agent backends (`runtime: "opencode"`) · the research escape hatch · `dir` as the safety boundary · a tie reverts | $0.01 for 5 iterations |
+| [07](./07-refine-loop) | **Refine Loop** — the score gate done right: keep-or-revert on the blackboard, stop when the score stops rising, end with the best | `runtime: "refine"` · convergence (`patience`, `target`) · improving a seeded input · `--answer` at launch | $0.05 for 6 rounds |
 
 ## Before running any of them
 

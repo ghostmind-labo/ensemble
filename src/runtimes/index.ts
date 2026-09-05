@@ -30,6 +30,7 @@ import { callAgent } from "./agent.ts";
 import { BUILTIN_TOOLS } from "../tools/builtin.ts";
 import { renderInputs } from "../state.ts";
 import { experimentRuntime } from "../research.ts";
+import { refineRuntime } from "../refine.ts";
 import type { Scene } from "../scene.ts";
 import type { BuiltinTool } from "../tools/builtin.ts";
 
@@ -99,6 +100,12 @@ export interface RuntimeObject {
   check?: (name: string, spec: NodeSpec, scene: Scene, registry: Registry) => string[];
   /** MCP servers a node of this runtime wants prewarmed (engine connects lazily). */
   mcpServers?: (spec: NodeSpec, scene: Scene) => string[];
+  /**
+   * State keys a node of this runtime reads by its OWN rules, beyond `inputs`
+   * (refine reads its candidate and score keys). Declared on the object so the
+   * data graph can prove they are produced and draw where they come from.
+   */
+  reads?: (spec: NodeSpec) => string[];
   /** Waiting runtimes: park the run or pass through — no model call. */
   park?: (args: RuntimeParkArgs) => { values: State } | { pending: PendingAsk };
   /** Computing runtimes: a deterministic function over state — no model call. */
@@ -306,6 +313,7 @@ export const RUNTIMES: Record<string, RuntimeObject> = {
   ask: askRuntime,
   fn: fnRuntime,
   experiment: experimentRuntime,
+  refine: refineRuntime,
 };
 
 /** Node properties every runtime shares; everything else belongs to an object. */

@@ -12,7 +12,7 @@
  * keep writing those files too — the easy way is to wrap `fileRunStore` and
  * add behaviour around it rather than replace it.
  */
-import { writeFileSync, appendFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 import type { State } from "./dsl.ts";
 import type { RunEvent } from "./events.ts";
@@ -27,6 +27,12 @@ export interface CostsArtifact {
 
 export interface RunStore {
   name: string;
+  /**
+   * Called once before anything else — a file store creates the run directory
+   * here. A store that keeps nothing on disk (replay's null store) omits it,
+   * and then no directory is ever created for the run.
+   */
+  prepare?(runDir: string): void;
   /** The blackboard, after every target. */
   writeState(runDir: string, state: State): void;
   /** The per-node receipt, alongside the state. */
@@ -43,6 +49,7 @@ export interface RunStore {
 
 export const fileRunStore: RunStore = {
   name: "file",
+  prepare: (runDir) => mkdirSync(runDir, { recursive: true }),
   writeState: (runDir, state) =>
     writeFileSync(join(runDir, "state.json"), JSON.stringify(state, null, 2), "utf8"),
   writeCosts: (runDir, costs) =>
@@ -53,4 +60,21 @@ export const fileRunStore: RunStore = {
     appendFileSync(join(runDir, "events.jsonl"), `${JSON.stringify(event)}\n`, "utf8"),
   writeResult: (runDir, markdown) => writeFileSync(join(runDir, "result.md"), markdown, "utf8"),
   recordIndex: (entry) => recordRun(entry),
+};
+
+/**
+ * The store that keeps nothing — every artifact is discarded and no run
+ * directory is created. This is what makes a replay weightless: the run is
+ * real (real engine, real predicates, real schemas) but it leaves no trace in
+ * `.ensemble/runs/` and no line in the machine index, so a thousand replays
+ * cost the viewer nothing to scroll past.
+ */
+export const nullRunStore: RunStore = {
+  name: "null",
+  writeState: () => {},
+  writeCosts: () => {},
+  writeJournal: () => {},
+  appendEvent: () => {},
+  writeResult: () => {},
+  recordIndex: () => {},
 };

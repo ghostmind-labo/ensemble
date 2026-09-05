@@ -14,7 +14,7 @@
  *
  * The engine only emits events; rendering lives in reporter.ts and serve.ts.
  */
-import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { writeFileSync, readFileSync, existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join, resolve, basename } from "node:path";
 import type { Scene, NodeSpec } from "./scene.ts";
@@ -36,6 +36,25 @@ import { fileRunStore, type RunStore } from "./store.ts";
 import { EDGE_KINDS, conditionLabel } from "./edges.ts";
 import { activeCapabilities } from "./capabilities.ts";
 import type { EventSink, NodeMeta } from "./events.ts";
+
+/**
+ * How a CALLING runtime executes — normally the runtime object's own `call`.
+ *
+ * Swappable so the same walk can run against something other than live models:
+ * replay answers from a recorded run's tape (see replay.ts); a test hands in a
+ * double. Park and compute runtimes never route through this — they are free
+ * and deterministic, so there is nothing worth substituting.
+ */
+export interface NodeCaller {
+  name: string;
+  call(args: {
+    node: string;
+    /** The runtime object's name the engine would otherwise dispatch to. */
+    runtime: string;
+    spec: NodeSpec;
+    messages: Array<{ role: "user" | "assistant"; content: string }>;
+  }): Promise<NodeResult>;
+}
 
 export interface RunOptions {
   maxNodeRuns?: number;
@@ -65,6 +84,8 @@ export interface RunOptions {
    * about keeping runs resumable.
    */
   store?: RunStore;
+  /** Executes calling runtimes — replay's tape, or a test double. Default: live. */
+  caller?: NodeCaller;
   /** Receives every run event. Omit for a silent run. */
   onEvent?: EventSink;
   /** Aborts the run; model nodes abort mid-stream, agent nodes between nodes. */
@@ -304,6 +325,8 @@ interface NodeCallCtx {
   capabilityTools: import("./tools/builtin.ts").BuiltinTool[];
   /** Built-in tool names an active capability has withdrawn from every node. */
   capabilityWithdraws: string[];
+  /** When set, calling runtimes execute through this instead of their own `call`. */
+  caller?: NodeCaller;
   signal?: AbortSignal;
 }
 
@@ -315,8 +338,20 @@ async function callOnce(
   text: string,
   history: Array<{ role: "user" | "assistant"; content: string }>,
 ): Promise<NodeResult> {
-  const rt = RUNTIMES[runtimeOf(ctx.scene, spec)];
-  if (!rt?.call) throw new Error(`runtime "${runtimeOf(ctx.scene, spec)}" cannot be called`);
+  const rtName = runtimeOf(ctx.scene, spec);
+  const rt = RUNTIMES[rtName];
+  if (!rt?.call) throw new Error(`runtime "${rtName}" cannot be called`);
+
+  // A substituted caller answers instead of the live runtime — same contract,
+  // same retries, same extraction; only where the text comes from changes.
+  if (ctx.caller) {
+    return ctx.caller.call({
+      node,
+      runtime: rtName,
+      spec,
+      messages: [...history, { role: "user", content: text }],
+    });
+  }
 
   const costLimit = ctx.budgetLeft();
   return rt.call({
@@ -541,7 +576,7 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
   const { id, dir: runDir } = resume
     ? { id: resume.journal.runId, dir: resume.runDir }
     : freeRunDir(root, runId(scene));
-  mkdirSync(runDir, { recursive: true });
+  store.prepare?.(runDir);
 
   // Everything below picks up where the journal left off, or starts clean.
   // `answers` land last so they satisfy the ask node the run was parked on.
@@ -662,6 +697,7 @@ export async function runScene(scene: Scene, goal: string, opts: RunOptions = {}
     capabilities: Object.fromEntries(capsActive.map(({ cap, value }) => [cap.name, value])),
     capabilityTools: capsActive.flatMap(({ cap, value }) => cap.tools?.(value, { runDir }) ?? []),
     capabilityWithdraws: capsActive.flatMap(({ cap, value }) => cap.withdraws?.(value) ?? []),
+    ...(opts.caller ? { caller: opts.caller } : {}),
     ...(opts.signal ? { signal: opts.signal } : {}),
   };
 
