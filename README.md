@@ -88,6 +88,26 @@ export OPENROUTER_API_KEY=...     # https://openrouter.ai/keys — only for mode
 Node 22.18 or newer. Runner files are `.mts`, loaded by Node's own type
 stripping — no build step to write one.
 
+### Let an agent build it
+
+This repo is also a Claude Code plugin marketplace. The plugin gives an agent
+everything it needs to take a use case from one sentence to a runner that
+validates and has been dry-run down every branch, with no human filling gaps:
+
+```sh
+/plugin marketplace add ghostmind-labo/ensemble
+/plugin install ensemble@ghostmind-ensemble
+```
+
+| Skill | For |
+|---|---|
+| `ensemble-build` | Breaks the use case down, writes the graph, runs validate → graph → a $0 dry run of every branch → check |
+| `ensemble-questions` | Writing `choice` / `score` / `noul` that Jev answers well, plus gates and thresholds |
+| `ensemble-runs` | Reading `run.json`, explaining a path, summarising many runs, calibrating thresholds |
+
+The plugin is not part of the npm package; the library itself still ships no
+skills.
+
 ---
 
 ## The three questions

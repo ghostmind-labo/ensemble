@@ -40,6 +40,13 @@ Thirteen files, and each one has a single job.
 demonstrates. `test/` — one `*.test.mts` per suite, auto-discovered by
 `test/run.mts`.
 
+`plugin/` + `.claude-plugin/marketplace.json` — the Claude Code plugin (marketplace
+`ghostmind-ensemble`, plugin `ensemble`). It is **not** part of the npm package
+(`files` excludes it), so the library still ships no skills. Its three skills teach
+an agent to use the library: `ensemble-build` (use case → validated runner, with
+`scripts/dryrun.mts`, a $0 executor), `ensemble-questions` (question design) and
+`ensemble-runs` (reading and tuning runs, with `scripts/summarize.mts`).
+
 Every `src/*.ts` opens with a doc comment explaining *why* the module exists,
 not what it does. Match that when adding one.
 
@@ -193,11 +200,21 @@ they run in parallel. Use `not_for` to draw the boundary against the neighbourin
 option. See https://docs.typesafe.ai/model-jaggedness/jev-1.13.
 </important>
 
+<important if="you are changing the public API, the CLI, or run.json / graph.json">
+
+The plugin's skills document the API in prose, and nothing tests prose. When a
+field, a node kind, a CLI flag or an error message changes, update
+`plugin/skills/ensemble-build/references/{api,errors}.md` in the same commit.
+Then check that `node plugin/skills/ensemble-build/scripts/dryrun.mts
+examples/<each>.mts --explore` still passes. Keep `plugin/.claude-plugin/plugin.json`
+`version` equal to `package.json`'s.
+</important>
+
 <important if="you are committing, branching, or shipping">
 
 The v2 rewrite lives on `v2`; `main` still holds the old orchestration product
 and is reached only through a PR. Everything deleted in the rewrite — the
-viewer, `serve.ts`, the runtime zoo, autoresearch, the plugin — is recoverable
-from `main`, and autoresearch in particular is parked rather than abandoned.
+viewer, `serve.ts`, the runtime zoo, autoresearch, the old plugin — is recoverable
+from `main` (the v1 plugin under `plugin/` was replaced wholesale, not revised), and autoresearch in particular is parked rather than abandoned.
 This repo's own `/.ensemble/` is gitignored.
 </important>
