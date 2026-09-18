@@ -51,7 +51,9 @@ export default runner({
 
     // Deterministic, free, instant — and the only thing that touches a count.
     tally: {
-      code: (state) => ({ rounds: Number(state["rounds"] ?? 0) + 1 }),
+      // One write key takes the return value WHOLE — so return the number, not
+      // { rounds: n }, which would nest as rounds.rounds.
+      code: (state) => Number(state["rounds"] ?? 0) + 1,
       reads: ["rounds"],
       writes: ["rounds"],
     },

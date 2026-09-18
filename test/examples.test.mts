@@ -4,7 +4,16 @@
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { isRunner, type Answer, type Decider, type Question, type Runner } from "../src/index.ts";
+import {
+  isRunner,
+  type Answer,
+  type Caller,
+  type Decider,
+  type ModelReply,
+  type ModelRequest,
+  type Question,
+  type Runner,
+} from "../src/index.ts";
 
 const repo = dirname(dirname(fileURLToPath(import.meta.url)));
 const load = async (path: string): Promise<Runner> => {
@@ -16,19 +25,21 @@ const load = async (path: string): Promise<Runner> => {
 const triage = await load("examples/01-triage/triage.mts");
 const picture = await load("examples/02-picture/picture.mts");
 const refine = await load("examples/03-refine/refine.mts");
+const robot = await load("examples/04-robot/brain.mts");
 
 // ── 1 · every example validates ─────────────────────────────────────────────
 for (const [name, example] of [
   ["01-triage", triage],
   ["02-picture", picture],
   ["03-refine", refine],
+  ["04-robot", robot],
 ] as const) {
   assert.deepEqual(example.validate(), [], `${name} must be sound`);
 }
-console.log("ok · 1 all three examples validate clean");
+console.log("ok · 1 all four examples validate clean");
 
 // ── 2 · every example serialises to a complete graph ────────────────────────
-for (const example of [triage, picture, refine]) {
+for (const example of [triage, picture, refine, robot]) {
   const graph = example.graph();
   assert.deepEqual(JSON.parse(JSON.stringify(graph)), graph);
   assert.match(graph.runner.hash, /^sha256:/);
@@ -41,23 +52,20 @@ for (const example of [triage, picture, refine]) {
 }
 console.log("ok · 2 each example emits a JSON graph with no dangling edges");
 
-// ── 3 · 02 shows all three question types in ONE request ────────────────────
+// ── 3 · 02 keeps the graph complete while choosing a model at run time ──────
 {
-  const decide = picture.graph().nodes.find((n) => n.id === "classify")!.decide!;
-  assert.deepEqual(decide.questions.map((q) => q.type).sort(), ["choice", "noul", "score"]);
-  assert.equal(decide.questions.length, 3, "one round trip, three answers");
-  assert.deepEqual(decide.gate, { on: "picture_kind", min: 0.75, to: "hand_off" });
+  const graph = picture.graph();
+  const decide = graph.nodes.find((n) => n.id === "classify")!.decide!;
+  assert.deepEqual(decide.questions.map((q) => q.type).sort(), ["choice", "choice", "noul", "score"]);
 
-  // and every declared option is wired — that is the property being demonstrated
-  const options = decide.questions.find((q) => q.key === "picture_kind")!.options!.map((o) => o.name);
-  const wired = picture
-    .graph()
-    .edges.map((e) => e.on)
-    .filter((on): on is { question: string; option: string } => Boolean(on && "option" in on))
-    .map((on) => on.option);
-  assert.deepEqual([...options].sort(), [...wired].sort());
+  // The durable question is enumerated; the volatile one is resolved in code.
+  const fidelity = decide.questions.find((q) => q.key === "fidelity")!;
+  assert.deepEqual(fidelity.options!.map((o) => o.name), ["draft", "final"]);
+  assert.equal(graph.nodes.find((n) => n.id === "choose_generator")!.kind, "code");
+  assert.equal(graph.nodes.find((n) => n.id === "draw")!.model!.from, "generator");
+  assert.equal(graph.nodes.find((n) => n.id === "draw")!.model!.id, undefined);
 }
-console.log("ok · 3 the picture example asks choice, noul and score together, all branches wired");
+console.log("ok · 3 the picture example asks the durable question and resolves the model in code");
 
 // ── 4 · 03 loops, and the loop budget is on the edge ────────────────────────
 {
@@ -88,4 +96,60 @@ console.log("ok · 4 the refine example loops on an edge budget and counts in co
 }
 console.log("ok · 5 the triage example runs end to end against a stub decider");
 
-console.log("5 cases");
+// ── 6 · 03 and 04 actually RUN — validation cannot catch a bad write shape ──
+{
+  const answering = (table: Record<string, Answer>): Decider =>
+    async (_state, questions: Record<string, Question>) => {
+      const answers: Record<string, Answer> = {};
+      for (const key of Object.keys(questions)) answers[key] = table[key]!;
+      return { model: "stub", answers, usage: { input_tokens: 200, output_tokens: 10 }, cost: 0.0000084 };
+    };
+  const speaking = (text: string): Caller =>
+    async (request: ModelRequest): Promise<ModelReply> => ({
+      model: request.model,
+      text,
+      images: [],
+      cost: 0.001,
+      usage: { prompt_tokens: 50, completion_tokens: 10 },
+    });
+
+  // refine: one weak round, then good enough. The counter must reach 1, not
+  // { rounds: 1 } — a single write key takes the return value WHOLE.
+  let round = 0;
+  const judging: Decider = async (_state, questions) => {
+    round++;
+    const quality = round === 1 ? 0.4 : 2.0;
+    const answers: Record<string, Answer> = {};
+    for (const key of Object.keys(questions)) {
+      answers[key] =
+        key === "quality"
+          ? { type: "score", score: quality, confidence: 0.8, probabilities: {}, legend: {} }
+          : { type: "noul", noul: 0.05 };
+    }
+    return { model: "stub", answers, usage: { input_tokens: 200, output_tokens: 10 }, cost: 0.0000084 };
+  };
+  const drafted = await refine({ goal: "explain calibration" }, { decider: judging, caller: speaking("a draft") });
+  assert.equal(drafted.state["rounds"], 1, "the counter is a number, not a nested object");
+  assert.match(String(drafted.result), /^published:/);
+  assert.equal(drafted.run.run.status, "completed");
+
+  // robot: eyes, then a confident decision to advance
+  const seen = await robot(
+    { goal: "keep the corridor clear", frame: "data:image/png;base64,AA" },
+    {
+      caller: speaking("a clear corridor, nothing in the way"),
+      decider: answering({
+        action: { type: "choice", choice: "advance", confidence: 0.94, probabilities: { advance: 0.94 } },
+        hazard: { type: "noul", noul: 0.02 },
+        urgency: { type: "score", score: 0.2, confidence: 0.9, probabilities: {}, legend: {} },
+      }),
+    },
+  );
+  assert.deepEqual(seen.run.steps.map((s) => s.node), ["look", "assess", "go"]);
+  assert.deepEqual(seen.run.steps.map((s) => s.kind), ["model", "decide", "work"]);
+  assert.match(String(seen.result), /^advancing/);
+  assert.equal(seen.state["scene"], "a clear corridor, nothing in the way");
+}
+console.log("ok · 6 the refine and robot examples run end to end, write shapes included");
+
+console.log("6 cases");

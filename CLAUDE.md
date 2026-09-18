@@ -6,16 +6,25 @@ routes to code the user wrote. It asks [Jev](https://docs.typesafe.ai)
 emits the graph and the run as JSON. TypeScript ESM on Node ≥ 22.18, **zero
 runtime dependencies**, one credential: `TYPESAFE_API_KEY`.
 
-It does not call models, hold prompts, run tool loops, ship skills, serve HTTP,
-or draw anything. Those were all removed on purpose. If a change would add one
-back, that is the change to question.
+It calls generative models through **OpenRouter only** — one endpoint, one key,
+one billing line, every vendor. Do not add `openai`, `@anthropic-ai/sdk` or
+`@google/genai`: they would each be a runtime dependency (the package has zero),
+each need their own key and cost format, and OpenRouter already returns
+`usage.cost` in USD per call, which is what makes a budget cap possible at all.
+A vendor-exclusive feature belongs in a user's own `work` handler, which is
+exactly what that seam is for.
+
+It still holds no prompts of its own, runs no tool loop, ships no skills, serves
+no HTTP, and draws nothing. Those were removed on purpose; a change that adds one
+back is the change to question.
 
 ## Project map
 
-Nine files, and each one has a single job.
+Ten files, and each one has a single job.
 
 - `src/questions.ts` — `choice` / `score` / `noul`, their answer types, and the API limits enforced at authoring time
 - `src/jev.ts` — the decider: one `fetch` to `POST /v1/systemone`, plus the `Decider` seam
+- `src/openrouter.ts` — the caller: generation, vision, image output, the live model catalogue, and the `Caller` seam
 - `src/spec.ts` — the vocabulary you write down: nodes, edges, handlers, the `on:` grammar, `probeReads`
 - `src/validate.ts` — the proof. Returns problems as strings, never throws
 - `src/graph.ts` — `graph.json`
@@ -76,24 +85,40 @@ string-vs-object, and `steps[].took` joining a run to `graph.edges[].id`.
 
 <important if="you are adding a node kind, an edge form, or a question type">
 
-There are three node kinds (`decide`, `work`, `code`), two branch forms (`on:`
-for meaning, `when:` for arithmetic) and three questions. Each is a closed set,
+There are four node kinds (`decide`, `work`, `code`, `model`), two branch forms
+(`on:` for meaning, `when:` for arithmetic) and three questions. Each is a closed set,
 and the closed-ness is the feature — it is what lets `validate` prove
 exhaustiveness and `graph` emit a complete document. Adding a fourth of anything
 needs a reason that survives that argument.
 
-If it is added anyway: a node kind needs an `isX` guard in `spec.ts`, a
-`writesOf`/`readsOf` branch, a `validate` check, a `graph` cost class, and an
-`execute` arm.
+`model` was the fourth, added after the fact, and the reason it earned its place
+is the standard to beat: perception forced it (Jev is text-only, so anything that
+must LOOK needs a generative call), and putting it in a node made the emitted
+graph MORE complete than hiding it in an opaque handler would have — `graph.json`
+can now say which model, whether it sees, and what it costs.
+
+If one is added anyway: a node kind needs an `isX` guard in `spec.ts`, a
+`writesOf`/`readsOf` branch, a `validate` check, a `graph` cost class, an
+`execute` arm, and a badge in `report.ts`.
 </important>
 
 <important if="you are changing validation or the data graph">
 
 State keys have exactly two origins: the runner's `inputs` (plus `goal`, always)
-and a node's writes — a decide node writes one key per question. `validate`
-proves every key a node reads, and every key a `when()` touches, has one. A
-`when` is opaque code, so its reads are discovered by running it against a
-recording proxy (`probeReads`), never by parsing source.
+and a node's writes — a decide node writes one key per question, and a model node
+writes positionally (`[text]` or `[text, images]`). Everywhere else, ONE write key
+takes the return value whole and several destructure it; returning `{ rounds: n }`
+for `writes: ["rounds"]` nests it as `rounds.rounds`, which validation cannot
+catch, so examples must be *run* in tests, not merely validated.
+
+`validate` proves every key a node reads, and every key a `when()` touches, has
+an origin. A `when` is opaque code, so its reads are discovered by running it
+against a recording proxy (`probeReads`), never by parsing source.
+
+`imageKeys()` derives which state keys hold pictures, and `validate` refuses to
+let one reach a decide node — Jev takes text only, and a base64 frame where the
+judgement should be is the single worst thing that can happen to a perception
+graph.
 
 Error messages name the fix. Keep it that way — `inputs: ["…"]` in the message
 is the reason the check is useful rather than annoying.
@@ -107,6 +132,30 @@ regression to avoid. The seam is `RunEvent` (three events) and the two JSON
 documents; anything visual consumes those and lives outside this package.
 `src/report.ts` is the one shipped consumer, and it stays a single line rewritten
 in place, not a screen.
+</important>
+
+<important if="you are about to state a model id, a price, a capability, or how Jev behaves">
+
+**Check the source. Do not answer from memory — it is probably stale.**
+
+Both vendors move faster than this repo does. Model ids appear and retire, prices
+change, and a model that could not see images last month can today. Jev itself is
+versioned, and its documented weaknesses are published per version.
+
+| What you need | Where it actually is |
+|---|---|
+| Every model, live: ids, prices, modalities, context | `curl -s https://openrouter.ai/api/v1/models \| jq '.data[] \| select(.id=="…")'` |
+| Which models SEE | `.architecture.input_modalities` contains `"image"` |
+| Which models DRAW | `.architecture.output_modalities` contains `"image"` |
+| What a model costs | `.pricing.prompt` / `.completion` / `.image_output`, USD per token as strings |
+| The whole TypeSafe doc set | https://docs.typesafe.ai/llms.txt — fetch this first, it indexes every page |
+| How to shape questions | https://docs.typesafe.ai/concepts/how-to-build-with-system-one |
+| Jev's current weaknesses | https://docs.typesafe.ai/model-jaggedness/jev-1.13 — **check for a newer version first** |
+| Primitive limits and fields | https://docs.typesafe.ai/primitives/choice · `/score` · `/noul` · `/advanced` |
+
+Never hardcode a model id into `src/`. Examples may name one for readability, but
+the library resolves them through `catalog()` and `shortlist()` at run time, which
+is the only reason those helpers exist.
 </important>
 
 <important if="you are working on Jev questions, criteria, or thresholds">

@@ -7,8 +7,9 @@ between. `ensemble` is the judgement call — and only that. It asks
 [Jev](https://docs.typesafe.ai) one calibrated question, routes to a function
 **you** wrote, and writes down what it decided and why.
 
-It never calls a model on your behalf. It holds no prompts, ships no tools, and
-runs no agent loop. You bring the workers; it decides which one runs next.
+It calls generative models only where you put one — to write, to draw, or to
+*look*, since Jev takes text and cannot see. Everything else is your code: it
+ships no prompts of its own, no tools, and no agent loop.
 
 ```ts
 import { runner, choice } from "@ghostmind-dev/ensemble";
@@ -48,7 +49,8 @@ export default runner({
 const { result, run } = await triage({ goal: "I was charged twice for A-104" });
 ```
 
-Zero runtime dependencies. One credential: `TYPESAFE_API_KEY`.
+Zero runtime dependencies. Two credentials, and the second only if you call a
+model: `TYPESAFE_API_KEY`, `OPENROUTER_API_KEY`.
 
 ---
 
@@ -79,7 +81,8 @@ than *the model said photo*.
 
 ```sh
 npm install @ghostmind-dev/ensemble
-export TYPESAFE_API_KEY=...     # https://console.typesafe.ai/settings/keys
+export TYPESAFE_API_KEY=...       # https://console.typesafe.ai/settings/keys
+export OPENROUTER_API_KEY=...     # https://openrouter.ai/keys — only for model nodes
 ```
 
 Node 22.18 or newer. Runner files are `.mts`, loaded by Node's own type
@@ -123,9 +126,10 @@ choice("What kind of picture?", {
 
 ---
 
-## The three node kinds
+## The four node kinds
 
-A node is exactly one of these. There is no fourth, and no `runtime:` string.
+A node is exactly one of these, told apart by which key it has. There is no
+`runtime:` string.
 
 ```ts
 // decide — one Jev call. The only thing this library does itself.
@@ -139,16 +143,25 @@ classify: {
 send: { work: "billing", reads: ["goal"], writes: ["reply"] }
 
 // code — deterministic, free, instant. Where arithmetic belongs.
-tally: { code: (s) => ({ rounds: Number(s.rounds ?? 0) + 1 }), writes: ["rounds"] }
+tally: { code: (s) => Number(s.rounds ?? 0) + 1, writes: ["rounds"] }
+
+// model — one generative call, through OpenRouter. Write, draw, or LOOK.
+look: {
+  model: "google/gemini-2.5-flash",
+  prompt: (s) => `What is in front of the robot? Its task: ${s.goal}`,
+  sees: ["frame"],                         // ← vision
+  writes: ["scene"],
+}
 ```
 
 `reads` on a decide node is **required and load-bearing**. Jev's accuracy is
 documented to fall as irrelevant detail grows, so the filter is the feature, not
 documentation — only those keys are sent.
 
-`writes` decides what lands on the blackboard: one key takes the handler's
-return value whole, several destructure it, none means the node only had an
-effect.
+`writes` decides what lands on the blackboard: **one key takes the return value
+whole**, several destructure it, none means the node only had an effect. Watch
+that first rule — returning `{ rounds: 1 }` for `writes: ["rounds"]` nests it as
+`rounds.rounds`. Return the bare value.
 
 ### Your handlers
 
@@ -164,6 +177,88 @@ work: {
 `report()` is how the run record stays honest about money the runner did not
 spend. `signal` aborts on budget, cancellation or your own signal — pass it
 through to your fetch.
+
+---
+
+## Calling models
+
+A `model` node is one OpenRouter call. Every vendor, one key, one billing line —
+and `usage.cost` comes back in USD on every call, which is what makes `--budget`
+mean anything.
+
+```ts
+// write
+draft: { model: "anthropic/claude-sonnet-4.5", prompt: "…", writes: ["text"] }
+
+// look — the only way a graph can perceive, because Jev cannot see
+look: { model: "google/gemini-2.5-flash", prompt: "what is here?",
+        sees: ["frame"], writes: ["scene"] }
+
+// draw — [text, images] is positional, and only a model node writes this way
+make: { model: "google/gemini-2.5-flash-image", prompt: "a hero image",
+        writes: ["caption", "picture"] }
+```
+
+`sees` takes state keys holding image URLs or `data:` URLs. Generated images come
+back as `data:` URLs in the *same shape*, so what one node draws the next can
+look at with no conversion in between.
+
+### Jev cannot see, and `validate` enforces it
+
+This is the constraint that shapes every perception graph. Send an image key to a
+decide node and it refuses by name:
+
+```
+node "assess" sends "frame" to the decider, but that key holds image data and Jev
+takes text only. Have a model node look at it and write down what it saw, then
+decide on that.
+```
+
+Which is also the cheap architecture: look once with a model, then ask four
+narrow questions about the *sentence* for a fraction of a cent.
+
+### Choosing a model at run time
+
+There are 445 models on OpenRouter against Choice's limit of 255, and the list
+changes weekly. So the decision is split — and the split is the whole thesis in
+miniature:
+
+```ts
+// Code filters on numbers and booleans. `draws` is a fact; a price cap is arithmetic.
+const generators = shortlist(await catalog(), { draws: true, maxPromptUsdPerM: 10 });
+
+// Jev answers the question that will still make sense next year.
+fidelity: choice("How much does image quality matter here?", {
+  draft: { what: "A rough look, to be iterated on" },
+  final: { what: "Going in front of users as-is" },
+})
+```
+
+Then a `code` node turns the durable answer into today's model id, and the model
+node takes it from state:
+
+```ts
+draw: { model: { from: "generator" }, prompt: …, writes: ["caption", "picture"] }
+```
+
+**Never let a `choice` enumerate a live catalogue.** Its options would stop being
+knowable at authoring time, and `graph.json` could no longer say what the
+branches are — which is the one property worth protecting. Ask the stable
+question; resolve the volatile detail in code.
+
+`catalog()` reads OpenRouter's live list (cached ten minutes) and gives each
+model as capability data: `vision`, `draws`, `tools`, `promptUsd`,
+`completionUsd`, `imageUsd`, `contextLength`. `shortlist()` filters it,
+`modelOptions()` turns the survivors into `choice` criteria.
+
+### Why no vendor SDKs
+
+No `openai`, no `@anthropic-ai/sdk`, no `@google/genai` — on purpose. Three SDKs
+means three dependencies, three keys, three billing dashboards and three cost
+formats to reconcile; OpenRouter is one of each, and reports what every call
+cost in USD. If you need something only a vendor SDK exposes, that is a `work`
+handler using your own client — which is exactly what that seam is for, and it
+still shows up in the run record if you `report({ cost })`.
 
 ---
 
@@ -430,9 +525,9 @@ Scores from rubrics of different lengths are not comparable — normalise by
 
 ## What this deliberately does not do
 
-No models, prompts, tools, agents, skills, MCP client or registry. No server, no
-browser viewer, no mermaid, no markdown reports. No parallel node groups, no
-resume, no replay.
+No prompts of its own, no tools, no agent loop, no skills, no MCP client or
+registry, no vendor SDKs. No server, no browser viewer, no mermaid, no markdown
+reports. No parallel node groups, no resume, no replay.
 
 Those are not oversights — they were removed. Keeping them would have made this
 a framework you live inside rather than a function you call, and the whole point
@@ -446,13 +541,15 @@ is that **your code owns the control flow**.
 ensemble validate examples/01-triage/triage.mts       # free
 ensemble graph    examples/02-picture/picture.mts | jq
 ensemble run      examples/03-refine/refine.mts "explain calibrated confidence"
+ensemble run      examples/04-robot/brain.mts --input frame=https://… "keep the corridor clear"
 ```
 
 | | |
 |---|---|
 | [`01-triage`](examples/01-triage/triage.mts) | The smallest thing that is still the whole idea: one choice, three branches, a gate |
-| [`02-picture`](examples/02-picture/picture.mts) | All three question types in one request; handlers on different backends; arithmetic in `when:` |
+| [`02-picture`](examples/02-picture/picture.mts) | Real image generation: ask the durable question, resolve today's model in code, draw |
 | [`03-refine`](examples/03-refine/refine.mts) | A loop that knows when to stop — a score gate, a loop budget, counting in code |
+| [`04-robot`](examples/04-robot/brain.mts) | A little brain: a vision model looks, Jev decides, your handler acts — one tick of a perception loop |
 
 ---
 
@@ -463,7 +560,8 @@ import {
   runner,                          // define one
   choice, score, noul,             // ask
   validate, toGraph, execute,      // prove, emit, run
-  jev, reporter,                   // the decider, the terminal view
+  jev, openrouter, reporter,       // the decider, the caller, the terminal view
+  catalog, shortlist, modelOptions,// the live model list, filtered in code
 } from "@ghostmind-dev/ensemble";
 
 const pipeline = runner({ … });
@@ -474,5 +572,11 @@ await pipeline(inputs, options);   // { result, state, run }
 
 Throws `RunnerError` (with `.problems`) if the spec does not validate, and
 `RunFailed` (with `.run`, the partial record) if a node does.
+
+Both vendors are seams, so a test never touches the network:
+
+```ts
+await pipeline(inputs, { decider: myStub, caller: myStub });
+```
 
 MIT.

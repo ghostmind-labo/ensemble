@@ -17,6 +17,7 @@ import {
   edgeId,
   isCode,
   isDecide,
+  isModel,
   isWork,
   parseBranch,
   writesOf,
@@ -27,6 +28,7 @@ import {
 } from "./spec.ts";
 import { confidenceOf, valueOf, type Answer } from "./questions.ts";
 import { jev, type Decider } from "./jev.ts";
+import { openrouter, type Caller } from "./openrouter.ts";
 import { validate } from "./validate.ts";
 import { toGraph } from "./graph.ts";
 
@@ -46,7 +48,7 @@ export interface StepAnswer {
 export interface RunStep {
   n: number;
   node: string;
-  kind: "decide" | "work" | "code";
+  kind: "decide" | "work" | "code" | "model";
   ms: number;
   cost: number;
   answers?: Record<string, StepAnswer>;
@@ -99,6 +101,8 @@ export interface RunOptions {
   signal?: AbortSignal;
   /** Swap the decider — a fallback model, a cache, a stub in a test. */
   decider?: Decider;
+  /** Swap the generative caller — a stub, a cache, another vendor. */
+  caller?: Caller;
   /** Live progress. Fires before a node runs and again when it finishes. */
   onEvent?: (event: RunEvent) => void;
 }
@@ -143,6 +147,10 @@ function toStepAnswer(answer: Answer): StepAnswer {
   return base;
 }
 
+/** Image state may hold one url or several; a model node wants them flat either way. */
+const asUrls = (value: unknown): string[] =>
+  typeof value === "string" ? [value] : Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
+
 /** One key takes the value whole; several destructure it; none writes nothing. */
 function applyWrites(node: string, keys: string[], value: unknown): Record<string, unknown> {
   if (keys.length === 0) return {};
@@ -171,6 +179,7 @@ export async function execute(
 
   const maxSteps = options.maxSteps ?? 50;
   const decider = options.decider ?? jev(spec.jev);
+  const caller = options.caller ?? openrouter(spec.openrouter);
   const edges = spec.edges ?? [];
   const startedAt = new Date();
   const graphHash = toGraph(spec).runner.hash;
@@ -227,7 +236,7 @@ export async function execute(
       const step: RunStep = {
         n: steps.length + 1,
         node: name,
-        kind: isDecide(node) ? "decide" : isWork(node) ? "work" : "code",
+        kind: isDecide(node) ? "decide" : isWork(node) ? "work" : isModel(node) ? "model" : "code",
         ms: 0,
         cost: 0,
         took: null,
@@ -242,7 +251,10 @@ export async function execute(
           ? `asking the decider · ${Object.keys(node.decide).length} question${Object.keys(node.decide).length === 1 ? "" : "s"}`
           : isWork(node)
             ? `running work "${node.work}"`
-            : "computing",
+            : isModel(node)
+              ? `calling ${typeof node.model === "string" ? node.model : String(state[node.model.from] ?? "?")}` +
+                (node.sees?.length ? ` · looking at ${node.sees.join(", ")}` : "")
+              : "computing",
       });
 
       let gated: string | undefined;
@@ -287,6 +299,37 @@ export async function execute(
           lastValue = value;
           step.writes = applyWrites(name, writesOf(node), value);
           Object.assign(state, step.writes);
+        } else if (isModel(node)) {
+          const id = typeof node.model === "string" ? node.model : String(state[node.model.from] ?? "");
+          if (!id) {
+            throw new Error(
+              `node "${name}" takes its model from "${(node.model as { from: string }).from}", which is empty — ` +
+                `nothing upstream chose one`,
+            );
+          }
+          const reply = await caller({
+            model: id,
+            prompt: typeof node.prompt === "function" ? node.prompt(state) : node.prompt,
+            ...(node.system ? { system: node.system } : {}),
+            images: (node.sees ?? []).flatMap((key) => asUrls(state[key])),
+            ...(node.temperature !== undefined ? { temperature: node.temperature } : {}),
+            ...(node.maxTokens !== undefined ? { maxTokens: node.maxTokens } : {}),
+            signal: controller.signal,
+          });
+          step.cost = reply.cost;
+          step.meta = {
+            model: reply.model,
+            usage: reply.usage,
+            ...(reply.images.length ? { drew: reply.images.length } : {}),
+          };
+          // Positional, and documented as such: [text] or [text, images].
+          const keys = writesOf(node);
+          const written: Record<string, unknown> = {};
+          if (keys[0]) written[keys[0]] = reply.text;
+          if (keys[1]) written[keys[1]] = reply.images;
+          step.writes = written;
+          Object.assign(state, written);
+          lastValue = keys.length > 1 ? { text: reply.text, images: reply.images } : reply.text;
         } else if (isCode(node)) {
           const value = await node.code(state);
           lastValue = value;

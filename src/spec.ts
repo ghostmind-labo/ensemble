@@ -16,6 +16,7 @@
  */
 import type { Question } from "./questions.ts";
 import type { JevConfig } from "./jev.ts";
+import type { CallerConfig } from "./openrouter.ts";
 
 export type State = Record<string, unknown>;
 
@@ -79,11 +80,47 @@ export interface CodeNode {
   label?: string;
 }
 
-export type NodeSpec = DecideNode | WorkNode | CodeNode;
+/**
+ * A generative call, through OpenRouter.
+ *
+ * This is the node kind the original v2 design refused to have, on the grounds
+ * that the library should never call a model. Perception is what changed the
+ * argument: Jev is text-only, so anything that must LOOK at the world needs a
+ * model, and burying that call inside an opaque handler would make the emitted
+ * graph less complete — it could no longer say which model a node uses, whether
+ * it sees, or what it costs. A node earns its place by making the picture
+ * better, and this one does.
+ */
+export interface ModelNode {
+  /** An OpenRouter id, or `{ from }` to use an id a decide node just picked. */
+  model: string | { from: string };
+  /** The instruction. A function receives the blackboard. */
+  prompt: string | ((state: Readonly<State>) => string);
+  system?: string;
+  /**
+   * State keys holding image URLs or `data:` URLs, sent for the model to LOOK
+   * at. Needs a model whose card says `vision` — and these keys must never
+   * reach a decide node, because Jev takes text only.
+   */
+  sees?: string[];
+  reads?: string[];
+  /**
+   * Positional, and only for this node kind: `[text]`, or `[text, images]` to
+   * capture pictures the model DREW. Images arrive as `data:` URLs, in the same
+   * shape `sees` accepts, so a generated frame can be looked at by the next node.
+   */
+  writes?: string[];
+  temperature?: number;
+  maxTokens?: number;
+  label?: string;
+}
+
+export type NodeSpec = DecideNode | WorkNode | CodeNode | ModelNode;
 
 export const isDecide = (node: NodeSpec): node is DecideNode => "decide" in node;
 export const isWork = (node: NodeSpec): node is WorkNode => "work" in node;
 export const isCode = (node: NodeSpec): node is CodeNode => "code" in node;
+export const isModel = (node: NodeSpec): node is ModelNode => "model" in node;
 
 /* ───────────────────────────────── edges ──────────────────────────────── */
 
@@ -169,6 +206,7 @@ export interface RunnerSpec {
   /** The state key returned as `result`. Defaults to the last step's value. */
   result?: string;
   jev?: JevConfig;
+  openrouter?: CallerConfig;
 }
 
 /* ──────────────────────────── derived facts ───────────────────────────── */
@@ -183,9 +221,33 @@ export function writesOf(node: NodeSpec): string[] {
   return isDecide(node) ? Object.keys(node.decide) : (node.writes ?? []);
 }
 
-/** The state keys a node reads, as declared. */
+/** The state keys a node reads — declared, plus the ones its kind reads by its own rules. */
 export function readsOf(node: NodeSpec): string[] {
-  return isDecide(node) ? node.reads : (node.reads ?? []);
+  if (isDecide(node)) return node.reads;
+  if (isModel(node)) {
+    const chosen = typeof node.model === "string" ? [] : [node.model.from];
+    return [...new Set([...(node.reads ?? []), ...(node.sees ?? []), ...chosen])];
+  }
+  return node.reads ?? [];
+}
+
+/**
+ * Every state key that holds picture data, derived rather than declared: what a
+ * model node looks at, and what one draws.
+ *
+ * Worth computing because of a single hard constraint — Jev accepts text only.
+ * A frame reaching a decide node would be a wall of base64 where the judgement
+ * should be, so `validate` refuses it by name.
+ */
+export function imageKeys(spec: RunnerSpec): Set<string> {
+  const keys = new Set<string>();
+  for (const node of Object.values(spec.nodes)) {
+    if (!isModel(node)) continue;
+    for (const key of node.sees ?? []) keys.add(key);
+    const drawn = (node.writes ?? [])[1];
+    if (drawn) keys.add(drawn);
+  }
+  return keys;
 }
 
 /** key → the nodes that write it. */

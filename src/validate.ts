@@ -17,8 +17,10 @@
 import {
   branchHolds,
   externalKeys,
+  imageKeys,
   isCode,
   isDecide,
+  isModel,
   isWork,
   parseBranch,
   probeReads,
@@ -36,6 +38,7 @@ const list = (xs: string[]): string => xs.map((x) => `"${x}"`).join(", ");
 export function validate(spec: RunnerSpec): string[] {
   const problems: string[] = [];
   const nodes = Object.entries(spec.nodes ?? {});
+  const pictures = imageKeys(spec);
   const names = new Set(nodes.map(([name]) => name));
   const edges = spec.edges ?? [];
 
@@ -47,11 +50,16 @@ export function validate(spec: RunnerSpec): string[] {
 
   /* ── nodes ── */
   for (const [name, node] of nodes) {
-    const kinds = [isDecide(node) && "decide", isWork(node) && "work", isCode(node) && "code"].filter(Boolean);
+    const kinds = [
+      isDecide(node) && "decide",
+      isWork(node) && "work",
+      isCode(node) && "code",
+      isModel(node) && "model",
+    ].filter(Boolean);
     if (kinds.length !== 1) {
       problems.push(
         kinds.length === 0
-          ? `node "${name}" is none of decide / work / code — a node must be exactly one`
+          ? `node "${name}" is none of decide / work / code / model — a node must be exactly one`
           : `node "${name}" is both ${kinds.join(" and ")} — a node must be exactly one`,
       );
       continue;
@@ -72,6 +80,14 @@ export function validate(spec: RunnerSpec): string[] {
         problems.push(
           `node "${name}" declares no reads — a decide node must name the state it sends. ` +
             `Accuracy falls as irrelevant detail grows, so the filter is the feature: reads: ["goal"]`,
+        );
+      }
+      const looking = node.reads?.filter((key) => pictures.has(key)) ?? [];
+      if (looking.length) {
+        problems.push(
+          `node "${name}" sends ${list(looking)} to the decider, but ${looking.length === 1 ? "that key holds" : "those keys hold"} ` +
+            `image data and Jev takes text only. Have a model node look at ${looking.length === 1 ? "it" : "them"} ` +
+            `and write down what it saw, then decide on that.`,
         );
       }
       if (node.gate) {
@@ -105,6 +121,23 @@ export function validate(spec: RunnerSpec): string[] {
 
     if (isCode(node) && typeof node.code !== "function") {
       problems.push(`node "${name}" declares code that is not a function`);
+    }
+
+    if (isModel(node)) {
+      if (typeof node.model === "string" ? !node.model : !node.model?.from) {
+        problems.push(`node "${name}" names no model — give it an id, or { from: "<state key>" }`);
+      }
+      if (!node.prompt) problems.push(`node "${name}" has no prompt — the instruction IS the node`);
+      const writes = node.writes ?? [];
+      if (writes.length > 2) {
+        problems.push(
+          `node "${name}" declares writes ${list(writes)} — a model node writes at most two keys, ` +
+            `positionally: [text] or [text, images]`,
+        );
+      }
+      if (node.sees?.length && writes.length > 1 && node.sees.includes(writes[1]!)) {
+        problems.push(`node "${name}" both looks at and overwrites "${writes[1]}" in one step`);
+      }
     }
   }
 

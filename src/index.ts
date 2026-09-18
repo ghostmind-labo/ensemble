@@ -38,6 +38,9 @@ export type {
 export { jev, JevError, DEFAULT_BASE_URL, DEFAULT_MODEL, USD_PER_INPUT_TOKEN } from "./jev.ts";
 export type { Decider, Decision, JevConfig } from "./jev.ts";
 
+export { catalog, forgetCatalog, modelOptions, openrouter, OpenRouterError, shortlist, OPENROUTER_URL } from "./openrouter.ts";
+export type { Caller, CallerConfig, ModelCard, ModelFilter, ModelReply, ModelRequest } from "./openrouter.ts";
+
 export { execute, RunFailed, RunnerError, RUN_SCHEMA } from "./execute.ts";
 export type { RunDoc, RunEvent, RunOptions, RunOutcome, RunStatus, RunStep, StepAnswer } from "./execute.ts";
 
@@ -49,7 +52,7 @@ export { validate } from "./validate.ts";
 export { reporter, summarise, money } from "./report.ts";
 export type { ReporterOptions } from "./report.ts";
 
-export { branchHolds, parseBranch, probeReads, producers, readsOf, writesOf } from "./spec.ts";
+export { branchHolds, imageKeys, parseBranch, probeReads, producers, readsOf, writesOf } from "./spec.ts";
 export type {
   Branch,
   CodeNode,
@@ -57,6 +60,7 @@ export type {
   Edge,
   Handler,
   HandlerContext,
+  ModelNode,
   NodeSpec,
   RunnerSpec,
   State,

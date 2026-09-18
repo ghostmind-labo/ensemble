@@ -26,6 +26,7 @@ import {
   externalKeys,
   isCode,
   isDecide,
+  isModel,
   isWork,
   parseBranch,
   probeReads,
@@ -55,7 +56,7 @@ export interface GraphQuestion {
 
 export interface GraphNode {
   id: string;
-  kind: "decide" | "work" | "code";
+  kind: "decide" | "work" | "code" | "model";
   label?: string;
   reads: string[];
   writes: string[];
@@ -67,6 +68,19 @@ export interface GraphNode {
     gate?: { on: string; min: number; to: string };
   };
   work?: { handler: string };
+  model?: {
+    /** A fixed OpenRouter id, when the node names one. */
+    id?: string;
+    /** The state key a decide node fills with the id, when it is chosen at run time. */
+    from?: string;
+    /** `text` for a literal prompt, `source` when it is computed from state. */
+    prompt: { text: string } | { source: string };
+    system?: string;
+    /** State keys this node looks at. */
+    sees?: string[];
+    temperature?: number;
+    maxTokens?: number;
+  };
 }
 
 export interface GraphEdge {
@@ -150,6 +164,20 @@ export function toGraph(spec: RunnerSpec): GraphDoc {
       };
     }
     if (isWork(node)) return { ...head("work", "metered"), work: { handler: node.work } };
+    if (isModel(node)) {
+      return {
+        ...head("model", "metered"),
+        model: {
+          ...(typeof node.model === "string" ? { id: node.model } : { from: node.model.from }),
+          prompt:
+            typeof node.prompt === "function" ? { source: node.prompt.toString() } : { text: node.prompt },
+          ...(node.system ? { system: node.system } : {}),
+          ...(node.sees?.length ? { sees: node.sees } : {}),
+          ...(node.temperature !== undefined ? { temperature: node.temperature } : {}),
+          ...(node.maxTokens !== undefined ? { maxTokens: node.maxTokens } : {}),
+        },
+      };
+    }
     return head("code", "free");
   });
 
