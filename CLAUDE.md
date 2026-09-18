@@ -20,11 +20,14 @@ back is the change to question.
 
 ## Project map
 
-Ten files, and each one has a single job.
+Thirteen files, and each one has a single job.
 
 - `src/questions.ts` — `choice` / `score` / `noul`, their answer types, and the API limits enforced at authoring time
 - `src/jev.ts` — the decider: one `fetch` to `POST /v1/systemone`, plus the `Decider` seam
 - `src/openrouter.ts` — the caller: generation, vision, image output, the live model catalogue, and the `Caller` seam
+- `src/skills.ts` — the Agent Skills standard, read from disk; `skillOptions` for a choice
+- `src/mcp.ts` — a hand-rolled stdio JSON-RPC client. One tool call per node, never a loop
+- `src/registry.ts` — discovery: the official MCP registry, a skills index, and `preflight`
 - `src/spec.ts` — the vocabulary you write down: nodes, edges, handlers, the `on:` grammar, `probeReads`
 - `src/validate.ts` — the proof. Returns problems as strings, never throws
 - `src/graph.ts` — `graph.json`
@@ -85,7 +88,7 @@ string-vs-object, and `steps[].took` joining a run to `graph.edges[].id`.
 
 <important if="you are adding a node kind, an edge form, or a question type">
 
-There are four node kinds (`decide`, `work`, `code`, `model`), two branch forms
+There are five node kinds (`decide`, `work`, `code`, `model`, `mcp`), two branch forms
 (`on:` for meaning, `when:` for arithmetic) and three questions. Each is a closed set,
 and the closed-ness is the feature — it is what lets `validate` prove
 exhaustiveness and `graph` emit a complete document. Adding a fourth of anything
@@ -156,6 +159,28 @@ versioned, and its documented weaknesses are published per version.
 Never hardcode a model id into `src/`. Examples may name one for readability, but
 the library resolves them through `catalog()` and `shortlist()` at run time, which
 is the only reason those helpers exist.
+</important>
+
+<important if="you are working on skills, MCP, or anything a model must be CAPABLE of">
+
+**A model node never needs tool-calling support.** The `mcp` node makes the call
+itself and writes the result to the blackboard; skills are inlined as text. So a
+model with no tool support, or a tiny specialised one, still sits downstream of
+every tool and skill. Never add a check for whether a model supports tools —
+`preflight` deliberately does not, and `test/registry.test.mts` pins that.
+
+Capability constrains only what a model must do ITSELF: `sees:` needs
+`vision`, a second write key needs `draws`. Those are checked by `preflight`
+against the live catalogue, never by `validate`, which must stay offline.
+
+Skills follow the Agent Skills open standard (https://agentskills.io/specification):
+`name` (≤64, lowercase, hyphens, matching the folder) and `description` (≤1024)
+are required; `license`, `compatibility`, `metadata`, `allowed-tools` are not.
+`validateSkill` enforces it. Do not invent fields.
+
+The MCP registry is a specified API and is treated as one; skills.sh is NOT —
+it is an undocumented endpoint, so `searchSkills` returns [] on any failure and
+nothing that runs may depend on it.
 </important>
 
 <important if="you are working on Jev questions, criteria, or thresholds">

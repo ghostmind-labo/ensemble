@@ -126,7 +126,7 @@ choice("What kind of picture?", {
 
 ---
 
-## The four node kinds
+## The five node kinds
 
 A node is exactly one of these, told apart by which key it has. There is no
 `runtime:` string.
@@ -150,7 +150,15 @@ look: {
   model: "google/gemini-2.5-flash",
   prompt: (s) => `What is in front of the robot? Its task: ${s.goal}`,
   sees: ["frame"],                         // ← vision
+  skills: { from: "skill" },               // ← instructions, inlined
   writes: ["scene"],
+}
+
+// mcp — ONE tool call. Not a loop.
+read: {
+  mcp: { server: "fs", tool: "read_text_file" },
+  args: (s) => ({ path: s.path }),
+  writes: ["file_text"],
 }
 ```
 
@@ -259,6 +267,113 @@ formats to reconcile; OpenRouter is one of each, and reports what every call
 cost in USD. If you need something only a vendor SDK exposes, that is a `work`
 handler using your own client — which is exactly what that seam is for, and it
 still shows up in the run record if you `report({ cost })`.
+
+---
+
+## Skills and MCP
+
+Both are here, and neither is an agent loop.
+
+### Skills
+
+A skill is a folder with a `SKILL.md` — the [Agent Skills open standard](https://agentskills.io),
+opened by Anthropic in December 2025 and since adopted by ~40 agent products.
+`loadSkills()` reads them from where they already are: `.claude/skills` and
+`.ensemble/skills` in the project, then `~/.claude/skills`, then installed
+plugins. Nearest definition wins, so a project can override what it inherited.
+
+```ts
+const skills = loadSkills();      // sync, local, free — safe at module scope
+
+nodes: {
+  triage: {
+    decide: { skill: choice("Which skill fits?", skillOptions(skills)) },
+    reads: ["goal"],
+  },
+  answer: { model: "…", skills: { from: "skill" }, prompt: …, writes: ["reply"] },
+}
+```
+
+**Choosing a skill is a classification, so a classifier should do it.** TypeSafe
+measured the case at 182 skills: an agent working from truncated index entries
+loaded the wrong one 16.8% of the time, against 7.3% when a System One model
+ranked them first. `skillOptions()` trims each description and adds a `none`
+option by default — suggesting nothing beats suggesting wrong.
+
+And unlike a model catalogue, **skills are local files**, so the options can be
+enumerated offline. The graph stays complete and `validate` stays free.
+
+`ensemble skills` lists what is visible and checks each against the spec —
+names must be lowercase, hyphenated, ≤64 chars and match their folder.
+
+### MCP
+
+One server, one tool, one call. No loop.
+
+```ts
+mcpServers: { fs: { command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "."] } },
+nodes: {
+  read: { mcp: { server: "fs", tool: "read_text_file" }, args: (s) => ({ path: s.path }), writes: ["text"] },
+}
+```
+
+Because the server and tool are named in the node, **`graph.json` says exactly
+what a workflow can reach before it runs** — the thing a tool-calling agent can
+never tell you. Choosing *which* tool is a `choice` over `listTools()`, the same
+shape as choosing a skill. Servers start lazily and shut down with the run, so a
+branch never taken never spawns a process.
+
+The client is hand-rolled JSON-RPC over stdio — the whole of what stdio MCP is —
+so the package still has no dependencies.
+
+### Every model gets every tool
+
+This is the part worth saying plainly. **A model node never needs tool-calling
+support.** The `mcp` node makes the call itself and puts the result on the
+blackboard, so a model that cannot call tools at all — or a small local one, or
+one that is simply very good at one narrow thing — still sits downstream of
+every tool and every skill you own. Skills are inlined as text; a model only
+needs to read.
+
+Capability constrains just one thing: what a model must do *itself*. Vision is
+the real case, and `ensemble check` catches it against the live catalogue:
+
+```
+✗ node "look" looks at frame but "openai/gpt-4o-mini-text" does not accept images.
+  Pick a model whose card says vision — shortlist(await catalog(), { vision: true }).
+```
+
+---
+
+## Discovery
+
+What exists, and what you would have to set up to use it.
+
+```sh
+ensemble skills              # skills visible here, spec-checked
+ensemble skills --remote pdf # search a public index (unofficial)
+ensemble servers github      # the official MCP registry
+ensemble check <file>        # can this graph run HERE?
+```
+
+`ensemble servers` reads the [official MCP registry](https://registry.modelcontextprotocol.io),
+whose entries declare their `environmentVariables` — required or optional,
+secret or not. So the answer to *"what do I need for this?"* is a real one:
+
+```
+com.scanner/github@1.0.0
+  Scan GitHub orgs.
+  npx -y @scanner/github@1.0.0  ⚠ needs APIFY_TOKEN
+    APIFY_TOKEN (secret) — From the Apify console.
+```
+
+`toServerSpec()` turns an entry straight into an `mcpServers` value. A
+remote-only server says so rather than claiming to be ready — this client speaks
+stdio.
+
+`ensemble check` is the other half of `validate`: that one proves what is true
+offline and forever, this one asks whether the models you named can do what the
+nodes ask of them, and whether your keys are set.
 
 ---
 
@@ -525,8 +640,8 @@ Scores from rubrics of different lengths are not comparable — normalise by
 
 ## What this deliberately does not do
 
-No prompts of its own, no tools, no agent loop, no skills, no MCP client or
-registry, no vendor SDKs. No server, no browser viewer, no mermaid, no markdown
+No prompts of its own, no agent loop, no vendor SDKs. Skills and MCP are here,
+but as *choices and single calls* — never a model deciding its own next tool. No server, no browser viewer, no mermaid, no markdown
 reports. No parallel node groups, no resume, no replay.
 
 Those are not oversights — they were removed. Keeping them would have made this
@@ -550,6 +665,7 @@ ensemble run      examples/04-robot/brain.mts --input frame=https://… "keep th
 | [`02-picture`](examples/02-picture/picture.mts) | Real image generation: ask the durable question, resolve today's model in code, draw |
 | [`03-refine`](examples/03-refine/refine.mts) | A loop that knows when to stop — a score gate, a loop budget, counting in code |
 | [`04-robot`](examples/04-robot/brain.mts) | A little brain: a vision model looks, Jev decides, your handler acts — one tick of a perception loop |
+| [`05-assistant`](examples/05-assistant/assistant.mts) | Skills and MCP, chosen rather than looped over: pick a skill, read a file, answer |
 
 ---
 
@@ -562,6 +678,8 @@ import {
   validate, toGraph, execute,      // prove, emit, run
   jev, openrouter, reporter,       // the decider, the caller, the terminal view
   catalog, shortlist, modelOptions,// the live model list, filtered in code
+  loadSkills, skillOptions,        // agent skills, from disk
+  searchServers, missingEnv, preflight, // the MCP registry, and what it needs
 } from "@ghostmind-dev/ensemble";
 
 const pipeline = runner({ … });

@@ -26,7 +26,7 @@ const bold = (text: string, color: boolean): string => (color ? `\x1b[1m${text}\
 export const money = (usd: number): string =>
   usd === 0 ? "free" : usd < 0.01 ? `$${usd.toFixed(6)}` : `$${usd.toFixed(4)}`;
 
-const BADGE: Record<RunStep["kind"], string> = { decide: "?", work: "⚙", code: "ƒ", model: "✦" };
+const BADGE: Record<RunStep["kind"], string> = { decide: "?", work: "⚙", code: "ƒ", model: "✦", mcp: "⇄" };
 
 /** What a finished step said, in one line. */
 export function summarise(step: RunStep, color = false): string {

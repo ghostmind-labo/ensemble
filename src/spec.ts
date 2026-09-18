@@ -17,6 +17,8 @@
 import type { Question } from "./questions.ts";
 import type { JevConfig } from "./jev.ts";
 import type { CallerConfig } from "./openrouter.ts";
+import type { McpServerSpec } from "./mcp.ts";
+import type { Skill } from "./skills.ts";
 
 export type State = Record<string, unknown>;
 
@@ -103,6 +105,12 @@ export interface ModelNode {
    * reach a decide node, because Jev takes text only.
    */
   sees?: string[];
+  /**
+   * Skills to inline into this node's instructions, by name. `{ from }` takes
+   * the name from state, which is how a decide node's choice becomes the skill
+   * the model actually gets. "none" resolves to nothing, deliberately.
+   */
+  skills?: string[] | { from: string };
   reads?: string[];
   /**
    * Positional, and only for this node kind: `[text]`, or `[text, images]` to
@@ -115,12 +123,30 @@ export interface ModelNode {
   label?: string;
 }
 
-export type NodeSpec = DecideNode | WorkNode | CodeNode | ModelNode;
+/**
+ * One MCP tool call. Not a loop, and that is the entire design.
+ *
+ * The server and tool are named in the graph, so what a workflow can reach is
+ * visible before it runs — the thing a tool-calling agent can never tell you.
+ * Arguments come from code, or from a decision made upstream.
+ */
+export interface McpNode {
+  mcp: { server: string; tool: string | { from: string } };
+  /** The tool's arguments. A function receives the blackboard. */
+  args?: Record<string, unknown> | ((state: Readonly<State>) => Record<string, unknown>);
+  reads?: string[];
+  /** `[text]`, or `[text, data]` to capture the server's structuredContent too. */
+  writes?: string[];
+  label?: string;
+}
+
+export type NodeSpec = DecideNode | WorkNode | CodeNode | ModelNode | McpNode;
 
 export const isDecide = (node: NodeSpec): node is DecideNode => "decide" in node;
 export const isWork = (node: NodeSpec): node is WorkNode => "work" in node;
 export const isCode = (node: NodeSpec): node is CodeNode => "code" in node;
 export const isModel = (node: NodeSpec): node is ModelNode => "model" in node;
+export const isMcp = (node: NodeSpec): node is McpNode => "mcp" in node;
 
 /* ───────────────────────────────── edges ──────────────────────────────── */
 
@@ -207,6 +233,14 @@ export interface RunnerSpec {
   result?: string;
   jev?: JevConfig;
   openrouter?: CallerConfig;
+  /**
+   * The skills this runner may inline. Load them with `loadSkills()` — it is
+   * synchronous and local, so the registry is known at authoring time and the
+   * graph stays complete and offline.
+   */
+  skills?: Skill[];
+  /** MCP servers an `mcp` node may name. Started lazily, once per run. */
+  mcpServers?: Record<string, McpServerSpec>;
 }
 
 /* ──────────────────────────── derived facts ───────────────────────────── */
@@ -226,7 +260,12 @@ export function readsOf(node: NodeSpec): string[] {
   if (isDecide(node)) return node.reads;
   if (isModel(node)) {
     const chosen = typeof node.model === "string" ? [] : [node.model.from];
-    return [...new Set([...(node.reads ?? []), ...(node.sees ?? []), ...chosen])];
+    const skill = node.skills && !Array.isArray(node.skills) ? [node.skills.from] : [];
+    return [...new Set([...(node.reads ?? []), ...(node.sees ?? []), ...chosen, ...skill])];
+  }
+  if (isMcp(node)) {
+    const chosen = typeof node.mcp.tool === "string" ? [] : [node.mcp.tool.from];
+    return [...new Set([...(node.reads ?? []), ...chosen])];
   }
   return node.reads ?? [];
 }

@@ -49,10 +49,30 @@ export type { GraphDoc, GraphEdge, GraphNode, GraphQuestion } from "./graph.ts";
 
 export { validate } from "./validate.ts";
 
+export { findSkill, loadSkills, parseSkill, renderSkills, skillOptions, validateSkill } from "./skills.ts";
+export type { Skill, SkillOptionsConfig, SkillScope, SkillSources } from "./skills.ts";
+
+export {
+  describeServer,
+  DiscoveryError,
+  isRunnable,
+  missingEnv,
+  preflight,
+  requirements,
+  searchServers,
+  searchSkills,
+  toServerSpec,
+  MCP_REGISTRY_URL,
+} from "./registry.ts";
+export type { DiscoveryConfig, EnvVarSpec, Preflight, RegistryPackage, RegistryServer, SkillListing } from "./registry.ts";
+
+export { connect, McpError, pool, toolOptions } from "./mcp.ts";
+export type { McpResult, McpServerSpec, McpSession, McpTool } from "./mcp.ts";
+
 export { reporter, summarise, money } from "./report.ts";
 export type { ReporterOptions } from "./report.ts";
 
-export { branchHolds, imageKeys, parseBranch, probeReads, producers, readsOf, writesOf } from "./spec.ts";
+export { branchHolds, imageKeys, isMcp, isModel, parseBranch, probeReads, producers, readsOf, writesOf } from "./spec.ts";
 export type {
   Branch,
   CodeNode,
@@ -60,6 +80,7 @@ export type {
   Edge,
   Handler,
   HandlerContext,
+  McpNode,
   ModelNode,
   NodeSpec,
   RunnerSpec,

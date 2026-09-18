@@ -26,6 +26,7 @@ import {
   externalKeys,
   isCode,
   isDecide,
+  isMcp,
   isModel,
   isWork,
   parseBranch,
@@ -56,7 +57,7 @@ export interface GraphQuestion {
 
 export interface GraphNode {
   id: string;
-  kind: "decide" | "work" | "code" | "model";
+  kind: "decide" | "work" | "code" | "model" | "mcp";
   label?: string;
   reads: string[];
   writes: string[];
@@ -78,9 +79,14 @@ export interface GraphNode {
     system?: string;
     /** State keys this node looks at. */
     sees?: string[];
+    /** Skill names inlined into the prompt, or the key one is chosen from. */
+    skills?: string[];
+    skillsFrom?: string;
     temperature?: number;
     maxTokens?: number;
   };
+  /** What a workflow can reach over MCP — visible before it runs. */
+  mcp?: { server: string; tool?: string; toolFrom?: string; args?: { literal: Record<string, unknown> } | { source: string } };
 }
 
 export interface GraphEdge {
@@ -173,8 +179,32 @@ export function toGraph(spec: RunnerSpec): GraphDoc {
             typeof node.prompt === "function" ? { source: node.prompt.toString() } : { text: node.prompt },
           ...(node.system ? { system: node.system } : {}),
           ...(node.sees?.length ? { sees: node.sees } : {}),
+          ...(Array.isArray(node.skills)
+            ? node.skills.length
+              ? { skills: node.skills }
+              : {}
+            : node.skills
+              ? { skillsFrom: node.skills.from }
+              : {}),
           ...(node.temperature !== undefined ? { temperature: node.temperature } : {}),
           ...(node.maxTokens !== undefined ? { maxTokens: node.maxTokens } : {}),
+        },
+      };
+    }
+    if (isMcp(node)) {
+      return {
+        ...head("mcp", "free"),
+        mcp: {
+          server: node.mcp.server,
+          ...(typeof node.mcp.tool === "string" ? { tool: node.mcp.tool } : { toolFrom: node.mcp.tool.from }),
+          ...(node.args
+            ? {
+                args:
+                  typeof node.args === "function"
+                    ? { source: node.args.toString() }
+                    : { literal: node.args },
+              }
+            : {}),
         },
       };
     }

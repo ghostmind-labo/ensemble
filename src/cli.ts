@@ -17,6 +17,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { isRunner, type Runner } from "./runner.ts";
 import { RunFailed, RunnerError } from "./execute.ts";
 import { money, reporter } from "./report.ts";
+import { loadSkills, validateSkill } from "./skills.ts";
+import { describeServer, isRunnable, missingEnv, preflight, searchServers, searchSkills } from "./registry.ts";
 
 const version = (): string => {
   try {
@@ -40,6 +42,11 @@ Usage
   ensemble validate <file>          Prove the graph. Free, offline.
   ensemble graph <file>             Emit graph.json to stdout. Free, offline.
   ensemble run <file> [goal]        Run it once; writes run.json.
+  ensemble check <file>             Can it run HERE? Model capabilities, keys,
+                                    MCP servers. Reads the live catalogue.
+  ensemble skills [query]           Skills visible here — and what to fix.
+  ensemble servers [query]          MCP servers in the official registry, and
+                                    which environment variables each still needs.
   ensemble version
 
 Options
@@ -47,6 +54,7 @@ Options
                      run:   write run.json here instead of .ensemble/runs/<id>/
       --json         run: print run.json to stdout instead of writing a file
       --input k=v    run: seed a state key (repeatable)
+      --remote       skills: search the public index instead of this machine
       --budget <usd> run: stop once the run costs more than this
       --max-steps <n> run: cap node executions (default 50)
 
@@ -98,6 +106,7 @@ async function main(): Promise<void> {
       input: { type: "string", multiple: true },
       budget: { type: "string" },
       "max-steps": { type: "string" },
+      remote: { type: "boolean", default: false },
     },
   });
 
@@ -123,6 +132,24 @@ async function main(): Promise<void> {
       const runner = await load(file);
       report(runner.validate(), runner.spec.name);
       return;
+    }
+
+    case "check": {
+      const runner = await load(file);
+      report(runner.validate(), runner.spec.name);
+
+      const flight = await preflight(runner.spec);
+      for (const entry of flight.env) {
+        process.stderr.write(`  ${entry.set ? "✓" : "✗"} ${entry.name.padEnd(20)} ${entry.why}\n`);
+      }
+      for (const note of flight.notes) process.stderr.write(`  · ${note}\n`);
+      if (flight.problems.length === 0) {
+        process.stderr.write(`✓ ${runner.spec.name} can run here\n`);
+        return;
+      }
+      process.stderr.write(`✗ ${runner.spec.name} cannot run here yet\n`);
+      for (const problem of flight.problems) process.stderr.write(`  · ${problem}\n`);
+      process.exit(1);
     }
 
     case "graph": {
@@ -186,8 +213,70 @@ async function main(): Promise<void> {
       return;
     }
 
+    case "skills": {
+      const query = [file, ...rest].filter(Boolean).join(" ").toLowerCase();
+
+      if (values.remote) {
+        const found = await searchSkills(query || "agent");
+        if (found.length === 0) {
+          process.stderr.write("no results — the public index is unofficial and may be unavailable\n");
+          return;
+        }
+        for (const listing of found.slice(0, 40)) {
+          const installs = listing.installs ? ` · ${listing.installs.toLocaleString()} installs` : "";
+          process.stdout.write(`${listing.name.padEnd(28)} ${listing.source}${installs}\n  ${listing.url}\n`);
+        }
+        return;
+      }
+
+      const skills = loadSkills();
+      const shown = query
+        ? skills.filter((s) => `${s.name} ${s.description}`.toLowerCase().includes(query))
+        : skills;
+      if (shown.length === 0) {
+        process.stderr.write(
+          skills.length
+            ? `no skill here matches "${query}" (${skills.length} loaded)\n`
+            : "no skills found — look in .claude/skills, .ensemble/skills, or ~/.claude/skills\n",
+        );
+        return;
+      }
+      for (const skill of shown) {
+        const problems = validateSkill(skill);
+        const mark = problems.length ? "✗" : " ";
+        process.stdout.write(`${mark} ${skill.name.padEnd(26)} ${skill.scope.padEnd(8)} ${skill.description.slice(0, 92)}\n`);
+        for (const problem of problems) process.stderr.write(`    ↳ ${problem}\n`);
+      }
+      process.stderr.write(`\n${shown.length} of ${skills.length} skills\n`);
+      return;
+    }
+
+    case "servers": {
+      const query = [file, ...rest].filter(Boolean).join(" ");
+      const servers = await searchServers(query || undefined, { limit: 60 });
+      if (servers.length === 0) {
+        process.stderr.write(`nothing in the registry matches "${query}"\n`);
+        return;
+      }
+      let ready = 0;
+      for (const entry of servers) {
+        const missing = missingEnv(entry);
+        if (isRunnable(entry)) ready++;
+        process.stdout.write(`${describeServer(entry)}\n`);
+        for (const variable of missing) {
+          process.stdout.write(
+            `    ${variable.name}${variable.isSecret ? " (secret)" : ""}` +
+              `${variable.description ? ` — ${variable.description}` : ""}\n`,
+          );
+        }
+        process.stdout.write("\n");
+      }
+      process.stderr.write(`${servers.length} servers · ${ready} runnable with the environment you have\n`);
+      return;
+    }
+
     default:
-      die(`unknown command "${command}" — try: validate, graph, run, version`);
+      die(`unknown command "${command}" — try: validate, graph, run, skills, servers, version`);
   }
 }
 

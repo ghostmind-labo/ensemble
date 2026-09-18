@@ -17,6 +17,7 @@ import {
   edgeId,
   isCode,
   isDecide,
+  isMcp,
   isModel,
   isWork,
   parseBranch,
@@ -29,6 +30,8 @@ import {
 import { confidenceOf, valueOf, type Answer } from "./questions.ts";
 import { jev, type Decider } from "./jev.ts";
 import { openrouter, type Caller } from "./openrouter.ts";
+import { pool } from "./mcp.ts";
+import { findSkill, renderSkills } from "./skills.ts";
 import { validate } from "./validate.ts";
 import { toGraph } from "./graph.ts";
 
@@ -48,7 +51,7 @@ export interface StepAnswer {
 export interface RunStep {
   n: number;
   node: string;
-  kind: "decide" | "work" | "code" | "model";
+  kind: "decide" | "work" | "code" | "model" | "mcp";
   ms: number;
   cost: number;
   answers?: Record<string, StepAnswer>;
@@ -180,6 +183,7 @@ export async function execute(
   const maxSteps = options.maxSteps ?? 50;
   const decider = options.decider ?? jev(spec.jev);
   const caller = options.caller ?? openrouter(spec.openrouter);
+  const servers = pool(spec.mcpServers ?? {});
   const edges = spec.edges ?? [];
   const startedAt = new Date();
   const graphHash = toGraph(spec).runner.hash;
@@ -236,7 +240,15 @@ export async function execute(
       const step: RunStep = {
         n: steps.length + 1,
         node: name,
-        kind: isDecide(node) ? "decide" : isWork(node) ? "work" : isModel(node) ? "model" : "code",
+        kind: isDecide(node)
+          ? "decide"
+          : isWork(node)
+            ? "work"
+            : isModel(node)
+              ? "model"
+              : isMcp(node)
+                ? "mcp"
+                : "code",
         ms: 0,
         cost: 0,
         took: null,
@@ -307,10 +319,29 @@ export async function execute(
                 `nothing upstream chose one`,
             );
           }
+          // Skills are instructions, so they are text: inlined ahead of the
+          // node's own system prompt. "none" resolves to nothing, which is how
+          // a decide node declines to pick one.
+          const wanted = Array.isArray(node.skills)
+            ? node.skills
+            : node.skills
+              ? [String(state[node.skills.from] ?? "")]
+              : [];
+          const attached = wanted
+            .filter((skillName) => skillName && skillName !== "none")
+            .map((skillName) => {
+              const skill = findSkill(spec.skills ?? [], skillName);
+              if (!skill) throw new Error(`node "${name}" wants skill "${skillName}", which is not loaded`);
+              return skill;
+            });
+          const system = [attached.length ? renderSkills(attached) : "", node.system ?? ""]
+            .filter(Boolean)
+            .join("\n\n");
+
           const reply = await caller({
             model: id,
             prompt: typeof node.prompt === "function" ? node.prompt(state) : node.prompt,
-            ...(node.system ? { system: node.system } : {}),
+            ...(system ? { system } : {}),
             images: (node.sees ?? []).flatMap((key) => asUrls(state[key])),
             ...(node.temperature !== undefined ? { temperature: node.temperature } : {}),
             ...(node.maxTokens !== undefined ? { maxTokens: node.maxTokens } : {}),
@@ -320,6 +351,7 @@ export async function execute(
           step.meta = {
             model: reply.model,
             usage: reply.usage,
+            ...(attached.length ? { skills: attached.map((skill) => skill.name) } : {}),
             ...(reply.images.length ? { drew: reply.images.length } : {}),
           };
           // Positional, and documented as such: [text] or [text, images].
@@ -330,6 +362,29 @@ export async function execute(
           step.writes = written;
           Object.assign(state, written);
           lastValue = keys.length > 1 ? { text: reply.text, images: reply.images } : reply.text;
+        } else if (isMcp(node)) {
+          const tool =
+            typeof node.mcp.tool === "string" ? node.mcp.tool : String(state[node.mcp.tool.from] ?? "");
+          if (!tool || tool === "none") {
+            throw new Error(
+              `node "${name}" takes its tool from "${(node.mcp.tool as { from: string }).from}", which is ` +
+                `${tool === "none" ? `"none"` : "empty"} — wire that answer to a different branch`,
+            );
+          }
+          const session = await servers.get(node.mcp.server);
+          const args = typeof node.args === "function" ? node.args(state) : (node.args ?? {});
+          const outcome = await session.call(tool, args);
+          step.handler = `${node.mcp.server}/${tool}`;
+          step.meta = { server: node.mcp.server, tool, isError: outcome.isError };
+          if (outcome.isError) throw new Error(`mcp ${node.mcp.server}/${tool} failed: ${outcome.text.slice(0, 300)}`);
+
+          const keys = writesOf(node);
+          const written: Record<string, unknown> = {};
+          if (keys[0]) written[keys[0]] = outcome.text;
+          if (keys[1]) written[keys[1]] = outcome.data;
+          step.writes = written;
+          Object.assign(state, written);
+          lastValue = keys.length > 1 ? { text: outcome.text, data: outcome.data } : outcome.text;
         } else if (isCode(node)) {
           const value = await node.code(state);
           lastValue = value;
@@ -369,6 +424,8 @@ export async function execute(
   } finally {
     options.signal?.removeEventListener("abort", relay);
     controller.abort();
+    // A server that was never reached was never started, so this is usually a no-op.
+    servers.closeAll();
   }
 
   const run = finish();

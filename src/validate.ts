@@ -20,6 +20,7 @@ import {
   imageKeys,
   isCode,
   isDecide,
+  isMcp,
   isModel,
   isWork,
   parseBranch,
@@ -55,11 +56,12 @@ export function validate(spec: RunnerSpec): string[] {
       isWork(node) && "work",
       isCode(node) && "code",
       isModel(node) && "model",
+      isMcp(node) && "mcp",
     ].filter(Boolean);
     if (kinds.length !== 1) {
       problems.push(
         kinds.length === 0
-          ? `node "${name}" is none of decide / work / code / model — a node must be exactly one`
+          ? `node "${name}" is none of decide / work / code / model / mcp — a node must be exactly one`
           : `node "${name}" is both ${kinds.join(" and ")} — a node must be exactly one`,
       );
       continue;
@@ -137,6 +139,40 @@ export function validate(spec: RunnerSpec): string[] {
       }
       if (node.sees?.length && writes.length > 1 && node.sees.includes(writes[1]!)) {
         problems.push(`node "${name}" both looks at and overwrites "${writes[1]}" in one step`);
+      }
+      if (Array.isArray(node.skills)) {
+        const registry = spec.skills ?? [];
+        for (const wanted of node.skills) {
+          if (wanted === "none" || registry.some((skill) => skill.name === wanted)) continue;
+          problems.push(
+            registry.length
+              ? `node "${name}" names skill "${wanted}", which is not in the runner's registry. ` +
+                `Loaded: ${list(registry.map((s) => s.name).slice(0, 12))}${registry.length > 12 ? ", …" : ""}`
+              : `node "${name}" names skill "${wanted}" but the runner loaded no skills — ` +
+                `pass skills: loadSkills() to the runner`,
+          );
+        }
+      }
+    }
+
+    if (isMcp(node)) {
+      const servers = spec.mcpServers ?? {};
+      if (!node.mcp?.server) problems.push(`node "${name}" names no MCP server`);
+      else if (!servers[node.mcp.server]) {
+        const known = Object.keys(servers);
+        problems.push(
+          `node "${name}" uses MCP server "${node.mcp.server}", which the runner does not declare. ` +
+            (known.length ? `Declared: ${list(known)}` : `No mcpServers are declared.`),
+        );
+      }
+      if (typeof node.mcp?.tool === "string" ? !node.mcp.tool : !node.mcp?.tool?.from) {
+        problems.push(`node "${name}" names no tool — give it a name, or { from: "<state key>" }`);
+      }
+      if ((node.writes ?? []).length > 2) {
+        problems.push(
+          `node "${name}" declares writes ${list(node.writes!)} — an mcp node writes at most two keys, ` +
+            `positionally: [text] or [text, data]`,
+        );
       }
     }
   }
