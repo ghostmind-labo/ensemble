@@ -64,14 +64,24 @@ export default runner({
     // `draws` is a fact, a price ceiling is arithmetic. Neither is Jev's job.
     choose_generator: {
       code: async (state) => {
-        const affordable = shortlist(await catalog(), {
-          draws: true,
-          maxPromptUsdPerM: state["fidelity"] === "final" ? 100 : 10,
-          limit: 20,
-        });
-        if (affordable.length === 0) throw new Error("no image generator within budget");
-        // draft → cheapest; final → the priciest we allowed, as a proxy for best.
-        const pick = state["fidelity"] === "final" ? affordable.at(-1)! : affordable[0]!;
+        // `openrouter/auto` and friends are meta-routers: they report a price
+        // of zero because they have no fixed one, which would sort them to the
+        // front of any "cheapest" ranking. A zero here means unknown, not free.
+        const generators = shortlist(await catalog(), { draws: true, limit: 30 }).filter((m) => m.imageUsd > 0);
+        if (generators.length === 0) throw new Error("no image generator available");
+
+        // Ranked by the per-image price, cheapest first. Be clear-eyed about
+        // what this is: price is NOT quality, it is just the only ranking a
+        // library can honestly apply to a catalogue it did not evaluate.
+        // Substitute your own measured preference here — that is the point of
+        // resolving it in code rather than freezing an id into the graph.
+        const byPrice = [...generators].sort((a, b) => a.imageUsd - b.imageUsd);
+        const pick = state["fidelity"] === "final" ? (byPrice[Math.floor(byPrice.length / 2)] ?? byPrice[0]!) : byPrice[0]!;
+
+        // And note what this price does NOT cover. A live run picked
+        // openai/gpt-5-image at $0.00004 per image and still cost $0.21,
+        // because image models bill their output as tokens. The per-image
+        // figure is a label, not a budget — cap the run with `budget`.
         return { generator: pick.id, generator_price: pick.imageUsd };
       },
       reads: ["fidelity"],
