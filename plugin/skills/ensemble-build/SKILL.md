@@ -5,27 +5,47 @@ description: Build a working @ghostmind-dev/ensemble runner for a use case, end 
 
 # Building an ensemble runner
 
-`@ghostmind-dev/ensemble` makes **one calibrated decision at a time and routes to
-code someone else wrote**. A runner is a TypeScript file that default-exports
-`runner({...})`: a flat set of nodes, edges between them, and a map of handlers.
+`@ghostmind-dev/ensemble` gives you **a structure to build on**: a graph of
+steps, a shared state that every step reads from and writes to (with the data
+flow proven before anything runs), and a record of each run as JSON. Its
+specialty is the calibrated decision (Jev) that picks which way to go. The
+steps themselves are ordinary TypeScript. A runner is a TypeScript file that
+default-exports `runner({...})`: a flat set of nodes, edges between them, and a
+map of handlers.
+
+**Nothing is off limits inside a step.** A `work` handler or a `code` node can
+import any npm package: a vendor SDK (OpenAI, Anthropic, Google), an agent
+framework, a database client, a scraper, a local model. The built-in `model` and
+`mcp` nodes are conveniences, not the only way in. If the library doesn't do
+something, write it in a handler with whatever library does. The zero-dependency
+rule applies to the ensemble package itself, not to the runners people build
+with it.
+
+**A runner is just a script.** The CLI is optional. Import the runner and call
+it (`await r({ goal })`) from a plain `.mts` file, a server, a cron job or
+another runner. See `references/api.md` §7.
+
 You are expected to take a use case from a sentence to a runner that validates,
 dry-runs down every branch and is ready to go live, without asking a human to
 fill in the gaps you can fill yourself.
 
-The whole design rests on one division of labour. Internalise it before you write
-anything, because every rule below falls out of it:
+The design rests on one division of labour. Internalise it before you write
+anything, because the rules below fall out of it:
 
 | Kind of judgement | Who does it | Why |
 |---|---|---|
 | **Meaning**: which category, is this X, how good is it | Jev, via a `decide` node | Calibrated, ~100 ms, ~$0.00002. The options are declared up front, so every branch is known before anything runs |
 | **Arithmetic**: counts, thresholds, dates, prices, loop limits | `code` nodes and `when:` edges | Jev is documented as unreliable at counting, arithmetic and date ordering |
-| **Perception and generation**: looking at an image, writing text, drawing | a `model` node (OpenRouter) | Jev takes text only and does not generate |
-| **Effects**: send, store, call an API, page a person | a `work` handler | The library ships no actions. That seam belongs to the user |
-| **One tool call** | an `mcp` node | A single named call, never a loop, so the graph says what it can reach |
+| **Perception and generation**: looking at an image, writing text, drawing | a `model` node (OpenRouter), or any SDK in a `work` handler | Jev takes text only and does not generate. The `model` node puts the model and its cost in the graph; a handler gives you any vendor-specific feature |
+| **Effects**: send, store, call an API, page a person | a `work` handler | Any library, any API. That seam belongs to the user |
+| **One tool call** | an `mcp` node | A single named call, so the graph says what it can reach |
 
-There is no agent loop, no prompt library and no parallel group. If the use case
-really needs a model to choose its own next tool again and again, ensemble is the
-wrong tool. Say so instead of forcing it.
+The library doesn't ship an agent loop, a prompt library or parallel groups, but
+nothing stops a handler from containing one. An agent that picks its own tools
+until it is done can be a single `work` step, with any agent SDK. The graph
+shows it as one opaque step, and the decisions around it stay calibrated and
+provable. Prefer explicit nodes where the steps are known, because those show up
+in `graph.json` and `run.json`. Use a handler where they aren't known.
 
 ## Before you start: the environment
 

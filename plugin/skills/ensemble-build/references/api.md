@@ -100,6 +100,11 @@ send: { work: "billing", reads?: ["goal"], writes?: ["reply"], label? }
 `work` names a key of the runner's `work` map. `reads` only declares data flow,
 because the handler sees the whole state anyway.
 
+A handler is ordinary async TypeScript. It can import any npm package (a vendor
+SDK, an agent framework, a database client) and do anything the use case needs,
+including running its own loop. Call `report({ cost })` so the run's budget and
+cost include it.
+
 ### code: deterministic, free
 
 ```ts
@@ -221,6 +226,16 @@ const { result, state, run } = await myRunner(
     onEvent?: (e) => {},  // "node:start" | "node:end" | "run:end"
   },
 );
+```
+
+The CLI is optional. A runner is a plain module, so a script can import it and
+call it directly:
+
+```ts
+// run.mts: node run.mts
+import triage from "./runners/triage.mts";
+const { result } = await triage({ goal: process.argv[2] }, { budget: 0.05 });
+console.log(result);
 ```
 
 Throws `RunnerError` (`.problems`) if the spec does not validate, and `RunFailed`

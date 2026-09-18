@@ -47,6 +47,13 @@ an agent to use the library: `ensemble-build` (use case → validated runner, wi
 `scripts/dryrun.mts`, a $0 executor), `ensemble-questions` (question design) and
 `ensemble-runs` (reading and tuning runs, with `scripts/summarize.mts`).
 
+The skills present ensemble as a **structure** (a graph, a shared state with a proven
+data flow, and a run record), not as a closed toolbox. Inside a `work` handler or
+`code` node the user's runner may import any library, SDK or agent framework, and a
+runner is just a script that can be called without the CLI. The zero-dependency and
+OpenRouter-only rules bind this package, never the runners built with it. Don't write
+skill prose that tells an agent it can't use something.
+
 Every `src/*.ts` opens with a doc comment explaining *why* the module exists,
 not what it does. Match that when adding one.
 
