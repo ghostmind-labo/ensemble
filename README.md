@@ -1,1207 +1,478 @@
 # ensemble
 
-Multi-model agent ensembles. You describe a **scene** — nodes wired by
-edges, each node a model with scoped state access — in **one TypeScript file**, and
-`ensemble` runs it: conditions, loops, parallel groups, live visualization.
+**Typed decisions, wired to your code.**
 
-Every node can use a **different model from a different vendor**, and a node is
-whichever kind of worker the job needs:
+You have a request, some code that can act on it, and a judgement call in
+between. `ensemble` is the judgement call — and only that. It asks
+[Jev](https://docs.typesafe.ai) one calibrated question, routes to a function
+**you** wrote, and writes down what it decided and why.
 
-- **`runtime: "model"`** (default) — one direct OpenRouter call. Streams tokens live.
-  Pure *think*.
-- **`runtime: "agent"`** — our own tool-calling loop: built-in tools (read *and*
-  write) plus any MCP servers the node allowlists, looping until the model stops
-  asking for tools. Pure *do*.
-- **`runtime: "fn"`** — a plain function over state. Free, instant, deterministic,
-  and held to the same schema contract as model output. Use it for arithmetic,
-  tallies and formatting, and never pay a model to count.
-- **`runtime: "refine"`** — the keep-or-revert step for a **value**: compares the
-  candidate's score with the incumbent's, keeps a winner, writes the incumbent back
-  over a regression, and says when the score has stopped rising. Free. The score
-  gate, done right. See [Refine mode](#refine-mode-keep-or-revert-on-the-blackboard).
-- **`runtime: "ask"`** — no model call at all: the run **pauses** until a human (or
-  another agent) supplies the node's outputs.
-- **`runtime: "opencode"`** — rents a real coding-agent CLI for one node, when a
-  node must genuinely build something. See [Agent backends](#agent-backends).
-
-**The default path needs no subprocess and nothing installed but this package**, and
-the only credential is `OPENROUTER_API_KEY` — which is also all the `opencode`
-backend needs, if you reach for it.
-
-```
-scenes/*.ts ──import──> Scene ──validate──> engine ──events──> terminal / browser
-                                              │
-                            ┌─────────────────┴────────────────┐
-                    runtime: "model"                    runtime: "agent"
-                    one OpenRouter call                 tool-calling loop
-                    SSE streaming · usage.cost          built-ins + MCP servers
-```
-
-## A scene is one TypeScript file
+It never calls a model on your behalf. It holds no prompts, ships no tools, and
+runs no agent loop. You bring the workers; it decides which one runs next.
 
 ```ts
-import { scene } from "@ghostmind-dev/ensemble";
+import { runner, choice } from "@ghostmind-dev/ensemble";
 
-export default scene({
-  name: "research-and-critique",
-  defaults: { model: "openrouter/anthropic/claude-sonnet-5" },
-
-  nodes: {
-    researcher: {
-      model: "openrouter/google/gemini-2.5-flash",
-      prompt: "Research the goal. Be concrete.",
-      outputs: ["findings"],
-    },
-    critic: {
-      model: "openrouter/anthropic/claude-haiku-4.5",
-      inputs: ["findings"],                      // sees ONLY this state
-      outputs: ["verdict", "notes"],
-    },
-    inspector: {
-      runtime: "agent",                          // gets tools, loops until done
-      mcp: ["fs"],                               // MCP servers it may use
-      skills: ["graphify"],                      // skills inlined into its prompt
-      inputs: ["findings"],
-      outputs: ["report"],
-    },
-    writer: {
-      inputs: ["findings", "notes"],
-      outputs: ["result"],
-    },
+export default runner({
+  name: "triage",
+  work: {                                    // ← your code. Anything.
+    billing: ({ goal }) => myQueue.push("billing", goal),
+    orders:  ({ goal }) => myAgent.run("order-lookup", goal),
+    human:   ({ goal }) => pageSomeone(goal),
   },
-
-  groups: { review: ["critic", "inspector"] },   // run concurrently, merge on completion
-
-  edges: [
-    { from: "researcher", to: "review" },
-    { from: "review", to: "writer",     when: (s) => s["verdict"] === "accept" },
-    { from: "review", to: "researcher", when: (s) => s["verdict"] === "reject", maxLoops: 2 },
-  ],
-
-  entry: "researcher",
-  exit: "writer",
-});
-```
-
-## Two graphs, and the one that matters is proved
-
-Edges route the cursor — that is **control** flow. Data lives on the shared
-blackboard, and `inputs`/`outputs` describe how it moves — that is the **data**
-graph, and it is the one that decides whether a workflow is a recipe or an
-accident.
-
-State keys have exactly three origins: `goal`, a node's declared `outputs`, and
-the scene's declared `inputs` (keys that arrive from outside — seeded at launch,
-or injected mid-run through `answers`). So `validate` **proves** that every key
-a node reads, and every key a `when` reads, has one:
-
-```
-node "judge" reads "house_rules" but nothing in the scene produces it — the node
-would run with that context silently missing. Keys produced in this scene: "answers"
-(by collect), "round" (by open_board, judge), … If it is meant to come from outside
-the workflow, declare it: inputs: ["…"] at the scene level.
-```
-
-Before this check existed, that node ran anyway — the model was simply not told —
-and the scene it was found in had been doing so for weeks. A workflow that works
-with an input silently missing did not work; it got lucky. The fix is one line:
-
-```ts
-inputs: ["house_rules"],
-```
-
-`ensemble serve` draws both graphs: control edges solid, data edges dotted
-(toggle **data**). A `when` box shows which keys it reads, and the scene's
-inputs appear as boxes in the left gutter — the outside world, as an object.
-
-## Typed state: pin the shape of the blackboard
-
-`outputs` says *which* keys a node owes. `state` says what **shape** they must be —
-and because the values arrive as JSON from a model, that check has to exist at run
-time, which a TypeScript type alone cannot do:
-
-```ts
-import { scene, z } from "@ghostmind-dev/ensemble";   // z is re-exported for you
-
-export default scene({
-  name: "review",
-  state: {
-    findings: z.array(z.object({ file: z.string(), severity: z.enum(["low", "high"]) })),
-    score:    z.number().min(0).max(10),
-    verdict:  z.enum(["accept", "reject"]),
-  },
-  nodes: { scanner: { outputs: ["findings"] }, judge: { inputs: ["findings"], outputs: ["score", "verdict"] } },
-  edges: [{ from: "judge", to: "writer", when: (s) => s.score >= 8 }],   // s is typed
-  entry: "scanner", exit: "writer",
-});
-```
-
-One declaration does three jobs:
-
-- **The model is shown the shape.** The auto-generated output contract renders
-  `"score": number (0-10)`, not `"score": ...` — compliance improves from that alone.
-- **Wrong shapes self-correct.** A mismatch becomes the retry reason naming the exact
-  path (`findings.0.severity: …`), so the existing free retry fixes it instead of a
-  bad value poisoning state. What lands in state is zod's *parsed* value.
-- **`when` predicates are typed.** `s.score >= 8` type-checks; no `Number()` guard, and
-  a typo'd key is a compile error rather than a silent `undefined`.
-
-Entirely **additive**: keys with no schema behave exactly as before, so existing scenes
-are unaffected. Schema the keys gates depend on; leave prose keys as plain strings.
-
-## Research mode: three things, and nothing else
-
-Sometimes you do not want a workflow that *answers* — you want one that **improves
-something, measurably, over and over**. That loop is
-[Karpathy's autoresearch](https://github.com/karpathy/autoresearch), and it works
-because of what the researcher is *not* allowed to touch: one file changes, one
-command scores it, and the directive is written once and read identically every
-iteration. Anything else you could turn into a knob is a confound.
-
-So research mode is **sealed**. `research()` takes exactly three things and refuses
-every other key by name:
-
-```ts
-import { research } from "@ghostmind-dev/ensemble";
-
-export default research({
-  modify:      "train.py",                       // 1 · the ONE thing that may change
-  evaluate:    { command: "python train.py",     // 2 · how it is scored — code, not a judge
-                 metric: "val_bpb", minimize: true, budget: "5m" },
-  instruction: "Lower validation bits-per-byte. Do not touch the data or the eval.",
-});                                              // 3 · the directive, constant forever
-```
-
-```bash
-ensemble validate program.mts                    # free
-ensemble research program.mts --iterations 50    # no goal argument — see below
-```
-
-No nodes, no edges, no entry, no model, no prompts. Pass one and you get a refusal
-that says why (`"edges" — the loop is generated: propose → evaluate → keep or revert
-is the whole topology`). The loop is identical for every program in the world, which
-is the point: two people's results are comparable because their scaffolding is not a
-variable. Which model proposes, how many iterations, and the noise threshold are
-**flags** (`--model`, `--iterations`, `--threshold`) — the file is the experiment, the
-flags are the session.
-
-```
-            ┌───────────────────────────────────────────────┐
-            ▼                                               │
-      ┌──────────┐   hypothesis   ┌────────────┐            │
-      │ propose  │ ─────────────► │  evaluate  │ ── keep or revert ──┘
-      │ edits    │                │ 🔬 scores  │
-      │ ONE file │ ◄───────────── │ under the  │
-      └──────────┘  best, verdict │  budget    │
-                    reason, output└─────┬──────┘
-                                        ▼
-                                  results.tsv
-```
-
-`ensemble research` deliberately takes **no goal argument**: the directive lives in
-`instruction`, so there is nowhere for it to drift between iterations. Entry is the
-evaluator, not the proposer — the first pass measures whatever is on disk, and that
-baseline is what every later candidate is compared against.
-
-What the mode enforces:
-
-- **The proposer gains `write_file` and `edit_file` — scoped to `modify` and nothing
-  else.** This is the only way an agent node ever gets a write tool. It physically
-  cannot edit the evaluator, so it cannot optimise the scorer instead of the artefact.
-- **The evaluator runs under a hard time budget** — the whole process group is killed
-  at the limit, so an overrun is a *crash*, never a longer experiment. Results stay
-  comparable.
-- **The metric is parsed from the command's output.** No model judges anything: a
-  judge adds its own variance, and an optimiser cannot tell "it improved" from "the
-  judge felt different today".
-- **Keep or revert, written down.** The incumbent is snapshotted, a candidate is kept
-  only if it clears `--threshold`, and the incumbent is restored otherwise. Every try
-  appends `iteration · score · best · verdict · ms · note` to `results.tsv`. Verdicts:
-  `baseline`, `keep`, `revert`, `crash`. **A revert is a result** — the proposer sees
-  `verdict`, `reason`, and the evaluator's output on its next turn, so a rejected idea
-  informs the next one.
-- `validate` checks the artefact exists and the budget parses — before anything runs.
-  Resume works too: the incumbent snapshot lives in the run directory.
-
-[`examples/05-autoresearch`](./examples/05-autoresearch) is a complete, cheap one.
-
-**If three things are genuinely not enough** — a jury of proposers, a human `ask` gate
-before each experiment, two metrics — drop to an ordinary `scene()` with a
-scene-level `research:` block and `runtime: "experiment"`. That is the same machinery
-with the guardrails off, and it is the escape hatch, not the default:
-
-```ts
-export default scene({
-  name: "reviewed-research",
-  research: { edit: "train.py", measure: "python train.py", metric: "val_bpb", minimize: true, budget: "5m" },
   nodes: {
-    propose:    { runtime: "agent", inputs: ["best", "verdict", "reason"], outputs: ["hypothesis"] },
-    approve:    { runtime: "ask", question: "Run this experiment?", inputs: ["hypothesis"], outputs: ["ok"], always: true },
-    experiment: { runtime: "experiment", note: "hypothesis", outputs: ["iteration", "best", "verdict", "reason", "output"] },
+    classify: {
+      decide: {
+        team: choice("Which team should handle this?", {
+          billing: { what: "Charges, invoices, refunds", not_for: "Where a parcel is" },
+          orders:  { what: "Delivery, cancellation, returns", not_for: "Money questions" },
+        }),
+      },
+      reads: ["goal"],
+      gate: { on: "team", min: 0.7, to: "escalate" },   // unsure? a person reads it
+    },
+    to_billing: { work: "billing", writes: ["reply"] },
+    to_orders:  { work: "orders",  writes: ["reply"] },
+    escalate:   { work: "human",   writes: ["reply"] },
   },
   edges: [
-    { from: "experiment", to: "propose", maxLoops: 50 },
-    { from: "propose", to: "approve" },
-    { from: "approve", to: "experiment", when: (s) => s["ok"] === "yes" },
+    { from: "classify", to: "to_billing", on: "team=billing" },
+    { from: "classify", to: "to_orders",  on: "team=orders" },
   ],
-  entry: "experiment", exit: "experiment",
+  entry: "classify",
+  result: "reply",
 });
 ```
 
-Three things carry the design:
-
-- **`inputs` / `outputs` are the whole data-flow contract** — and the access-control
-  model. A node sees exactly the state keys it declares, nothing else. State lives on
-  a shared blackboard, checkpointed after every node.
-- **Conditions are real code.** `when: (s) => s["verdict"] === "reject"` — typed,
-  autocompleted, no expression mini-language to learn.
-- **`scene()` is an identity function carrying types.** A model authoring a scene
-  gets its mistakes flagged by the type checker before a single token is spent —
-  which is the point: this format is designed to be *generated*.
-
-## Refine mode: keep-or-revert on the blackboard
-
-The score-gate pattern — writer → judge → loop while `score < 8`, `maxLoops: 3` —
-has a flaw its own [example](./examples/02-score-gate) admits. When the budget runs
-out, the run ends with the **last** attempt, not the best one. And every revision
-builds on the previous attempt even when that attempt was a regression, so a loop
-can drift *away* from its best work while looking busy.
-
-Research mode already has the fix — snapshot the incumbent, keep a candidate only if
-it beats it, restore otherwise — but only for a file on disk scored by a command.
-`runtime: "refine"` is the same discipline for a **state key** scored by a **node**:
-
 ```ts
-import { scene, z } from "@ghostmind-dev/ensemble";
-
-export default scene({
-  name: "refine-tagline",
-  defaults: { model: "openrouter/anthropic/claude-haiku-4.5" },
-  state: { score: z.number(), converged: z.boolean() },
-
-  nodes: {
-    writer: {
-      prompt: "Write a one-sentence tagline. If `tagline` is present it is the best so far — improve on it. " +
-              "`feedback` is the judge's critique of the most recent attempt; on a revert that attempt was discarded.",
-      inputs: ["tagline", "feedback", "best", "verdict", "reason"],
-      outputs: ["tagline"],
-    },
-    judge: {
-      model: "openrouter/anthropic/claude-sonnet-5",
-      prompt: "Score the tagline 0-10 as a NUMBER in `score`; put actionable critique in `feedback`.",
-      inputs: ["tagline"],
-      outputs: ["score", "feedback"],
-    },
-    keep: {
-      runtime: "refine",          // ⬆ free: no model call
-      candidate: "tagline",       // the state key under refinement
-      patience: 2,                // two straight non-improvements → converged
-      target: 9,                  // or stop as soon as best reaches 9
-      outputs: ["tagline", "best", "verdict", "reason", "converged"],
-    },
-  },
-
-  edges: [
-    { from: "writer", to: "judge" },
-    { from: "judge", to: "keep" },
-    { from: "keep", to: "writer", when: (s) => !s.converged, maxLoops: 8 },
-  ],
-  entry: "writer",
-  exit: "keep",
-});
+const { result, run } = await triage({ goal: "I was charged twice for A-104" });
 ```
 
-```
-   ┌──────────┐  tagline   ┌─────────┐  score, feedback  ┌────────────┐
-   │  writer  │ ─────────► │  judge  │ ────────────────► │  keep  ⬆   │ ──► exit
-   └──────────┘            └─────────┘                   │ keep/revert│
-        ▲                                                └─────┬──────┘
-        │        tagline (the incumbent), best, verdict, reason │  !converged
-        └──────────────────────────────────────────────────────┘  (⟲ max 8)
-```
+Zero runtime dependencies. One credential: `TYPESAFE_API_KEY`.
 
-Each round the refine node compares the candidate's `score` with the incumbent's
-(`best`). A winner — by more than `threshold` — is **kept** and becomes the
-incumbent. Anything else is **reverted**: the incumbent is written back over the
-candidate key, so the writer's next revision starts from the best version, never
-from the regression it just produced. `converged` turns true after `patience`
-consecutive non-improvements, or as soon as `best` reaches `target`.
+---
 
-Two guarantees follow, and neither holds for a plain gate:
+## Why this shape
 
-- **Whatever ends the loop — converged, target, or `maxLoops` — the candidate key
-  holds the best version seen.** The refine node just put it there.
-- **Every attempt is scored against the incumbent it was asked to improve**, so a
-  score that moves is attributable to the change that moved it.
+A decision used to cost a full model call — seconds, cents, and a string you had
+to coax into a shape. So you minimised decisions, which meant each one carried
+too much judgement, which meant it was unreliable, which meant you needed a
+judge to check the judge.
 
-What it writes, every round: the candidate key, `incumbent`, `best`, `round`,
-`verdict` (`baseline` / `keep` / `revert`), `kept`, `reason`, `converged`, `stalled`,
-`history` (every round's score and verdict), and a one-line `summary`. Declare the
-ones your graph reads. `minimize: true` flips the direction for a loss; `threshold`
-is the noise floor a candidate must clear; `score: "grade"` names a different key.
+Jev answers in three closed shapes — yes/no, one-of-N, a rubric position — in
+about 100 ms, at $0.042 per **million** input tokens with output free. A
+thousand decisions over a 500-token state costs about two cents.
 
-Everything the node remembers lives on the blackboard, so a refine loop **survives a
-stop and resume**, and **a run can start from an earlier run's winner**. To improve
-an input rather than generate one, declare the candidate as a scene input, seed it,
-and make the judge the entry — the seed is scored as the baseline:
+But the price is not the interesting part. This is:
 
-```ts
-inputs: ["draft"],                     // arrives from outside — the thing to improve
-entry: "judge",                        // score it first: that is the baseline
-```
+> **With a generative router you cannot enumerate the branches. With a
+> classifier you can.**
 
-```bash
-ensemble run improve.mts "tighten this" --answer draft="$(cat draft.md)"
-```
+Every option is declared before anything runs. That one fact is what makes the
+rest possible: a **complete** graph you can emit and draw, a validator that
+proves nothing falls through, and a run record that says *photo at p=0.91* rather
+than *the model said photo*.
 
-`validate` proves the wiring before anything spends: the candidate must be produced
-by some *other* node (or arrive as an input), the score key must be produced by a
-node, and both appear on the data graph as the refine node's reads. A judge that
-writes `"7/10"` instead of a number fails the round with the one-line fix in the
-message (`state: { score: z.number() }`).
-
-[`examples/07-refine-loop`](./examples/07-refine-loop) is the scene above, ready to run.
-
-## Getting started from scratch
-
-**Two things: the CLI and an API key.** No `package.json`, no `npm install`, no
-project scaffolding.
-
-```bash
-npm i -g @ghostmind-dev/ensemble
-export OPENROUTER_API_KEY=sk-or-...          # https://openrouter.ai/keys
-```
-
-Now write **one `.mts` file** anywhere:
-
-```ts
-// ask.mts
-import { scene } from "@ghostmind-dev/ensemble";
-
-export default scene({
-  name: "ask",
-  nodes: {
-    a: {
-      model: "openrouter/anthropic/claude-haiku-4.5",
-      prompt: "Answer briefly.",
-      outputs: ["answer"],
-    },
-  },
-  entry: "a",
-  exit: "a",
-});
-```
-
-```bash
-ensemble validate ask.mts        # free — catches every wiring mistake
-ensemble run ask.mts "your goal" # costs money
-ensemble serve .                 # watch it live in a browser
-```
-
-That directory can contain **nothing but `ask.mts`** and it works — verified. The
-`.mts` extension marks the file as an ES module without a `package.json`, and the
-import resolves against the global install.
-
-> Prefer `.ts`? That works too, but then the nearest `package.json` needs
-> `"type": "module"`. `.mts` avoids the question entirely, which is why every
-> example here uses it.
-
-Before spending anything, see what you already have — both are free and instant:
-
-```bash
-ensemble skills        # skills found (yours + Claude Code's)
-ensemble mcp           # MCP servers, CONNECTED, with their tools
-ensemble models gpt    # models you can reach
-```
-
-### `ensemble init` — so your editor understands scenes
-
-Scenes need no scaffolding to *run*, but an editor cannot know that: with no
-`node_modules` it reports `Import "@ghostmind-dev/ensemble" not a dependency`, and
-because the import fails your `state` schemas never reach `when: (s) => s.score < 8`,
-leaving `s` as `any` — typed state's whole benefit invisible exactly where it pays off.
-
-```bash
-ensemble init            # + tsconfig.json, deno.json, .gitignore, package symlink
-ensemble init --starter  # …and an example scene to edit
-```
-
-It writes a `tsconfig.json` (TypeScript/VS Code), a `deno.json` import map (Deno-backed
-editors), and symlinks the installed package into `.ensemble/node_modules/` so ordinary
-resolution works with nothing to install. Idempotent — existing files are kept unless
-`--force`. Verified with the real compiler: after `init`, `s.score === "high"` and a
-misspelled key are **compile errors**, which is the point.
-
-## Two ways to drive it — pick one, or use both
-
-Ensemble is one engine with two front doors. **Same scenes, same runs, same run
-directory** — they differ only in who is holding the wheel.
-
-| | **CLI** | **MCP tools** |
-|---|---|---|
-| For | you, at a terminal | an AI agent, with or without a shell |
-| Start a run | `ensemble run …` — **blocks** until done | `run_scene` — returns a runId **instantly** |
-| Watch it | terminal output, or `ensemble serve` | `run_status` / `peek_state`, polled |
-| Stop it | ctrl-C | `stop_run` |
-| Continue | `ensemble resume <dir>` | `resume_run` |
-
-The rule of thumb: **if a human is watching, use the CLI; if an agent is deciding,
-use the MCP.** The CLI blocks, which is fine when you are sitting there and wrong
-when an agent needs to do other work meanwhile.
-
-### Installing it once, for every project
-
-The MCP server is **global, not per-project**. You register it a single time:
-
-```bash
-npm i -g @ghostmind-dev/ensemble
-claude mcp add ensemble -s user -- ensemble mcp serve   # -s user = all projects
-```
-
-`-s user` is what makes it global. There is **no daemon to start and no port** —
-your MCP host launches `ensemble mcp serve` on stdio when it needs it and shuts it
-down after. Nothing runs in the background between sessions.
-
-### Then per-folder, nothing to set up
-
-Runs are **cwd-relative**, and everything a project owns lives under one folder — no
-per-project install and no init step:
-
-```
-my-project/
-└── .ensemble/
-    ├── scenes/review.mts    ← your workflows
-    ├── ensemble.json        ← OPTIONAL: MCP servers for agent nodes
-    ├── .env                 ← OPTIONAL: secrets for that config (gitignore it)
-    └── runs/                ← run artifacts, created on first run
-```
-
-So "a workflow per project" is simply: **put a `.mts` file in `.ensemble/scenes/`.**
-`ensemble serve` then finds it with no arguments, and `ensemble run <path>` accepts any
-path. A legacy `./ensemble.json` or `./scenes/` still loads, so older projects keep
-working — but new work goes under `.ensemble/`.
-
-### Getting the plugin — the lowest-friction path
-
-The plugin bundles **three skills** and the **MCP server**, wired up automatically:
-
-| skill | what it teaches |
-|---|---|
-| `autoresearch` | the *concept* — Karpathy's loop, why its constraints exist, and whether a goal qualifies |
-| `autoresearch-build` | the *implementation* — the three things, writing an evaluator, launching, reading the ledger |
-| `ensemble` | general scene authoring — the format, the patterns, casting, budget and resume discipline |
-
-The split is deliberate: an agent asked *why* the loop refuses something loads the
-first, one asked to *build* one loads the second. Two lines, nothing else to
-configure:
-
-```
-/plugin marketplace add ghostmind-labo/ensemble
-/plugin install ensemble@ghostmind-ensemble
-```
-
-**No separate `npm i -g`, no `claude mcp add`.** The bundled server prefers an
-`ensemble` already on your PATH and otherwise falls back to `npx`, so it works on a
-machine with nothing installed — the first launch just pays a download.
-
-Then you skip the syntax entirely and ask for what you want:
-
-> *"Build me a scene where three models answer independently and a fourth picks the
-> best, then run it on this question with a $0.50 cap."*
-
-> Already ran `claude mcp add ensemble` by hand? Drop it with
-> `claude mcp remove ensemble -s user` once the plugin is installed, or you will have
-> the same tools twice.
-
-**Skill and MCP are complements, not alternatives.** The skill is *knowledge* (how
-to write a good scene, what to do when a gate never passes); the MCP is *hands* (start,
-watch, stop, resume). The skill even tells the agent to prefer the MCP tools when
-they are present. Use both — that is the intended setup.
-
-Rough guide to what you need:
-
-- **Just you, terminal** → global install + API key. Done.
-- **Agent writes and runs scenes for you** → add the plugin (skill + MCP).
-- **Agent in another host / no shell** → `claude mcp add …` (or point any MCP host at
-  `ensemble mcp serve`).
-
-## Where skills and MCP servers live
-
-**You probably don't need to configure anything.** Both registries are inherited from
-Claude Code if you already use it.
-
-### Skills
-
-Same `SKILL.md` format and the same six directories Claude Code reads, project first:
-
-```
-.claude/skills/<name>/SKILL.md          ← project   (Claude Code's own location)
-.opencode/skills/<name>/SKILL.md        ← project
-.agents/skills/<name>/SKILL.md          ← project
-~/.claude/skills/<name>/SKILL.md        ← global    (Claude Code's own location)
-~/.config/opencode/skills/<name>/       ← global
-~/.agents/skills/<name>/SKILL.md        ← global
-```
-
-Every skill you already wrote for Claude Code works here unchanged. A node opts in
-with `skills: ["name"]`; the file's body is inlined into that node's system prompt.
-
-### MCP servers
-
-Four sources, first definition wins:
-
-| Order | File | Format |
-|---|---|---|
-| 1 | `./ensemble.json` → `mcp` | ours |
-| 2 | `./.mcp.json` → `mcpServers` | **Claude Code's** |
-| 3 | `~/.config/ensemble/ensemble.json` → `mcp` | ours |
-| 4 | `~/.claude.json` → `mcpServers` | **Claude Code's** |
-
-So **your existing Claude Code MCP servers just work.** Verified on a real machine:
-
-```
-$ ensemble mcp
-  github  connected  44 tool(s)  global:claude
-  tmux    connected  13 tool(s)  global:claude
-```
-
-The formats differ slightly — Claude splits `command`/`args` and calls remote servers
-`"http"` — and ensemble normalises both. Declare your own only when you want something
-Claude Code doesn't have, or want to override a name:
-
-```json
-{
-  "mcp": {
-    "fs": { "type": "local", "command": ["npx", "-y", "@modelcontextprotocol/server-filesystem", "."] }
-  }
-}
-```
-
-`ensemble mcp` shows the source of every server, so you always know which file a
-definition came from.
-
-### Transports — all of them
-
-| Kind | Support |
-|---|---|
-| **stdio** (local process) | ✅ |
-| **Streamable HTTP** (current spec) | ✅ including **stateless** servers |
-| **SSE** (earlier spec) | ✅ automatic fallback |
-
-Remote servers try Streamable HTTP first and fall back to SSE, so a server built
-against either spec connects without you declaring which.
-
-### Authentication — including OAuth
-
-| Method | How |
-|---|---|
-| **No auth** | nothing to do |
-| **Token in a header** | `"headers": { "Authorization": "Bearer ..." }` |
-| **OAuth (browser redirect)** | `ensemble login <server>` |
-
-Many hosted servers issue no static token at all — the only way in is an
-authorization-code flow. `ensemble login` opens your browser, catches the redirect on
-a loopback port, and stores the tokens in `~/.config/ensemble/auth.json` (mode `0600`).
-Once per server, not once per run; refresh is automatic.
-
-```bash
-ensemble mcp                   # status — OAuth servers show `needs auth`
-ensemble mcp login notion      # authorize (opens a browser)
-ensemble mcp logout notion     # forget its tokens
-```
-
-The command authorizes **that MCP server**, not ensemble — there is no ensemble
-account. Set `ENSEMBLE_NO_BROWSER=1` on a headless box and it prints the URL instead
-of opening one. `ENSEMBLE_OAUTH_PORT` moves the loopback port if 8976 is taken.
-
-Dynamic client registration is handled for you: against Linear's server this
-registers a client, generates a PKCE `S256` challenge, and negotiates `read write`
-scopes with no configuration at all.
-
-A server needing auth shows as `needs_auth` in `ensemble mcp`, with the exact command
-to fix it. Nothing forces a bearer token.
-
-### Keeping tokens out of the config
-
-`ensemble.json` is meant to be committed, so never put a secret in it. Reference the
-environment instead — `${VAR}` and `${VAR:-fallback}` are expanded anywhere in the
-config:
-
-```json
-{
-  "mcp": {
-    "gh": {
-      "type": "remote",
-      "url": "https://api.githubcopilot.com/mcp/",
-      "headers": { "Authorization": "Bearer ${GH_MCP_TOKEN}" }
-    }
-  }
-}
-```
-
-The value can come from a real environment variable, or from a **`.env` beside the
-config** — loaded automatically, so the usual pattern is:
-
-```bash
-echo "GH_MCP_TOKEN=ghp_..." >> .env
-echo ".env" >> .gitignore          # commit ensemble.json, never the token
-```
-
-Exported variables win over `.env`, so CI can override without editing files.
-
-A variable that is referenced but unset is reported by name **before** connecting:
-
-```
-! config references ${GH_MCP_TOKEN} but GH_MCP_TOKEN is not set — export it or add it to .env
-```
-
-That is deliberate: expanding to the literal string `${GH_MCP_TOKEN}` would send a
-nonsense `Authorization` header and produce a baffling 401 instead of a fixable error.
-
-> For servers that use **OAuth**, no token belongs in the config at all —
-> `ensemble mcp login <server>` stores credentials outside the project entirely.
-
-### Turning inheritance off
-
-Inheriting is the default because it is usually what you want — but a repo that must
-not depend on whatever is on the machine can say so, in `ensemble.json`:
-
-```json
-{
-  "sources": {
-    "claudeSkills": false,
-    "opencodeSkills": false,
-    "agentsSkills": false,
-    "claudeMcp": false,
-    "skillDirs": ["./team-skills"]
-  }
-}
-```
-
-Every flag defaults to `true`. `skillDirs` adds your own locations and is scanned
-**first**, so an explicit skill always beats an inherited one of the same name. With
-the config above, `ensemble skills` reports exactly one skill — yours — sourced
-`custom:./team-skills`.
+---
 
 ## Install
 
-```bash
-npm i -g @ghostmind-dev/ensemble      # CLI everywhere
-# or, per project:
-npm i @ghostmind-dev/ensemble
+```sh
+npm install @ghostmind-dev/ensemble
+export TYPESAFE_API_KEY=...     # https://console.typesafe.ai/settings/keys
 ```
 
-Requirements:
+Node 22.18 or newer. Runner files are `.mts`, loaded by Node's own type
+stripping — no build step to write one.
 
-- **Node ≥ 22.18** — scenes are TypeScript, loaded via Node's native type stripping
-- `OPENROUTER_API_KEY` in the environment — **that's the only credential**
+---
 
-Name scenes `.mts` and nothing else is needed. (`.ts` also works when the nearest
-`package.json` has `"type": "module"` — `ensemble validate` says so if it doesn't.)
+## The three questions
 
-## Commands
-
-```bash
-ensemble run <scene.mts> "<goal>"     # execute a scene (--budget caps the spend)
-ensemble resume <run-dir>            # continue a stopped run from its checkpoint
-ensemble serve [scenes-dir]          # live viewer + editor in the browser
-ensemble view <scene.mts>             # draw it (--mermaid, --html[=file])
-ensemble validate <scene.mts>         # check it without spending tokens
-ensemble skills                      # list the skill + MCP registry (from config)
-ensemble mcp                         # connect MCP servers and list their tools
-ensemble mcp serve                   # expose ensemble AS an MCP server (for agents)
-ensemble models [filter]             # list models available through OpenRouter
-ensemble version                     # installed version (also --version / -V)
-```
-
-`ensemble --help` prints a **First time** walkthrough and the one-line command that
-wires ensemble into an AI agent — the tool explains itself, so this README is not
-the only place the setup lives.
-
-`validate` catches unknown skills, edges to missing nodes, unreachable exits,
-parallel output collisions, and skills declared on model nodes — in milliseconds,
-before any spend.
-
-## ensemble serve — see it, run it, modify it
-
-```bash
-ensemble serve            # http://127.0.0.1:7777
-```
-
-- **Canvas** — the graph drawn in layers; parallel groups boxed; edges labeled with
-  their actual predicates (`s["verdict"] === "accept"`); `⚡ model` / `⛭ agent` badge
-  on every node.
-- **Live run** — nodes pulse while running and **stream their tokens in real time**
-  (model nodes); nodes whose inputs aren't ready show `⏳ waiting on: …`; each lands
-  with tokens · cost · elapsed.
-- **State tab** — the blackboard, updated after every node.
-- **Source tab** — edit the scene and Save. The edit is validated *before* the file
-  is written: a broken scene is rejected with the exact problems and the file on
-  disk is never touched.
-
-Scene files stay the source of truth; the server is a window onto them.
-
-## Agent nodes: tools, MCP, skills
-
-An agent node **loops** — call tools, read results, call more, until it can answer.
-`maxTurns` (default 12) bounds it. Tool calls the model requests together run
-concurrently.
-
-**Built-in tools** come in two halves. Read: `read_file`, `list_files`, `glob`,
-`grep`, `fetch_url`. Write: `write_file`, `edit_file`, `bash`.
-
-The write half was held back for a long time on the argument that a shell is the
-largest attack surface an agent can have. That is still true; what changed is the
-conclusion. Without it an agent node could read and report but never *build*, so the
-only way to do real work was to rent someone else's coding agent — which costs money
-and control of the prompt. A small, confined, auditable write surface we own beats a
-large one we do not.
-
-Every path is confined to the project root, and `bash` runs from the root under a
-timeout with a process-group kill. But **`bash` does not sandbox the command** — a
-command that reaches outside the root (`curl`, `ssh`, a global install) will do so.
-Disarm it where it has no business:
+Jev answers in exactly three shapes, and refuses everything else. That is the
+feature.
 
 ```ts
-defaults: { tools: { bash: false } },   // the whole scene
-tools: { bash: false },                 // one node
+import { choice, score, noul } from "@ghostmind-dev/ensemble";
 ```
 
-Research mode does this for you: it withdraws `bash` outright and replaces the write
-tools with versions scoped to the artefact under study, because a proposer that can
-shell out can rewrite its own evaluator.
+| Builder | Answer space | Lands on state as | Also returns |
+|---|---|---|---|
+| `choice(instructions, options)` | one of N, max 255 | the option name | `probabilities`, `confidence` |
+| `score(instructions, levels)` | a 2–10 level rubric | a **fractional** number | `probabilities`, `confidence`, `legend` |
+| `noul(instructions, criteria?)` | yes / no | P(yes), 0–1 | — the number *is* the certainty |
 
-**MCP servers** live in `ensemble.json` (project) or `~/.config/ensemble/ensemble.json`
-(global):
+A score is the expected value across levels, not the winner: `1.3` means mostly
+level 1 with some level 2. That is what makes it useful in a threshold.
 
-```json
-{
-  "mcp": {
-    "fs": {
-      "type": "local",
-      "command": ["npx", "-y", "@modelcontextprotocol/server-filesystem", "."]
-    }
-  }
+**Ask several at once.** Questions in one node are sent in a single request and
+answered independently — one answer never becomes hidden context for another. A
+speculative extra question is close to free, so ask it and let your code decide
+whether it mattered.
+
+**Describe the boundary, not just the option.** The `not_for` field is the one
+that earns its keep: it says what belongs in the *neighbouring* option, which is
+exactly where classifiers fail.
+
+```ts
+choice("What kind of picture?", {
+  photo:   { what: "Photoreal image of a scene", not_for: "Explanatory figures" },
+  diagram: { what: "Boxes, arrows, labels",      not_for: "Photoreal scenes" },
+})
+```
+
+---
+
+## The three node kinds
+
+A node is exactly one of these. There is no fourth, and no `runtime:` string.
+
+```ts
+// decide — one Jev call. The only thing this library does itself.
+classify: {
+  decide: { team: choice(…), urgent: noul(…) },
+  reads: ["goal", "customer_plan"],        // the ONLY state sent. Required.
+  gate: { on: "team", min: 0.7, to: "escalate" },
+}
+
+// work — one of YOUR handlers, by name.
+send: { work: "billing", reads: ["goal"], writes: ["reply"] }
+
+// code — deterministic, free, instant. Where arithmetic belongs.
+tally: { code: (s) => ({ rounds: Number(s.rounds ?? 0) + 1 }), writes: ["rounds"] }
+```
+
+`reads` on a decide node is **required and load-bearing**. Jev's accuracy is
+documented to fall as irrelevant detail grows, so the filter is the feature, not
+documentation — only those keys are sent.
+
+`writes` decides what lands on the blackboard: one key takes the handler's
+return value whole, several destructure it, none means the node only had an
+effect.
+
+### Your handlers
+
+```ts
+work: {
+  photo: async ({ goal, state, signal, report }) => {
+    report({ cost: 0.021, meta: { provider: "gemini", model: "nano-banana-pro" } });
+    return await myImageApi(goal, { signal });
+  },
 }
 ```
 
-A node opts in by name: `mcp: ["fs"]`. Servers connect lazily — a scene naming none
-never starts one. `ensemble mcp` connects them all and lists every tool they expose.
+`report()` is how the run record stays honest about money the runner did not
+spend. `signal` aborts on budget, cancellation or your own signal — pass it
+through to your fetch.
 
-**Skills** use the same `SKILL.md` format and locations as Claude Code
-(`~/.claude/skills/`, `.claude/skills/`, …), so skills you already have work unchanged.
-A node's `skills: [...]` are inlined into its system prompt.
+---
 
-> **Scoping is by construction, not by policy.** We assemble each node's tool array
-> ourselves, so a tool a node did not ask for isn't *denied* — it is absent. There is
-> no deny-list to trust and nothing to misconfigure.
+## Branching
 
-## Agent backends
-
-`runtime: "agent"` is our own loop, and it is the right default: no subprocess,
-~250 tokens of scaffolding, and the node's prompt dominates. But a node that has
-to genuinely *build* something wants what other people have spent years on — a
-real editing loop, a permission model, LSP, verification. Rather than reimplement
-that, mount it:
+Two forms, and the split is the whole design:
 
 ```ts
-nodes: {
-  plan:  { runtime: "agent",    prompt: "Read the code and plan the change.", outputs: ["plan"] },
-  build: { runtime: "opencode", prompt: "Make the change.", inputs: ["plan"], outputs: ["summary"] },
-  check: { runtime: "fn",       fn: (s) => ({ ok: String(s.summary).includes("PASS") }),
-           inputs: ["summary"], outputs: ["ok"] },
-},
+edges: [
+  // MEANING — a declared option. Static, enumerable, drawable, provable.
+  { from: "classify", to: "gen_photo", on: "picture_kind=photo" },
+  { from: "classify", to: "lettering", on: "needs_text>=0.7" },
+
+  // ARITHMETIC — ordinary TypeScript.
+  { from: "classify", to: "hand_off", when: (s) => Number(s.complexity) >= 1.8 },
+
+  // No condition: the default branch. Also satisfies the exhaustiveness check.
+  { from: "review", to: "ship" },
+]
 ```
 
-`opencode` ships in the box because it is the only agent CLI that needs **nothing
-but the credential ensemble already requires**: it reads `OPENROUTER_API_KEY`
-straight from the environment, and its model namespace is
-`openrouter/<vendor>/<model>` — byte-identical to a scene's model ref, so it
-passes through with no translation. Install it with
-`brew install sst/tap/opencode`; `ensemble validate` tells you if it is missing,
-before anything spends.
+**Code decides on numbers, Jev decides on meaning.** This is not style — Jev is
+documented as unreliable at counting and at comparing dates, so every judgement
+about a quantity belongs in `when` or in a `code` node.
 
-**Your scene's grants reach it too.** The same `defaults.skills` and
-`defaults.mcp` our own loop honours are injected into the CLI per call via
-`OPENCODE_CONFIG_CONTENT` — config as a string in the environment, so nothing is
-written to disk and no state survives the process. One grant, both agents.
+The `on:` grammar, in full:
 
-### Mounting another one
-
-A backend is an object: build an invocation, read the output back.
-
-```ts
-import { registerAgentBackend } from "@ghostmind-dev/ensemble";
-
-registerAgentBackend({
-  name: "codex",
-  summary: "OpenAI Codex CLI, sandboxed",
-  bin: "codex",
-  install: "npm i -g @openai/codex",
-  command: ({ model, prompt, cwd }) => ({
-    argv: ["codex", "exec", "--cd", cwd, "--sandbox", "workspace-write", "--json", prompt],
-    env: { CODEX_MODEL: model },
-  }),
-  parse: (res) => ({ text: res.stdout }),
-});
-// nodes may now declare { runtime: "codex", ... }
-```
-
-The backend's **name becomes the runtime name**, and the generated runtime is a
-*calling* one — so it inherits the output contract, the two-attempt retry,
-per-node cost accounting, the run budget, journalled resume and cancellation for
-free. You write an argv and a parser; the orchestration is already there.
-
-Backends verified to fit this shape, all headless with your own OpenRouter key:
-[Codex](https://github.com/openai/codex) (`codex exec`, real OS sandbox),
-[Qwen Code](https://github.com/QwenLM/qwen-code) (`qwen -p`, distinct exit codes
-for turn and budget limits), [Cline](https://github.com/cline/cline)
-(`cline --yolo`, but pass `-P openrouter` or it bills their backend), and
-[Continue](https://github.com/continuedev/continue) (`cn -p`, per-tool `--allow`).
-
-**Two things worth knowing before you reach for one.** An external CLI carries
-thousands of tokens of its own scaffolding per call — that is what made renting
-one expensive the first time, and it is why this is a per-node choice rather than
-a default. And where a CLI reports no usage, its spend is invisible to
-`--budget`; only what a backend can parse gets counted.
-
-**Not every agent CLI belongs here.** Anything that meters a first-party consumer
-subscription — Claude Pro/Max via a wrapper, an ad-supported free tier, a proxy
-pointed at someone's ChatGPT plan — violates the upstream terms when driven by an
-automated process, regardless of which agent points at it. Backends must be tools
-you can point at your own provider.
-
-## Safety rails
-
-| Rail | Default | Override |
-|---|---|---|
-| Total node executions | 50 | `--max-runs` |
-| Wall clock | 20 min | `--timeout` (minutes) |
-| **Run cost (USD)** | unlimited | `--budget 0.50`, or `ENSEMBLE_BUDGET` machine-wide (resumable) |
-| Per-edge loops | unlimited | `maxLoops:` on the edge |
-| Agent tool-calling turns | 12 | `maxTurns:` on the node |
-| Filesystem writes | **impossible** — no write tool exists | use an MCP server |
-
-**The budget is a hard stop, not a warning.** Between nodes, a run that has spent its
-cap ends immediately with state checkpointed. Inside an agent node, the loop checks the
-cap between turns: once crossed (or on the final `maxTurns` turn), tools are withheld
-and the model is told to answer from what it already learned — a best-effort answer
-instead of a hard failure. `ENSEMBLE_BUDGET=1` in your shell profile puts a $1 ceiling
-under every run on the machine, including ones started from the `serve` UI, which also
-takes a per-run cap in its toolbar.
-
-Two more things keep agent loops cheap by construction: every tool result is clamped
-to 8 KB before it enters the conversation, and once a result is more than six tool
-calls old it is cleared down to a 200-char stub (the model can re-run the tool if it
-truly needs it again). Without that second rule the loop pays for its early
-exploration on every subsequent turn — cost quadratic in turns.
-
-Every run writes `costs.json` next to `state.json` — an itemised per-node receipt —
-and the terminal prints a `cost by node` breakdown at the end, failed runs included,
-because "which node burned the budget" matters most exactly when a run died on it.
-
-A `when` predicate that throws fails the run naming the edge. Two JSON-contract
-failures in a row fail the node loudly. An extraction that keeps <25% of a long
-reply raises a `node:lossy` warning — the model probably summarised its real answer
-away.
-
-## Human — or agent — in the loop
-
-A node can **stop the run and wait for an answer**. It makes no model call:
-
-```ts
-approval: {
-  runtime: "ask",
-  question: "Ship this draft? Reply approve or reject, and say why.",
-  inputs: ["draft"],              // context for whoever answers
-  outputs: ["verdict", "why"],    // the keys their answer must fill
-},
-```
-
-Then gate on the answer like any other state:
-`{ from: "approval", to: "publish", when: (s) => s["verdict"] === "approve" }`.
-
-The pause is **durable, not a held-open process**: the question goes into the
-journal, so the run can wait minutes or days, survive a reboot, and be answered by
-whoever is around —
-
-```bash
-ensemble resume .ensemble/runs/<id> --answer verdict=approve --answer why="reads well"
-```
-
-— or by the operating agent, with `resume_run { runId, answers: { … } }`. Whether a
-human or an agent answers is not the engine's concern; both just supply the missing
-state keys. `run_status` reports `waiting` with the question and the exact keys
-expected.
-
-**A gate cannot be bypassed by retrying.** Resuming without the answers parks again
-on the same question rather than falling through, and the ask node itself costs
-nothing — it is pure wait.
-
-## Resumable runs
-
-A run that stops early — budget spent, node failed, ctrl-C, timeout — is not a dead
-end. Alongside the blackboard, every checkpoint records **where in the graph the run
-was**, so it can be picked back up:
-
-```bash
-ensemble run council.mts "the goal" --budget 0.25   # stops mid-graph, cheap
-cat .ensemble/runs/<id>/state.json                  # look at what you bought
-ensemble resume .ensemble/runs/<id> --budget 1.00   # continue, don't restart
-```
-
-**This is what makes `--budget` a pause button rather than a kill switch.** Spend a
-little, read the partial state, then decide whether it is worth more.
-
-The continuation skips everything already paid for and lands in the *same* run
-directory, so `costs.json` keeps one cumulative receipt. `journal.json` carries the
-position: the target still owed, the `maxLoops` counters already consumed (so a
-resumed run cannot quietly award itself a fresh loop budget), cumulative spend, and
-why it stopped. A budget applies to the running total — resuming without raising it
-says so immediately instead of burning a node first.
-
-Editing the scene between attempts is allowed, and often the point: a resume warns
-when the file's hash changed, because loop counters are keyed by edge order.
-
-## Seeing every run: one viewer, all projects
-
-Runs land in the project they belong to, but each one also appends a pointer line to
-`~/.ensemble/index.jsonl`. `ensemble serve`'s **Runs** tab reads that, so a viewer
-started in *any* project lists every run on the machine — grouped project → scene →
-run, with status, spend, and whatever a paused run is waiting for. Click one to read
-its journal and state.
-
-That closes the gap where a run an agent started over MCP was invisible to the
-browser: the viewer no longer shows only its own runs, it reads the journals, which
-are written after every node. Append-only JSONL because several runners write at
-once; the reader assembles the tree and drops entries whose directory is gone. The
-index is pure discovery — delete it and it refills.
-
-## Run artifacts
-
-`.ensemble/runs/<timestamp>-<scene>/` — `state.json` (checkpointed blackboard),
-`costs.json` (per-node receipt), `journal.json` (graph position, for `resume`), and
-`result.md` (every key rendered, on completion).
-
-## Ensemble as an MCP server
-
-The primary consumer of ensemble is often another agent. `ensemble mcp serve`
-exposes the whole run lifecycle as MCP tools over stdio, so any MCP host — Claude
-Code, or an external agent framework — can operate runs without a shell:
-
-| Tool | Behaviour |
+| Form | Means |
 |---|---|
-| `validate_scene` | the free pre-flight check |
-| `run_scene(file, goal, budget?)` | starts the run, returns the runId **immediately** |
-| `run_status(runId)` | running/stopped/completed · graph position · spend · recent activity |
-| `peek_state(runId, keys?)` | the blackboard mid-run, values clipped for context safety |
-| `stop_run(runId)` | abort — safe, because the position is journalled and resumable |
-| `resume_run(runId, budget?)` | continue from the checkpoint, budget cumulative |
-| `list_runs()` | newest first, with resumability |
+| `"kind=photo"` | a choice answered with that option |
+| `"needs_text"` | a noul at or above 0.5 |
+| `"!needs_text"` | a noul below 0.5 |
+| `"needs_text>=0.7"` | an explicit threshold — `>=`, `>`, `<=`, `<` |
 
-Installing the plugin wires this up for you. To register it by hand instead — in
-Claude Code, or any other MCP host:
+A score has no `on:` form on purpose: a score is a number. Edges are tried in
+declaration order, first match wins, and `maxLoops` on an edge is a loop budget
+that, once spent, lets the next edge take over.
 
-```bash
-claude mcp add ensemble -s user -- ensemble mcp serve    # -s user = every project
-```
-
-```json
-{ "mcpServers": { "ensemble": { "command": "ensemble", "args": ["mcp", "serve"] } } }
-```
-
-There is **no daemon and no port**: the host spawns `ensemble mcp serve` on stdio
-when it needs it and reaps it afterwards.
-
-### The two servers are not the same shape
-
-`ensemble serve` (the browser viewer) and `ensemble mcp serve` (the agent interface)
-have deliberately opposite concurrency rules:
-
-| | `serve` — browser | `mcp serve` — agents |
-|---|---|---|
-| Transport | HTTP on a port (default 7777) | stdio, no port |
-| How many can run | **one per port** — a second is `EADDRINUSE` | **one per client session**, many is normal |
-| Concurrent runs | **one**; a second start gets `409 a run is already in progress` | **unlimited** — `run_scene` returns a runId and moves on |
-
-The viewer shows one canvas, so it runs one scene at a time. An agent wants to fan
-out, so nothing serializes it. Register the MCP server twice (say, the plugin *and* a
-hand-rolled `claude mcp add`) and you simply get two independent processes with
-duplicate tools — no election, no conflict.
-
-The only tool that is instance-bound is **`stop_run`**, which needs the in-memory
-abort handle of whichever process started the run; `run_status`, `peek_state`,
-`list_runs`, and `resume_run` all read the run directory, so any instance can answer
-for any run. That is worth knowing before you keep duplicate registrations: a run
-started on one server cannot be stopped from the other.
-
-Peek and status are reads of the checkpoint files, and stop is safe because resume
-exists — so the server holds nothing but an AbortController per live run. If it
-dies, in-flight runs die *resumably*: the same failure story as everywhere else.
-Programmatic embedding gets the same thing via `buildEnsembleServer()`.
-
-## Everything is an object
-
-The design rule, applied inward as well as outward: nodes, edges, schemas, and —
-since 0.16 — **runtimes** are objects. Each runtime object declares its own node
-properties (with zod shapes), its own validation, and its own execution (`park`
-for waiting runtimes, `call` for model-calling ones). The engine holds no
-runtime-specific branches; the validator composes each node's legal surface from
-the object it names.
-
-Since 0.19, nodes have a **deterministic** form too: `runtime: "fn"` makes the node
-a plain function over state — free, instant, schema-checked like model output.
-Nodes are the neurons (`model` stochastic, `fn` deterministic, `ask` external
-input, `experiment` measurement, `refine` selection — keep the fitter candidate,
-discard the other); edges are the synapses, gated by their `when` property.
-
-Since 0.20 the rule reaches the **scene level** too: a top-level block like
-`research:` is a mounted **capability object**. A capability declares its block's
-schema, its semantic checks, the tools it hands to agent nodes while active, and
-any engine guard defaults it retunes — and `research` is simply the first one in
-the registry, not a special case. The validator composes the scene's legal top
-level from what is mounted, so an unregistered block is still a typo:
+### The confidence gate
 
 ```ts
-import { registerCapability, z } from "@ghostmind-dev/ensemble";
-
-registerCapability({
-  name: "notify", summary: "posts run milestones to a webhook",
-  schema: z.object({ url: z.string().url() }).strict(),
-  tools: (value) => [/* tool objects every agent node receives while active */],
-  tune: () => ({ timeoutMs: 60 * 60_000 }),
-});
-// scenes may now declare  notify: { url: "…" }  — validated, tools delivered,
-// with zero engine or validator edits.
+gate: { on: "team", min: 0.7, to: "escalate" }
 ```
 
-Since 0.21, **edge selection** is an object too. `sequential` — declaration
-order, first match wins, per-index `maxLoops` — is the default and was lifted
-verbatim out of the engine, which now holds no edge branches at all:
+Below `min`, the run diverts to `to` whatever the edges say, and the step
+records `took: "gate"`. An unsure classifier should not act — and only `choice`
+and `score` have a confidence to gate on, because a noul's value already is one.
 
-```ts
-registerEdgeKind({
-  name: "fanout",
-  summary: "take every matching edge",
-  fields: {},
-  select: ({ edges, cursor, state, emit }) => { /* ... */ },
-});
-// scenes may now declare { edgeKind: "fanout" }
+---
+
+## What it emits
+
+**This library draws nothing.** It emits two JSON documents and leaves rendering
+to whatever you already use. A renderer is opinionated and goes stale; a schema
+is neither.
+
+Both are flat `nodes[]` / `edges[]` with stable ids — what dagre, elk, graphviz,
+cytoscape and d3 all already eat. No coordinates, no colours, no theme.
+
+### `graph.json` — what *could* happen
+
+```sh
+ensemble graph triage.mts | jq .edges
 ```
 
-So the registries are: **runtimes** (what a node can be), **agent backends** (whose
-coding loop a node rents), **tools** (what an agent can do), **edge kinds** (how the
-next node is chosen), **capabilities** (what a scene can declare), **stores** (where
-artifacts go), **sinks** (who watches). The engine is a walk over a blackboard;
-everything else arrives as a block.
-
-Since 0.18 the same is true of **tools** (`registerTool({...})` — offered to every
-agent node) and the **run store** (`runScene(..., { store })` — every artifact write
-goes through a store object; wrap `fileRunStore` to mirror runs elsewhere while
-keeping them resumable). The engine contains zero runtime-name branches, and since
-0.21 zero edge branches either.
-
-The payoff is that adding a capability means adding an object:
-
-```ts
-import { registerRuntime, z } from "@ghostmind-dev/ensemble";
-
-registerRuntime({
-  name: "webhook", summary: "POSTs the node's inputs and waits", badge: "🌐",
-  needsModel: false,
-  fields: { url: z.string().url() },
-  park: ({ node, spec, state }) => /* wait, or pass values through */ …,
-});
-// nodes may now declare { runtime: "webhook", url: "…" } — validated and drawn
-// like any built-in, with zero engine edits.
+```jsonc
+{
+  "$schema": "https://ghostmind.dev/ensemble/graph-v1.json",
+  "version": 1,
+  "runner": { "name": "triage", "hash": "sha256:9c92f2f1a59ff24d", "entry": "classify", "inputs": ["goal"] },
+  "nodes": [
+    { "id": "classify", "kind": "decide", "cost": "cheap",
+      "reads": ["goal"], "writes": ["team"],
+      "decide": { "model": "jev-latest", "questions": [ /* every option, in full */ ],
+                  "gate": { "on": "team", "min": 0.7, "to": "escalate" } } },
+    { "id": "to_billing", "kind": "work", "cost": "metered",
+      "reads": ["goal"], "writes": ["reply"], "work": { "handler": "billing" } }
+  ],
+  "edges": [
+    { "id": "e0", "from": "classify", "to": "to_billing", "on": { "question": "team", "option": "billing" } },
+    { "id": "e2", "from": "review", "to": "redo",
+      "when": { "source": "(s) => Number(s[\"quality\"]) < 1.5", "reads": ["quality"] } }
+  ],
+  "data": [
+    { "key": "goal", "producedBy": ["$input"],  "readBy": ["classify", "to_billing"] },
+    { "key": "team", "producedBy": ["classify"], "readBy": ["e0", "e1"] }
+  ]
+}
 ```
 
-## Using it as a library
+Three things make it reproducible rather than merely readable:
+
+- **`edges[].on`** names the question *and* the option, so a branch is labelled
+  without guessing.
+- **`edges[].when`** carries the predicate's own source text and the keys it
+  touches. A code branch cannot be enumerated, so instead of pretending, the
+  document tells the truth. Nothing is executed to produce it.
+- **`nodes[].cost`** is a class, not a number: `cheap` is a Jev call, `metered`
+  is your handler, `free` is plain code. Colour by it and the money is visible.
+
+### `run.json` — what *did* happen
+
+```jsonc
+{
+  "$schema": "https://ghostmind.dev/ensemble/run-v1.json",
+  "run": { "id": "20260918T003102-triage", "graph": "sha256:9c92f2f1a59ff24d",
+           "status": "completed", "cost": { "total": 0.0213, "currency": "USD" } },
+  "steps": [
+    { "n": 1, "node": "classify", "kind": "decide", "ms": 96, "cost": 0.000021,
+      "answers": {
+        "team": { "type": "choice", "value": "billing", "confidence": 0.91,
+                  "probabilities": { "billing": 0.91, "orders": 0.06, "account": 0.03 } }
+      },
+      "gate": { "on": "team", "passed": true, "min": 0.7, "measured": 0.91 },
+      "took": "e0" },
+    { "n": 2, "node": "to_billing", "kind": "work", "ms": 17400, "cost": 0.0213,
+      "handler": "billing", "meta": { "provider": "gemini", "model": "nano-banana-pro" },
+      "writes": { "reply": "…" }, "took": null }
+  ],
+  "state": { "goal": "…", "team": "billing", "reply": "…" }
+}
+```
+
+**The join is one field.** `steps[].took` is an edge id from `graph.json`, and
+`run.graph` is that document's hash. Highlighting the path taken is a
+set-membership test; finding the hot path across fifty runs is a `groupBy`.
+
+Every decision keeps its whole distribution, not just the winner — which is what
+makes a run auditable, and what lets an optimiser tell *it improved* apart from
+*the judge felt different today*.
+
+---
+
+## Live output
+
+While a run is in flight, `ensemble run` shows which node is working and what it
+said:
+
+```
+make-a-picture — a hero image for the launch page
+  ? classify            96ms   $0.000021  picture_kind=photo 0.91  needs_text=0.08  complexity=1.20 0.64
+  ⚙ gen_photo        17400ms     $0.0213  wrote image
+  ✓ completed · $0.0213 · 2 steps
+  .ensemble/runs/20260918T003102-make-a-picture/run.json
+```
+
+A spinner marks the node currently working and is rewritten in place when it
+finishes. When stderr is not a TTY the spinner disappears on its own and each
+node prints one line, so piping and CI logs stay clean.
+
+There is deliberately **no full-screen TUI**. It would take over the terminal,
+break `| jq`, and become another renderer to maintain. The seam is the event
+stream instead — three events, and anyone can build a TUI, a web view or a
+progress bar on top without this library owning it:
 
 ```ts
-import { loadScene, loadRegistry, runScene } from "@ghostmind-dev/ensemble";
-
-const scene = await loadScene("scenes/example.mts", loadRegistry());
-const result = await runScene(scene, "compare Bun and Deno", {
+await pipeline({ goal }, {
   onEvent: (e) => {
-    if (e.type === "node:delta") process.stdout.write(e.delta);   // live tokens
-    if (e.type === "node:end") console.log(`\n${e.node}: $${e.cost}`);
+    if (e.type === "node:start") console.log(`${e.node} — ${e.waiting}`);
+    if (e.type === "node:end")   console.log(`${e.step.node} took ${e.step.ms}ms`);
+    if (e.type === "run:end")    console.log(e.run.run.status);
   },
 });
 ```
 
-Everything the terminal and browser show comes from this one typed `RunEvent`
-stream — your consumer sees exactly what they see.
+The bundled terminal reporter is just one consumer: `import { reporter } from
+"@ghostmind-dev/ensemble"`.
+
+---
+
+## The CLI
+
+The library is the product — a runner belongs inside your server, called as an
+ordinary function. The CLI is for the development loop.
+
+```sh
+ensemble validate <file>      # prove the graph        — free, offline
+ensemble graph    <file>      # emit graph.json        — free, offline
+ensemble run      <file> "goal"
+```
+
+Data goes to stdout so it can be piped; commentary goes to stderr.
+`ensemble graph x.mts | jq` is the point.
+
+| Option | |
+|---|---|
+| `-o, --out <path>` | write here instead of stdout / the default run directory |
+| `--json` | `run`: print `run.json` to stdout instead of writing a file |
+| `--input k=v` | seed a state key (repeatable) |
+| `--budget <usd>` | stop once the run costs more than this |
+| `--max-steps <n>` | cap node executions (default 50) |
+
+`run` writes `run.json` and `graph.json` into `.ensemble/runs/<id>/`.
+
+---
+
+## What `validate` proves
+
+Free, offline, and the reason the closed answer space was worth having. Every
+check exists because the alternative is a workflow that runs and looks fine.
+
+- **Every declared option has an edge** — or an explicit default. An unhandled
+  branch is named: `node "classify" asks "team" but nothing handles "account"`.
+- **Every edge names a real option** of a question the node it leaves actually
+  asks.
+- **The branch form fits the question type** — no thresholds on a choice, no
+  `=` on a noul, and a score is sent to `when:` with the replacement written out
+  for you.
+- **Every key read has an origin** — a node's `reads`, and the keys a `when()`
+  touches, discovered by running it against a recording proxy. The error names
+  the one-line fix.
+- **Gates are gateable** — a choice or a score, a real target, a threshold in
+  range.
+- **Handlers exist**, nodes are exactly one kind, entry is real, nothing is
+  unreachable.
+
+`execute` refuses to start a runner that does not validate. `graph()` and
+`validate()` keep working on one that doesn't — they are exactly what you reach
+for when something is wrong.
+
+---
+
+## Swapping the decider
+
+Everything depends on the `Decider` function type, never on Jev. That is the
+mitigation for betting a design on one young vendor, and it is what makes the
+test suite free:
+
+```ts
+import { execute, type Decider } from "@ghostmind-dev/ensemble";
+
+const cached: Decider = async (state, questions) => { /* … */ };
+await pipeline({ goal }, { decider: cached });
+```
+
+Point it at a different endpoint or pin a model version without touching a node:
+
+```ts
+runner({ …, jev: { model: "jev-1.13.0", baseUrl: "https://proxy.internal", retries: 3 } })
+```
+
+---
+
+## Jagged edges
+
+TypeSafe [publishes Jev's known failure modes](https://docs.typesafe.ai/model-jaggedness/jev-1.13).
+They are design constraints, not warnings, and several are already enforced here:
+
+| Weakness | What this library does about it |
+|---|---|
+| Counting and arithmetic are unreliable | `when:` and `code` nodes exist. Never gate on a Jev-computed number |
+| Dates are read as text, not ordered quantities | Extract with a model, compare in code |
+| Accuracy falls as irrelevant state grows | `reads` is required on every decide node, and is a hard filter |
+| Multi-hop questions lose accuracy | One question, one property. Ask several instead — they are parallel |
+| State is not treated as hostile | Guard before routing on unvetted user text |
+| No structural invariants (`P(x)` and `1 − P(¬x)` need not agree) | Calibrate each question on your own data; don't derive one threshold from another |
+| Literal reading | Use `not_for` on every option. State boundaries, don't imply them |
+| It does not generate | Generation is your handler's job, never a node's |
+
+Scores from rubrics of different lengths are not comparable — normalise by
+`levels − 1` before combining them.
+
+---
+
+## What this deliberately does not do
+
+No models, prompts, tools, agents, skills, MCP client or registry. No server, no
+browser viewer, no mermaid, no markdown reports. No parallel node groups, no
+resume, no replay.
+
+Those are not oversights — they were removed. Keeping them would have made this
+a framework you live inside rather than a function you call, and the whole point
+is that **your code owns the control flow**.
+
+---
 
 ## Examples
 
-[`examples/`](./examples) — one folder per example, each README documenting a
-**real run** with actual output, timings, and cost. Start with
-[01 — Model Jury](./examples/01-model-jury).
-
-## Tuning the agent scaffolding
-
-Every `runtime: "agent"` node receives a short block of operating instructions —
-batch independent calls, don't repeat failing ones, quote evidence, stop when done.
-That block is **measurable and swappable**.
-
-```bash
-ENSEMBLE_AGENT_PROMPT=my-prompt.md ensemble run scene.mts "goal"   # try one
-npm run bench                                                      # score it
-npm run bench:optimize -- --iterations=5 --repeat=3                # improve it
+```sh
+ensemble validate examples/01-triage/triage.mts       # free
+ensemble graph    examples/02-picture/picture.mts | jq
+ensemble run      examples/03-refine/refine.mts "explain calibrated confidence"
 ```
 
-[`bench/`](./bench) is a [Karpathy autoresearch](https://github.com/karpathy/autoresearch)
-loop — propose, measure, **keep or revert**, repeat, with an audit trail in
-`bench/log.jsonl`. Twelve tasks, all graded by code (never a model judge), against a
-fixture project with known ground truth. Objective: `passes × 100 − turns`, so
-correctness dominates and efficiency breaks ties.
+| | |
+|---|---|
+| [`01-triage`](examples/01-triage/triage.mts) | The smallest thing that is still the whole idea: one choice, three branches, a gate |
+| [`02-picture`](examples/02-picture/picture.mts) | All three question types in one request; handlers on different backends; arithmetic in `when:` |
+| [`03-refine`](examples/03-refine/refine.mts) | A loop that knows when to stop — a score gate, a loop budget, counting in code |
 
-Two things keep it honest, both learned the hard way:
+---
 
-- **The metric must not punish correct answers.** An early checker failed a right
-  answer because the model wrote "does not *actually* mention". There are now unit
-  tests over the exact strings that were misgraded.
-- **Nothing is believed without clearing the noise floor.** The same prompt scored
-  9/12 and 12/12 on consecutive sweeps, so every measurement averages N sweeps and a
-  candidate must win by more than ~1 point. Ties revert.
+## API
 
-`optimize.mts` never edits source — a winner lands in `bench/prompts/best.md` and
-promotion is a deliberate step.
+```ts
+import {
+  runner,                          // define one
+  choice, score, noul,             // ask
+  validate, toGraph, execute,      // prove, emit, run
+  jev, reporter,                   // the decider, the terminal view
+} from "@ghostmind-dev/ensemble";
 
-## Status
-
-v0.12 — **fully self-contained**; the opencode dependency is gone. Verified: per-node
-cross-vendor routing, the agent loop calling built-in *and* MCP tools until done,
-skills inlined from SKILL.md, function conditions, loop caps, parallel groups, token
-streaming, validate-before-save editing, hard cost budgets, resumable runs, typed
-state enforced by zod, `ask` nodes that pause for a human or an agent, a
-machine-level run index behind one viewer, and ensemble driving itself over MCP.
-`npm test` runs 10 offline suites; CI runs them on every push.
-
-Not built yet: the orchestrator node (dynamic routing), drag-and-drop editing, and
-any hosted/remote execution — runs are local by design.
-
-### Working on ensemble itself
-
-```bash
-npm test          # 10 suites, all offline (OpenRouter is mocked) — no key, no spend
-npm test resume   # just the suites whose name matches
-npm run typecheck && npm run build
+const pipeline = runner({ … });
+pipeline.validate();               // string[] — empty means sound
+pipeline.graph();                  // GraphDoc
+await pipeline(inputs, options);   // { result, state, run }
 ```
 
-To work on the viewer, run it **from source** — never the installed package, or
-you are testing the last release:
+Throws `RunnerError` (with `.problems`) if the spec does not validate, and
+`RunFailed` (with `.run`, the partial record) if a node does.
 
-```bash
-node src/cli.ts serve dev/.ensemble/scenes    # or: run dev
-```
-
-`dev/` is a sandbox project with a scene that exercises a parallel group, a scored
-gate that loops, and an `ask` node. The page is read from disk on every request and
-the server watches `ui/`, so **editing `ui/index.html` reloads the open browser** —
-no rebuild, no restart, no reinstall. Engine edits under `src/` still need a restart
-of that one command.
-
-Each suite runs as its own process: they chdir into temp projects and replace
-global `fetch`, so sharing one process would let them corrupt each other.
+MIT.
