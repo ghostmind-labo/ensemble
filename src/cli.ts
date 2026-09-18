@@ -1,1069 +1,283 @@
+#!/usr/bin/env node
+/**
+ * The CLI — the development loop, not the product.
+ *
+ * The product is the library: a runner belongs inside your server, called as an
+ * ordinary function. What you want from a terminal is narrower — prove a graph,
+ * emit it, run it once to see what happens. So there are four commands, and
+ * three of them are free and offline.
+ *
+ * Everything that is data goes to stdout so it can be piped; everything that is
+ * commentary goes to stderr. `ensemble graph x.mts | jq` is the point.
+ */
 import { parseArgs } from "node:util";
-import { existsSync } from "node:fs";
-import { loadRegistry } from "./registry.ts";
-import { loadScene, SceneError, runtimeOf } from "./scene.ts";
-import { RUNTIMES } from "./runtimes/index.ts";
-import { isProgram, ITERATION_EDGE } from "./autoresearch.ts";
-import { loadKeyFiles, hasApiKey, missingKeyMessage } from "./credentials.ts";
-import { runScene, readJournal, hashScene, cancelRun } from "./engine.ts";
-import { replayRun, routeLabel, type ReplayReport } from "./replay.ts";
-import { createTerminalReporter } from "./reporter.ts";
-import { toMermaid, toTerminal, toHtml } from "./view.ts";
-import { c, info, error, duration } from "./log.ts";
-import { packageVersion } from "./version.ts";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { isRunner, type Runner } from "./runner.ts";
+import { RunFailed, RunnerError } from "./execute.ts";
+import { money, reporter } from "./report.ts";
+import { loadSkills, validateSkill } from "./skills.ts";
+import { describeServer, isRunnable, missingEnv, preflight, searchServers, searchSkills } from "./registry.ts";
 
-const USAGE = `
-${c.bold("ensemble")} ${c.dim(`v${packageVersion()}`)} — multi-model agent ensembles
-
-${c.bold("Usage")}
-  ensemble init                        Scaffold .ensemble/ so an editor resolves scenes
-  ensemble run <scene.ts> "<goal>"   Execute a scene against a goal
-  ensemble research <program.ts>     Run an autoresearch program: propose →
-                                       evaluate → keep or revert, until the
-                                       iteration budget runs out
-  ensemble resume <run-dir>            Continue a stopped run from its checkpoint
-  ensemble replay <run-dir>            Re-run a recorded run through the real
-                                       engine, models answered from the tape —
-                                       free, offline, and edits show as findings
-  ensemble cancel <run-dir> [reason]   Close a parked run for good (artifacts kept)
-  ensemble serve [scenes-dir]          Live viewer + run console in the browser
-  ensemble view <scene.ts>           Draw the graph (terminal, mermaid, or html)
-  ensemble validate <scene.ts>       Check a scene without running it
-  ensemble skills                      List the skill + MCP registry (from config)
-  ensemble mcp                         Connect MCP servers and list their tools
-  ensemble mcp serve                   Expose ensemble AS an MCP server (stdio) —
-                                       run/status/peek/stop/resume tools for agents
-  ensemble mcp login <server>          Authorize an MCP server that needs OAuth
-  ensemble mcp logout <server>         Forget that server's stored tokens
-  ensemble models [filter]             List models available through OpenRouter
-  ensemble version                     Print the installed version
-
-${c.bold("Options")}
-  --port <n>        serve: port to listen on (default 7777) — give each project
-                    its own port to watch several at once
-  --max-runs <n>    Global node-execution cap (default 50)
-  --timeout <min>   Wall-clock limit in minutes (default 20)
-  --budget <usd>    Hard cost cap for the run, e.g. --budget 0.50
-  --answer k=v      run: seed a scene input at launch (repeatable) —
-                    resume: answer the ask node the run is parked on
-  --scene <file>    replay: use this scene file instead of the recorded one
-  --strict          replay: exit non-zero when the route or state differs from
-                    the recording — for CI, where any drift is the signal
-  --iterations <n>  research: experiments to run after the baseline (default 10)
-  --model <ref>     research: the proposing model (default claude-sonnet-5)
-  --threshold <n>   research: metric gain required to keep a change (default 0) —
-                    raise it to your metric's run-to-run noise, or the loop will
-                    "discover" sampling luck
-                    (ENSEMBLE_BUDGET sets a machine-wide default)
-  --verbose         Print full node transcripts instead of clipped ones
-  --mermaid         view: print Mermaid source instead of the terminal sketch
-  --html [file]     view: write a standalone HTML page and print its path
-  --no-open         serve: do not launch a browser
-  --version, -V     Print the installed version
-  --force           init: overwrite files that already exist
-  --starter         init: also write an example scene
-  --help
-
-${c.bold("Where scenes live")}
-  .ensemble/scenes/*.mts     ${c.dim("the convention — everything ensemble in one place")}
-  .ensemble/runs/            ${c.dim("run artifacts, created for you")}
-  ${c.dim("`ensemble run <path>` accepts any path; `serve` defaults to .ensemble/scenes")}
-
-${c.bold("First time")}
-  1. export OPENROUTER_API_KEY=sk-or-...      ${c.dim("the only credential needed")}
-  2. write .ensemble/scenes/my.mts:           ${c.dim("no package.json, no install")}
-       import { scene } from "@ghostmind-dev/ensemble";
-       export default scene({
-         name: "ask",
-         defaults: { model: "openrouter/anthropic/claude-sonnet-5" },
-         nodes: { answer: { outputs: ["answer"] } },
-         entry: "answer", exit: "answer",
-       });
-  3. ensemble validate .ensemble/scenes/my.mts        ${c.dim("free — catches mistakes")}
-  4. ensemble run .ensemble/scenes/my.mts "goal" --budget 0.25
-
-${c.bold("Driving it from an AI agent")} ${c.dim("(Claude Code, or any MCP host)")}
-  claude mcp add ensemble -s user -- ensemble mcp serve
-
-  Registers ensemble's tools once, for every project: the agent starts runs,
-  polls status, peeks at state mid-run, stops and resumes them — no shell.
-  ${c.dim("Then just ask: \"build me a scene that…\" — see `ensemble mcp serve`.")}
-`.trim();
-
-async function cmdSkills(): Promise<number> {
-  const reg = loadRegistry();
-
-  info(c.bold(`\nSkills (${reg.skills.size})`));
-  if (reg.skills.size === 0) {
-    info(c.dim("  none found"));
-  } else {
-    const width = Math.max(...[...reg.skills.keys()].map((k) => k.length));
-    for (const skill of [...reg.skills.values()].sort((a, b) => a.name.localeCompare(b.name))) {
-      const desc = skill.description.split("\n")[0] ?? "";
-      const short = desc.length > 72 ? `${desc.slice(0, 72)}…` : desc;
-      info(`  ${c.cyan(skill.name.padEnd(width))}  ${short}`);
-      info(`  ${" ".repeat(width)}  ${c.dim(skill.source)}`);
-    }
-  }
-
-  info(c.bold(`\nMCP servers (${reg.mcp.size})`) + c.dim("  declared in config"));
-  if (reg.mcp.size === 0) {
-    info(c.dim("  none configured — declare them in ensemble.json; `ensemble mcp` connects them"));
-  } else {
-    for (const server of [...reg.mcp.values()].sort((a, b) => a.name.localeCompare(b.name))) {
-      const state = server.enabled ? c.green("enabled") : c.dim("disabled");
-      info(`  ${c.cyan(server.name)}  ${c.dim(server.type)}  ${state}  ${c.dim(server.source)}`);
-    }
-  }
-
-  if (reg.problems.length > 0) {
-    info(c.bold(c.yellow(`\nSkipped (${reg.problems.length})`)));
-    for (const problem of reg.problems) info(`  ${c.yellow("!")} ${problem}`);
-  }
-
-  if (reg.configPath) info(c.dim(`\nconfig: ${reg.configPath}`));
-  info("");
-  return 0;
-}
-
-/**
- * `ensemble init` — the editor-experience fix.
- *
- * Runs are cwd-relative and need no scaffolding, so this exists purely so a
- * language server can resolve `@ghostmind-dev/ensemble` and give you typed
- * `state` in `when` predicates instead of `any`.
- */
-async function cmdInit(opts: { force: boolean; starter: boolean }): Promise<number> {
-  const { initProject } = await import("./init.ts");
-  const result = initProject(process.cwd(), opts);
-
-  info(`${c.bold("ensemble init")} ${c.dim(result.root)}`);
-  for (const file of result.created) info(`  ${c.green("+")} ${file}`);
-  for (const file of result.skipped) info(`  ${c.dim("·")} ${c.dim(`${file} (exists — --force to replace)`)}`);
-  info("");
-  info(c.dim("Editors now resolve the import, so `state` schemas type your `when` predicates."));
-  info(c.dim("Write scenes to .ensemble/scenes/*.mts; `ensemble serve` finds them with no arguments."));
-  return 0;
-}
-
-async function cmdValidate(path: string | undefined): Promise<number> {
-  if (!path) {
-    error("validate needs a scene file: ensemble validate <scene.ts>");
-    return 2;
-  }
-
-  const reg = loadRegistry();
+const version = (): string => {
   try {
-    const scene = await loadScene(path, reg);
-    const nodes = Object.keys(scene.nodes).length;
-    const groups = Object.keys(scene.groups).length;
-    info(
-      `${c.green("valid")}  ${c.bold(scene.name)} — ${nodes} node(s), ` +
-        `${groups} group(s), ${scene.edges.length} edge(s), entry ${c.cyan(scene.entry)}`,
-    );
-
-    // The scene is well-formed but cannot run: validate is the free pre-flight,
-    // so a certain failure belongs here rather than after the first node spends.
-    loadKeyFiles();
-    // Which nodes actually need the key: ask the runtime object, never the name.
-    // "ask", "fn" and "experiment" all reach no model, so a scene made of them
-    // is runnable with no key at all — and an external agent backend needs one
-    // without being special-cased here.
-    const callers = Object.entries(scene.nodes).filter(
-      ([, n]) => RUNTIMES[runtimeOf(scene, n)]?.needsModel,
-    );
-    if (callers.length > 0 && !hasApiKey()) {
-      info("");
-      error(missingKeyMessage());
-      return 1;
-    }
-    return 0;
-  } catch (err) {
-    if (err instanceof SceneError) {
-      error(`${path} is not a valid scene:\n`);
-      for (const problem of err.problems) console.error(`  • ${problem}`);
-      console.error("");
-      return 1;
-    }
-    throw err;
-  }
-}
-
-/**
- * Live MCP verification.
- *
- * `ensemble skills` reads ensemble.json, which only says what was *declared*.
- * This actually connects each server and reports what happened — a server can be
- * configured and still fail to start, or start and expose nothing.
- */
-async function cmdMcp(): Promise<number> {
-  const { McpHub } = await import("./mcp.ts");
-  const registry = loadRegistry();
-  const servers = [...registry.mcp.values()];
-
-  if (servers.length === 0) {
-    info("\n" + c.bold("MCP servers (0)"));
-    info(c.dim("  none configured\n"));
-    info("  Declare them in " + c.cyan("ensemble.json") + " (this project) or " +
-         c.cyan("~/.config/ensemble/ensemble.json") + " (global):\n");
-    info(
-      c.dim(
-        [
-          "  {",
-          '    "mcp": {',
-          '      "fs": {',
-          '        "type": "local",',
-          '        "command": ["npx", "-y", "@modelcontextprotocol/server-filesystem", "."]',
-          "      }",
-          "    }",
-          "  }",
-        ].join("\n"),
-      ),
-    );
-    info("");
-    return 0;
-  }
-
-  // Unresolved ${VAR} is the likeliest cause of a confusing auth failure — say so
-  // before connecting rather than after a 401.
-  for (const problem of registry.problems.filter((p) => p.includes("${"))) {
-    info(`${c.yellow("!")} ${c.yellow(problem)}`);
-  }
-
-  info(c.dim(`connecting ${servers.length} server(s)…`));
-  const { FileOAuthProvider } = await import("./oauth.ts");
-  const hub = new McpHub(
-    process.cwd(),
-    (name) => new FileOAuthProvider(name, () => {}),
-  );
-  try {
-    await hub.connect(servers);
-    const statuses = hub.status();
-    info("\n" + c.bold(`MCP servers (${statuses.length})`));
-
-    const width = Math.max(...statuses.map((s) => s.name.length));
-    for (const s of statuses) {
-      const state =
-        s.status === "connected"
-          ? c.green("connected")
-          : s.status === "disabled"
-            ? c.dim("disabled")
-            : s.status === "needs_auth"
-              ? c.yellow("needs auth")
-              : c.red("failed");
-      const tools = s.toolCount !== undefined ? c.dim(`  ${s.toolCount} tool(s)`) : "";
-      const from = registry.mcp.get(s.name)?.source;
-      info(`  ${c.cyan(s.name.padEnd(width))}  ${state}${tools}${from ? c.dim(`  ${from}`) : ""}`);
-      if (s.error) info(`  ${" ".repeat(width)}  ${c.red(s.error)}`);
-    }
-
-    const connected = statuses.filter((s) => s.status === "connected").map((s) => s.name);
-    if (connected.length > 0) {
-      info("\n" + c.bold("Tools"));
-      for (const name of connected) {
-        for (const tool of hub.toolsFor([name])) {
-          const first = tool.description.split("\n")[0] ?? "";
-          info(`  ${c.dim(tool.name)}  ${c.dim(first.slice(0, 70))}`);
-        }
+    const here = dirname(fileURLToPath(import.meta.url));
+    for (const path of [join(here, "..", "package.json"), join(here, "..", "..", "package.json")]) {
+      try {
+        return (JSON.parse(readFileSync(path, "utf8")) as { version: string }).version;
+      } catch {
+        /* try the next one */
       }
     }
-    if (registry.configPath) info(c.dim("\nconfig: " + registry.configPath));
-    info("");
-    return 0;
-  } finally {
-    await hub.close();
+  } catch {
+    /* fall through */
   }
-}
+  return "0.0.0";
+};
 
-/**
- * `ensemble login <server>` — the interactive half of OAuth.
- *
- * Connecting with an auth provider makes the SDK drive the flow: it opens the
- * browser, we catch the redirect on a loopback port, hand back the code, and
- * reconnect with real tokens. Tokens persist in ~/.config/ensemble/auth.json,
- * so this is once per server, not once per run.
- */
-async function cmdLogin(name: string | undefined, opts: { logout: boolean }): Promise<number> {
-  const { FileOAuthProvider, waitForCallback, forgetTokens, listAuthorized, CALLBACK_PORT } =
-    await import("./oauth.ts");
-  const registry = loadRegistry();
+const USAGE = `ensemble ${version()} — typed decisions, wired to your code
 
-  if (!name) {
-    const authed = listAuthorized();
-    info("\n" + c.bold("Authorized servers"));
-    if (authed.length === 0) info(c.dim("  none"));
-    else for (const s of authed) info(`  ${c.green("✓")} ${c.cyan(s)}`);
-    info(c.dim("\nusage: ensemble mcp login <server>   |   ensemble mcp logout <server>"));
-    info("");
-    return 0;
-  }
+Usage
+  ensemble validate <file>          Prove the graph. Free, offline.
+  ensemble graph <file>             Emit graph.json to stdout. Free, offline.
+  ensemble run <file> [goal]        Run it once; writes run.json.
+  ensemble check <file>             Can it run HERE? Model capabilities, keys,
+                                    MCP servers. Reads the live catalogue.
+  ensemble skills [query]           Skills visible here — and what to fix.
+  ensemble servers [query]          MCP servers in the official registry, and
+                                    which environment variables each still needs.
+  ensemble version
 
-  if (opts.logout) {
-    info(forgetTokens(name) ? `${c.green("logged out")} ${name}` : `no stored tokens for ${name}`);
-    return 0;
-  }
+Options
+  -o, --out <path>   graph: write here instead of stdout
+                     run:   write run.json here instead of .ensemble/runs/<id>/
+      --json         run: print run.json to stdout instead of writing a file
+      --input k=v    run: seed a state key (repeatable)
+      --remote       skills: search the public index instead of this machine
+      --budget <usd> run: stop once the run costs more than this
+      --max-steps <n> run: cap node executions (default 50)
 
-  const server = registry.mcp.get(name);
-  if (!server) {
-    error(`no MCP server named "${name}" — declared: ${[...registry.mcp.keys()].join(", ") || "none"}`);
-    return 1;
-  }
-  if (server.type !== "remote" || !server.url) {
-    error(`"${name}" is a local server — OAuth applies to remote servers only`);
-    return 1;
-  }
+The file must default-export a runner(). Scenes are .mts, loaded by Node's own
+type stripping — Node 22.18 or newer.
 
-  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
-  const { StreamableHTTPClientTransport } = await import(
-    "@modelcontextprotocol/sdk/client/streamableHttp.js"
-  );
+  TYPESAFE_API_KEY   required by 'run'; 'validate' and 'graph' never call out.
+`;
 
-  const callback = waitForCallback();
-  const headless = Boolean(process.env["ENSEMBLE_NO_BROWSER"]);
-  const provider = new FileOAuthProvider(name, (url) => {
-    info(`\n${c.bold(`Authorize ${name}`)}`);
-    info(headless ? c.dim("open this URL to continue:") : c.dim("your browser should open; if not, visit:"));
-    info(`  ${c.cyan(url)}`);
-    info(c.dim(`\nwaiting for the redirect on 127.0.0.1:${CALLBACK_PORT} …`));
-  });
+const die = (message: string): never => {
+  process.stderr.write(`ensemble: ${message}\n`);
+  process.exit(1);
+};
 
-  const url = new URL(server.url);
+async function load(path: string | undefined): Promise<Runner> {
+  if (!path) die("no file given — ensemble <command> <file.mts>");
+  const full = resolve(path!);
+  let module: { default?: unknown };
   try {
-    const transport = new StreamableHTTPClientTransport(url, { authProvider: provider });
-    const client = new Client({ name: "ensemble", version: "0.2.2" }, { capabilities: {} });
-
-    try {
-      // Already holding valid tokens? Then this simply succeeds.
-      await client.connect(transport);
-      info(`${c.green("already authorized")} — ${name} connected`);
-      await client.close();
-      return 0;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      const needsAuth =
-        (err as Error)?.name === "UnauthorizedError" || /unauthoriz|401|403/i.test(message);
-      if (!needsAuth) throw err;
-    }
-
-    // The provider has now sent the browser off; wait for the code to come back.
-    const code = await callback.code;
-    await transport.finishAuth(code);
-
-    const client2 = new Client({ name: "ensemble", version: "0.2.2" }, { capabilities: {} });
-    await client2.connect(new StreamableHTTPClientTransport(url, { authProvider: provider }));
-    const tools = await client2.listTools();
-    await client2.close();
-
-    info(`\n${c.green("authorized")} ${c.cyan(name)} ${c.dim(`— ${tools.tools.length} tool(s)`)}`);
-    info(c.dim("tokens saved to ~/.config/ensemble/auth.json\n"));
-    return 0;
-  } catch (err) {
-    error(err instanceof Error ? err.message : String(err));
-    return 1;
-  } finally {
-    callback.close();
+    module = (await import(pathToFileURL(full).href)) as { default?: unknown };
+  } catch (error) {
+    return die(`could not load ${path}: ${(error as Error).message}`);
   }
+  if (!isRunner(module.default)) {
+    return die(`${path} does not default-export a runner() — add \`export default runner({ … })\``);
+  }
+  return module.default;
 }
 
-async function cmdView(
-  path: string | undefined,
-  opts: { mermaid: boolean; html: string | undefined },
-): Promise<number> {
-  if (!path) {
-    error("view needs a scene file: ensemble view <scene.ts>");
-    return 2;
+function report(problems: string[], name: string): void {
+  if (problems.length === 0) {
+    process.stderr.write(`✓ ${name} is sound\n`);
+    return;
   }
-
-  const reg = loadRegistry();
-  let scene;
-  try {
-    scene = await loadScene(path, reg);
-  } catch (err) {
-    if (err instanceof SceneError) {
-      error(`${path} is not a valid scene:\n`);
-      for (const problem of err.problems) console.error(`  • ${problem}`);
-      console.error("");
-      return 1;
-    }
-    throw err;
-  }
-
-  if (opts.html !== undefined) {
-    const { writeFileSync } = await import("node:fs");
-    const out = opts.html.length > 0 ? opts.html : `${scene.name}.html`;
-    writeFileSync(out, toHtml(scene), "utf8");
-    info(`${c.green("wrote")} ${out}`);
-    return 0;
-  }
-
-  info(opts.mermaid ? toMermaid(scene) : `\n${toTerminal(scene)}`);
-  return 0;
+  process.stderr.write(`✗ ${name} — ${problems.length} problem${problems.length === 1 ? "" : "s"}\n`);
+  for (const problem of problems) process.stderr.write(`  · ${problem}\n`);
+  process.exit(1);
 }
 
-/**
- * `--answer key=value`, repeatable. Everything after the first "=" is the
- * value, so answers may contain "=" freely. Shared by `run` (seeding a scene
- * input at launch) and `resume` (answering a parked ask node): both are the
- * outside world writing a state key, and the engine treats them identically.
- */
-function parseAnswers(
-  pairs: string[] | undefined,
-): { ok: true; answers: Record<string, unknown> } | { ok: false; error: string } {
-  const answers: Record<string, unknown> = {};
-  for (const pair of pairs ?? []) {
-    const eq = pair.indexOf("=");
-    if (eq === -1) return { ok: false, error: `--answer must be key=value, got "${pair}"` };
-    answers[pair.slice(0, eq)] = pair.slice(eq + 1);
-  }
-  return { ok: true, answers };
-}
-
-async function cmdRun(
-  path: string | undefined,
-  goal: string | undefined,
-  opts: { maxRuns?: number; timeout?: number; budget?: number; answers?: string[]; verbose: boolean },
-): Promise<number> {
-  if (!path || !goal) {
-    error('run needs a scene and a goal: ensemble run <scene.ts> "<goal>"');
-    return 2;
-  }
-  const parsed = parseAnswers(opts.answers);
-  if (!parsed.ok) {
-    error(parsed.error);
-    return 2;
-  }
-  const answers = parsed.answers;
-
-  const reg = loadRegistry();
-  let scene;
-  try {
-    scene = await loadScene(path, reg);
-  } catch (err) {
-    if (err instanceof SceneError) {
-      error(`${path} is not a valid scene:\n`);
-      for (const problem of err.problems) console.error(`  • ${problem}`);
-      console.error("");
-      return 1;
-    }
-    throw err;
-  }
-
-  // A research program has its own verb, because it takes no goal: sending it
-  // through `run` would attach a command-line goal to a loop whose whole point
-  // is a directive that never changes.
-  if (isProgram(scene)) {
-    error(
-      `${path} is a research program, not a scene — run it with:\n\n` +
-        `  ensemble research ${path}\n\n` +
-        `  It takes no goal: the directive is \`instruction\` in the program file,\n` +
-        `  read identically on every iteration.`,
-    );
-    return 2;
-  }
-
-  // A seed the scene never declared is almost always a typo — and a declared
-  // input the seed does not supply is what the data graph would have warned
-  // about, so say so here rather than let a node run with it silently missing.
-  const seeded = Object.keys(answers);
-  const declared = scene.inputs ?? [];
-  for (const key of seeded) {
-    if (!declared.includes(key)) {
-      info(`${c.yellow("!")} ${c.yellow(`--answer ${key}`)} ${c.dim(`is not one of the scene's declared inputs (${declared.length ? declared.join(", ") : "none"}) — it lands in state, but nothing is wired to read it`)}`);
-    }
-  }
-  if (seeded.length > 0) info(c.dim(`seeding: ${seeded.join(", ")}`));
-
-  const started = Date.now();
-  const result = await runScene(scene, goal, {
-    maxNodeRuns: opts.maxRuns,
-    timeoutMs: opts.timeout ? opts.timeout * 60_000 : undefined,
-    ...(opts.budget !== undefined ? { budget: opts.budget } : {}),
-    ...(seeded.length > 0 ? { answers } : {}),
-    onEvent: createTerminalReporter({ verbose: opts.verbose }),
-  });
-
-  return report(scene, result, started);
-}
-
-
-/**
- * `ensemble research <program.ts>` — the sealed loop.
- *
- * Deliberately takes NO goal argument. The directive is `instruction` in the
- * program file and is read identically on every iteration; accepting a goal
- * here would reintroduce exactly the variable the mode exists to remove, so a
- * stray one is refused rather than silently ignored.
- */
-async function cmdResearch(
-  path: string | undefined,
-  opts: {
-    iterations?: number;
-    model?: string;
-    threshold?: number;
-    timeout?: number;
-    budget?: number;
-    verbose: boolean;
-  },
-): Promise<number> {
-  if (!path) {
-    error("research needs a program file: ensemble research <program.mts>");
-    return 2;
-  }
-
-  const reg = loadRegistry();
-  let scene;
-  try {
-    scene = await loadScene(path, reg);
-  } catch (err) {
-    if (err instanceof SceneError) {
-      error(`${path} is not a valid research program:\n`);
-      for (const problem of err.problems) console.error(`  • ${problem}`);
-      console.error("");
-      return 1;
-    }
-    throw err;
-  }
-
-  if (!isProgram(scene)) {
-    error(
-      `${path} is a scene, not a research program.\n\n` +
-        `  Run it with:  ensemble run ${path} "<goal>"\n\n` +
-        `  A research program default-exports research({ modify, evaluate, instruction })\n` +
-        `  — three things and nothing else. See: ensemble research --help`,
-    );
-    return 2;
-  }
-
-  // Run-time settings are applied to the generated scene here, which is what
-  // keeps them OUT of the program file: the file is the experiment, these are
-  // the session.
-  if (opts.model) scene.defaults.model = opts.model;
-  if (opts.iterations !== undefined) {
-    if (!Number.isInteger(opts.iterations) || opts.iterations < 1) {
-      error("--iterations must be a positive whole number");
-      return 2;
-    }
-    scene.edges[ITERATION_EDGE]!.maxLoops = opts.iterations;
-  }
-  if (opts.threshold !== undefined) scene.research!.threshold = opts.threshold;
-
-  loadKeyFiles();
-  if (!hasApiKey()) {
-    error(missingKeyMessage());
-    return 1;
-  }
-
-  const iterations = scene.edges[ITERATION_EDGE]!.maxLoops ?? 10;
-  const targets = Array.isArray(scene.research!.edit) ? scene.research!.edit : [scene.research!.edit];
-  info(
-    `${c.bold("research")} ${c.dim(path)}\n` +
-      `  ${c.dim("modify  ")} ${targets.join(", ")}\n` +
-      `  ${c.dim("evaluate")} ${scene.research!.measure} ${c.dim(`(${scene.research!.budget ?? "5m"} budget, ` +
-        `${scene.research!.minimize ? "lower" : "higher"} is better)`)}\n` +
-      `  ${c.dim("proposer")} ${scene.defaults.model}\n` +
-      `  ${c.dim("plan    ")} baseline + up to ${iterations} experiment(s), keep or revert each\n` +
-      `  ${c.dim("log     ")} ${scene.research!.log ?? "results.tsv"}\n`,
-  );
-
-  const started = Date.now();
-  // The instruction IS the goal — passed here so nodes render it the same way
-  // an ordinary scene renders its goal, and never taken from the command line.
-  const result = await runScene(scene, scene.description ?? "run the experiment loop", {
-    timeoutMs: opts.timeout ? opts.timeout * 60_000 : undefined,
-    ...(opts.budget !== undefined ? { budget: opts.budget } : {}),
-    onEvent: createTerminalReporter({ verbose: opts.verbose }),
-  });
-
-  return report(scene, result, started);
-}
-
-/**
- * Shared tail of `run` and `resume`: the headline answer and where the
- * artifacts landed. A stopped run advertises how to pick it back up, since the
- * journal beside its state is the whole point of stopping cleanly.
- */
-function report(
-  scene: Awaited<ReturnType<typeof loadScene>>,
-  result: Awaited<ReturnType<typeof runScene>>,
-  started: number,
-): number {
-  if (!result.ok) {
-    // Parked on an ask node is not a failure — it is the scene working as
-    // designed, waiting on a human or an agent.
-    if (result.waiting) {
-      const { node, question, outputs, context } = result.waiting;
-      info(`\n${c.bold(c.cyan("⏸ waiting"))} ${c.dim(`on ${node}, after ${duration(Date.now() - started)}`)}`);
-      if (context) info(`\n${c.dim(context)}`);
-      info(`\n${question}\n`);
-      info(c.dim("answer and continue:"));
-      info(
-        `  ensemble resume ${result.runDir} ` + outputs.map((k) => `--answer ${k}="…"`).join(" "),
-      );
-      return 0;
-    }
-    error(result.reason);
-    info(c.dim(`\nfailed after ${duration(Date.now() - started)}`));
-    info(c.dim(`resume → ensemble resume ${result.runDir}`));
-    return 1;
-  }
-
-  // The exit node's first declared output is the headline answer.
-  const finalKey = scene.exit ? scene.nodes[scene.exit]?.outputs?.[0] : undefined;
-  const headline = finalKey ? result.state[finalKey] : undefined;
-  if (typeof headline === "string" && headline.trim()) {
-    info(`\n${c.bold("Result")}\n${headline.trim()}`);
-  }
-  info(c.dim(`\nstate → ${result.runDir}/state.json`));
-  info(c.dim(`costs → ${result.runDir}/costs.json`));
-  return 0;
-}
-
-/**
- * `ensemble resume <run-dir>` — continue a run that stopped early.
- *
- * The journal carries the graph position, loop counters, and spend, so the
- * continuation skips everything already paid for. A budget applies to the
- * cumulative total, which is what makes `--budget` a pause button rather than a
- * kill switch: stop cheap, look at the state, then decide to spend more.
- */
-async function cmdResume(
-  dir: string | undefined,
-  opts: { maxRuns?: number; timeout?: number; budget?: number; answers?: string[]; verbose: boolean },
-): Promise<number> {
-  if (!dir) {
-    error("resume needs a run directory: ensemble resume .ensemble/runs/<id>");
-    return 2;
-  }
-
-  let resumeFrom;
-  try {
-    resumeFrom = readJournal(dir);
-  } catch (err) {
-    error(err instanceof Error ? err.message : String(err));
-    return 1;
-  }
-
-  const { journal } = resumeFrom;
-  const reg = loadRegistry();
-  let scene;
-  try {
-    scene = await loadScene(journal.scene.file, reg);
-  } catch (err) {
-    if (err instanceof SceneError) {
-      error(`the scene this run came from (${journal.scene.file}) is not valid:\n`);
-      for (const problem of err.problems) console.error(`  • ${problem}`);
-      console.error("");
-      return 1;
-    }
-    throw err;
-  }
-
-  // An edited scene is allowed — you often fix the thing that stalled the run —
-  // but edge indexes back the loop counters, so say so rather than silently
-  // applying stale budgets to renumbered edges.
-  if (hashScene(journal.scene.file) !== journal.scene.hash) {
-    info(
-      `${c.yellow("!")} ${c.yellow(`${journal.scene.file} changed since this run started`)} — ` +
-        c.dim("maxLoops counters are keyed by edge order and may no longer line up"),
-    );
-  }
-
-  const parsed = parseAnswers(opts.answers);
-  if (!parsed.ok) {
-    error(parsed.error);
-    return 2;
-  }
-  const answers = parsed.answers;
-
-  // A parked run needs its answer, or it parks again on the same question.
-  if (journal.pending) {
-    const missing = journal.pending.outputs.filter((k) => answers[k] === undefined);
-    if (missing.length > 0) {
-      error(
-        `this run is waiting on "${journal.pending.node}":\n\n` +
-          (journal.pending.context ? `${journal.pending.context}\n\n` : "") +
-          `  ${journal.pending.question}\n\n` +
-          `Answer it and resume:\n  ensemble resume ${dir} ` +
-          missing.map((k) => `--answer ${k}="…"`).join(" "),
-      );
-      return 1;
-    }
-  }
-
-  info(
-    `${c.bold("resuming")} ${c.bold(c.magenta(journal.scene.name))} ${c.dim("at")} ` +
-      `${c.cyan(journal.resumeAt ?? "?")} ${c.dim(`· ${journal.nodeRuns} node run(s) already done`)}` +
-      `${journal.totalCost > 0 ? c.dim(` · $${journal.totalCost.toFixed(4)} spent`) : ""}`,
-  );
-  if (journal.stoppedBecause) info(c.dim(`stopped because: ${journal.stoppedBecause}`));
-  if (Object.keys(answers).length > 0) info(c.dim(`answering: ${Object.keys(answers).join(", ")}`));
-
-  const started = Date.now();
-  const result = await runScene(scene, journal.goal, {
-    resumeFrom,
-    ...(Object.keys(answers).length > 0 ? { answers } : {}),
-    maxNodeRuns: opts.maxRuns,
-    timeoutMs: opts.timeout ? opts.timeout * 60_000 : undefined,
-    ...(opts.budget !== undefined ? { budget: opts.budget } : {}),
-    onEvent: createTerminalReporter({ verbose: opts.verbose }),
-  });
-
-  return report(scene, result, started);
-}
-
-async function cmdModels(filter: string | undefined): Promise<number> {
-  // Straight from OpenRouter — the only provider `runtime: "model"` and the agent
-  // loop speak to. No local tooling involved.
-  try {
-    const res = await fetch("https://openrouter.ai/api/v1/models");
-    if (!res.ok) {
-      error(`OpenRouter ${res.status} ${res.statusText}`);
-      return 1;
-    }
-    const body = (await res.json()) as { data?: Array<{ id?: string; name?: string }> };
-    const models = (body.data ?? [])
-      .map((m) => m.id)
-      .filter((id): id is string => typeof id === "string")
-      .filter((id) => !filter || id.toLowerCase().includes(filter.toLowerCase()))
-      .sort();
-
-    for (const id of models) info(`openrouter/${id}`);
-    info(c.dim(`\n${models.length} model(s)`));
-    return 0;
-  } catch (err) {
-    error(`could not reach OpenRouter: ${err instanceof Error ? err.message : String(err)}`);
-    return 1;
-  }
-}
-
-/**
- * `ensemble replay <run-dir>` — the free re-run.
- *
- * The recording is played back through the real engine: predicates, schemas,
- * loops and fn nodes all execute for real; only the model answers come from
- * the tape. Nothing is spent, nothing is written, no key is needed. A route or
- * state that differs from the recording is reported as a finding — and under
- * --strict it fails the command, which is what CI wants.
- */
-async function cmdReplay(
-  dir: string | undefined,
-  opts: { scene?: string; strict: boolean; verbose: boolean },
-): Promise<number> {
-  if (!dir) {
-    error("replay needs a run directory: ensemble replay .ensemble/runs/<id>");
-    return 2;
-  }
-
-  let report: ReplayReport;
-  try {
-    report = await replayRun(dir, {
-      ...(opts.scene !== undefined ? { sceneFile: opts.scene } : {}),
-      ...(opts.verbose ? { onEvent: createTerminalReporter({ verbose: true }) } : {}),
-    });
-  } catch (err) {
-    if (err instanceof SceneError) {
-      error(`the scene is not valid:
-`);
-      for (const problem of err.problems) console.error(`  • ${problem}`);
-      console.error("");
-      return 1;
-    }
-    error(err instanceof Error ? err.message : String(err));
-    return 1;
-  }
-
-  info(
-    `${c.bold("replay")} ${report.runId} ${c.dim("·")} scene ${c.bold(report.scene)} ` +
-      c.dim(`· tape: ${report.segments} segment${report.segments === 1 ? "" : "s"}`),
-  );
-  info(c.dim(`goal: ${report.goal}`));
-  if (report.sceneChanged) {
-    info(
-      `${c.yellow("!")} ${c.yellow("the scene changed since the recording")} — ` +
-        c.dim("replaying the edited scene against the old tape is the point"),
-    );
-  }
-
-  const recorded = report.recordedCost > 0 ? `$${report.recordedCost.toFixed(4)}` : "$0";
-  info(
-    `  ${c.dim("answered from tape")}  ${report.replayedCalls} call${report.replayedCalls === 1 ? "" : "s"} ` +
-      c.dim(`· recording cost ${recorded} · replay cost`) + ` ${c.green("$0")}`,
-  );
-  if (report.recomputed > 0) info(`  ${c.dim("recomputed live")}     ${report.recomputed} fn node run${report.recomputed === 1 ? "" : "s"}`);
-
-  // The route, honestly: identical is one line; divergence names the last
-  // agreed target and shows what each side did next.
-  const steps = (route: typeof report.recordedRoute): string =>
-    route.length === 0 ? c.dim("(no edges)") : route.map((r) => `${r.from} → ${r.to}`).join(c.dim(" · "));
-  if (report.routeMatches) {
-    info(`  ${c.dim("route")}               ${steps(report.replayedRoute)}  ${c.green("✓ matches the recording")}`);
-  } else {
-    info(`  ${c.dim("route")}               ${c.yellow(`diverged after "${report.divergedAfter ?? "?"}"`)}`);
-    const shared = report.recordedRoute.findIndex(
-      (r, i) => report.replayedRoute[i]?.from !== r.from || report.replayedRoute[i]?.to !== r.to,
-    );
-    const at = shared === -1 ? report.recordedRoute.length : shared;
-    const next = (route: typeof report.recordedRoute, label: string): void => {
-      const step = route[at];
-      info(
-        `      ${c.dim(label)}  ${
-          step ? routeLabel(step) : c.dim("(ended here)")
-        }${route.length > at + 1 ? c.dim(` · +${route.length - at - 1} more`) : ""}`,
-      );
-    };
-    next(report.recordedRoute, "recording then took");
-    next(report.replayedRoute, "replay took       ");
-  }
-
-  const diffs = report.stateChanged.length + report.stateAdded.length + report.stateRemoved.length;
-  if (diffs === 0) {
-    info(`  ${c.dim("state")}               ${report.stateSame} key${report.stateSame === 1 ? "" : "s"}  ${c.green("✓ matches the recording")}`);
-  } else {
-    const part = (label: string, keys: string[]): string | undefined =>
-      keys.length > 0 ? `${label}: ${keys.join(", ")}` : undefined;
-    info(
-      `  ${c.dim("state")}               ${c.yellow(
-        [part("changed", report.stateChanged), part("added", report.stateAdded), part("removed", report.stateRemoved)]
-          .filter(Boolean)
-          .join(" · "),
-      )} ${c.dim(`(${report.stateSame} unchanged)`)}`,
-    );
-  }
-
-  if (report.waiting) {
-    info(
-      `
-${c.cyan("⏸")} replay parked on ${c.bold(report.waiting.node)} — the recording never answered it
-` +
-        `   ${c.dim(report.waiting.question)}`,
-    );
-    return opts.strict ? 1 : 0;
-  }
-
-  if (!report.ok) {
-    error(`replay failed: ${report.reason ?? "unknown"}`);
-    return 1;
-  }
-
-  const drift = !report.routeMatches || diffs > 0;
-  info(
-    drift
-      ? `
-${c.yellow("✓ replay complete, with drift")} ${c.dim("— nothing spent, nothing written; the differences above are what your edit changed")}`
-      : `
-${c.green("✓ replay complete")} ${c.dim("— nothing spent, nothing written, nothing drifted")}`,
-  );
-  return opts.strict && drift ? 1 : 0;
-}
-
-async function main(): Promise<number> {
-  let parsed;
-  try {
-    parsed = parseArgs({
-      args: process.argv.slice(2),
-      allowPositionals: true,
-      options: {
-        help: { type: "boolean", short: "h", default: false },
-        // -v is verbose (long-standing); -V is version, as is conventional.
-        version: { type: "boolean", short: "V", default: false },
-        verbose: { type: "boolean", short: "v", default: false },
-      port: { type: "string" },
-      "max-runs": { type: "string" },
-      timeout: { type: "string" },
+async function main(): Promise<void> {
+  const { values, positionals } = parseArgs({
+    args: process.argv.slice(2),
+    allowPositionals: true,
+    options: {
+      help: { type: "boolean", short: "h", default: false },
+      version: { type: "boolean", short: "V", default: false },
+      out: { type: "string", short: "o" },
+      json: { type: "boolean", default: false },
+      input: { type: "string", multiple: true },
       budget: { type: "string" },
-      scene: { type: "string" },
-      strict: { type: "boolean", default: false },
-      iterations: { type: "string" },
-      model: { type: "string" },
-      threshold: { type: "string" },
-      // Repeatable: --answer key=value --answer other=value
-      answer: { type: "string", multiple: true },
-      mermaid: { type: "boolean", default: false },
-      // Optional value: `--html` alone picks a filename from the scene name.
-      html: { type: "string" },
-        // node:util parseArgs has no --no-x negation, so it is its own flag.
-        "no-open": { type: "boolean", default: false },
-      force: { type: "boolean", default: false },
-      starter: { type: "boolean", default: false },
-        logout: { type: "boolean", default: false },
-      },
-    });
-  } catch (err) {
-    // An unknown flag is a typo, not a crash — parseArgs throws, and the raw
-    // stack trace tells the user nothing about what to do next.
-    error(`${err instanceof Error ? err.message.split(". To specify")[0] : String(err)}\n`);
-    info(USAGE);
-    return 2;
-  }
+      "max-steps": { type: "string" },
+      remote: { type: "boolean", default: false },
+    },
+  });
 
-  const { values, positionals } = parsed;
-  const [command, ...rest] = positionals;
-
-  // Version is checked before anything else so it works with no command.
-  if (values.version || command === "version") {
-    info(packageVersion());
-    return 0;
-  }
-
+  const [command, file, ...rest] = positionals;
   if (values.help || !command) {
-    info(USAGE);
-    return command ? 0 : 1;
+    process.stdout.write(USAGE);
+    return;
+  }
+  if (values.version || command === "version") {
+    process.stdout.write(`${version()}\n`);
+    return;
   }
 
-  const num = (raw: string | undefined): number | undefined => {
-    if (raw === undefined) return undefined;
-    const parsed = Number(raw);
-    return Number.isFinite(parsed) ? parsed : undefined;
+  const num = (value: string | undefined): number | undefined => {
+    if (value === undefined) return undefined;
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) die(`"${value}" is not a number`);
+    return parsed;
   };
 
   switch (command) {
-    case "init":
-      return cmdInit({ force: values.force ?? false, starter: values.starter ?? false });
-    case "skills":
-      return cmdSkills();
-    case "validate":
-      return cmdValidate(rest[0]);
-    case "view":
-      return cmdView(rest[0], {
-        mermaid: values.mermaid ?? false,
-        html: values.html,
-      });
-    case "research":
-      return cmdResearch(rest[0], {
-        iterations: num(values.iterations),
-        model: values.model,
-        threshold: num(values.threshold),
-        timeout: num(values.timeout),
-        budget: num(values.budget),
-        verbose: values.verbose ?? false,
-      });
-    case "run":
-      return cmdRun(rest[0], rest[1], {
-        maxRuns: num(values["max-runs"]),
-        timeout: num(values.timeout),
-        budget: num(values.budget),
-        ...(values.answer ? { answers: values.answer } : {}),
-        verbose: values.verbose ?? false,
-      });
-    case "cancel": {
-      if (!rest[0]) {
-        error("cancel needs a run directory: ensemble cancel .ensemble/runs/<id> [reason]");
-        return 2;
-      }
-      try {
-        const journal = cancelRun(rest[0], rest.slice(1).join(" ") || undefined);
-        info(`${c.green("cancelled")} ${c.bold(journal.runId)} ${c.dim("— artifacts kept; it will no longer show as waiting")}`);
-        return 0;
-      } catch (err) {
-        error(err instanceof Error ? err.message : String(err));
-        return 1;
-      }
+    case "validate": {
+      const runner = await load(file);
+      report(runner.validate(), runner.spec.name);
+      return;
     }
-    case "resume":
-      return cmdResume(rest[0], {
-        maxRuns: num(values["max-runs"]),
-        timeout: num(values.timeout),
-        budget: num(values.budget),
-        ...(values.answer ? { answers: values.answer } : {}),
-        verbose: values.verbose ?? false,
-      });
-    case "replay":
-      return cmdReplay(rest[0], {
-        ...(values.scene !== undefined ? { scene: values.scene } : {}),
-        strict: values.strict ?? false,
-        verbose: values.verbose ?? false,
-      });
-    case "serve": {
-      const { serve } = await import("./serve.ts");
-      const port = num(values.port) ?? 7777;
-      // Convention is `.ensemble/scenes`; `./scenes` is honoured when a project
-      // already uses it. An explicit argument always wins.
-      const defaultScenesDir = (): string | undefined => {
-        if (existsSync(".ensemble/scenes")) return ".ensemble/scenes";
-        if (existsSync("scenes")) return "scenes"; // legacy layout
-        return undefined;
-      };
 
-      const dir = rest[0] ?? defaultScenesDir();
-      if (!dir) {
-        // Serving a directory with no scenes is a silent dead end — the browser
-        // shows an empty list and nothing explains why.
-        error(
-          `no scenes here — run \`ensemble serve\` from a project root that has an ` +
-            `.ensemble/ folder.\n\n` +
-            `Expected layout:\n` +
-            `  .ensemble/scenes/*.mts   your workflows\n` +
-            `  .ensemble/runs/          run artifacts (created for you)\n\n` +
-            `Start one:  mkdir -p .ensemble/scenes\n` +
-            `Or point at a folder:  ensemble serve <dir>`,
-        );
-        return 1;
+    case "check": {
+      const runner = await load(file);
+      report(runner.validate(), runner.spec.name);
+
+      const flight = await preflight(runner.spec);
+      for (const entry of flight.env) {
+        process.stderr.write(`  ${entry.set ? "✓" : "✗"} ${entry.name.padEnd(20)} ${entry.why}\n`);
       }
+      for (const note of flight.notes) process.stderr.write(`  · ${note}\n`);
+      if (flight.problems.length === 0) {
+        process.stderr.write(`✓ ${runner.spec.name} can run here\n`);
+        return;
+      }
+      process.stderr.write(`✗ ${runner.spec.name} cannot run here yet\n`);
+      for (const problem of flight.problems) process.stderr.write(`  · ${problem}\n`);
+      process.exit(1);
+    }
+
+    case "graph": {
+      const runner = await load(file);
+      const json = `${JSON.stringify(runner.graph(), null, 2)}\n`;
+      if (values.out) {
+        mkdirSync(dirname(resolve(values.out)), { recursive: true });
+        writeFileSync(resolve(values.out), json, "utf8");
+        process.stderr.write(`${values.out}\n`);
+      } else {
+        process.stdout.write(json);
+      }
+      return;
+    }
+
+    case "run": {
+      const runner = await load(file);
+      const problems = runner.validate();
+      if (problems.length) report(problems, runner.spec.name);
+
+      const inputs: Record<string, unknown> = {};
+      for (const pair of values.input ?? []) {
+        const at = pair.indexOf("=");
+        if (at === -1) die(`--input needs key=value, got "${pair}"`);
+        inputs[pair.slice(0, at)] = pair.slice(at + 1);
+      }
+      const goal = rest.join(" ");
+      if (goal) inputs["goal"] = goal;
+
+      process.stderr.write(`${runner.spec.name}${goal ? ` — ${goal}` : ""}\n`);
+
+      const live = reporter();
       try {
-        await serve({
-          port,
-          scenesDir: dir,
-          open: !(values["no-open"] ?? false),
+        const { run } = await runner(inputs, {
+          budget: num(values.budget),
+          maxSteps: num(values["max-steps"]),
+          onEvent: live,
         });
-      } catch (err) {
-        // One viewer per port, so a second `serve` is a common, recoverable
-        // mistake — worth a sentence instead of a Node stack trace.
-        if ((err as { code?: string }).code === "EADDRINUSE") {
-          error(
-            `port ${port} is already in use — another \`ensemble serve\` is probably running.\n` +
-              `Open http://127.0.0.1:${port} to use it, or start this one elsewhere: ` +
-              `ensemble serve --port ${port + 1}`,
-          );
-          return 1;
+
+        const json = `${JSON.stringify(run, null, 2)}\n`;
+        if (values.json) {
+          process.stdout.write(json);
+        } else {
+          const dir = values.out ? dirname(resolve(values.out)) : resolve(".ensemble", "runs", run.run.id);
+          const path = values.out ? resolve(values.out) : join(dir, "run.json");
+          mkdirSync(dir, { recursive: true });
+          writeFileSync(path, json, "utf8");
+          writeFileSync(join(dirname(path), "graph.json"), `${JSON.stringify(runner.graph(), null, 2)}\n`, "utf8");
+          process.stderr.write(`  ${path}\n`);
         }
-        throw err;
+        if (run.run.status !== "completed") process.exit(1);
+      } catch (error) {
+        live.stop();
+        if (error instanceof RunnerError) report(error.problems, runner.spec.name);
+        if (error instanceof RunFailed) {
+          process.stderr.write(`  ✗ ${error.message} · ${money(error.run.run.cost.total)}\n`);
+          process.exit(1);
+        }
+        die((error as Error).message);
       }
-      return 0; // serve blocks until SIGINT
+      return;
     }
-    case "mcp": {
-      // `mcp login <server>` / `mcp logout <server>` — the subject is the server.
-      const sub = rest[0];
-      if (sub === "login") return cmdLogin(rest[1], { logout: false });
-      if (sub === "logout") return cmdLogin(rest[1], { logout: true });
-      if (sub === "auth") return cmdLogin(rest[1], { logout: false });
-      if (sub === "serve") {
-        // stdio MCP: stdout belongs to the protocol; this call never returns.
-        const { serveMcpStdio } = await import("./mcp-serve.ts");
-        await serveMcpStdio();
-        return 0;
+
+    case "skills": {
+      const query = [file, ...rest].filter(Boolean).join(" ").toLowerCase();
+
+      if (values.remote) {
+        const found = await searchSkills(query || "agent");
+        if (found.length === 0) {
+          process.stderr.write("no results — the public index is unofficial and may be unavailable\n");
+          return;
+        }
+        for (const listing of found.slice(0, 40)) {
+          const installs = listing.installs ? ` · ${listing.installs.toLocaleString()} installs` : "";
+          process.stdout.write(`${listing.name.padEnd(28)} ${listing.source}${installs}\n  ${listing.url}\n`);
+        }
+        return;
       }
-      return cmdMcp();
+
+      const skills = loadSkills();
+      const shown = query
+        ? skills.filter((s) => `${s.name} ${s.description}`.toLowerCase().includes(query))
+        : skills;
+      if (shown.length === 0) {
+        process.stderr.write(
+          skills.length
+            ? `no skill here matches "${query}" (${skills.length} loaded)\n`
+            : "no skills found — look in .claude/skills, .ensemble/skills, or ~/.claude/skills\n",
+        );
+        return;
+      }
+      for (const skill of shown) {
+        const problems = validateSkill(skill);
+        const mark = problems.length ? "✗" : " ";
+        process.stdout.write(`${mark} ${skill.name.padEnd(26)} ${skill.scope.padEnd(8)} ${skill.description.slice(0, 92)}\n`);
+        for (const problem of problems) process.stderr.write(`    ↳ ${problem}\n`);
+      }
+      process.stderr.write(`\n${shown.length} of ${skills.length} skills\n`);
+      return;
     }
-    case "models":
-      return cmdModels(rest[0]);
+
+    case "servers": {
+      const query = [file, ...rest].filter(Boolean).join(" ");
+      const servers = await searchServers(query || undefined, { limit: 60 });
+      if (servers.length === 0) {
+        process.stderr.write(`nothing in the registry matches "${query}"\n`);
+        return;
+      }
+      let ready = 0;
+      for (const entry of servers) {
+        const missing = missingEnv(entry);
+        if (isRunnable(entry)) ready++;
+        process.stdout.write(`${describeServer(entry)}\n`);
+        for (const variable of missing) {
+          process.stdout.write(
+            `    ${variable.name}${variable.isSecret ? " (secret)" : ""}` +
+              `${variable.description ? ` — ${variable.description}` : ""}\n`,
+          );
+        }
+        process.stdout.write("\n");
+      }
+      process.stderr.write(`${servers.length} servers · ${ready} runnable with the environment you have\n`);
+      return;
+    }
+
     default:
-      error(`unknown command: ${command}\n`);
-      info(USAGE);
-      return 2;
+      die(`unknown command "${command}" — try: validate, graph, run, skills, servers, version`);
   }
 }
 
-/**
- * `serve` blocks forever by design; every other command should exit as soon as
- * its work is done. A run may hold an open SSE connection or an MCP transport,
- * and a stray handle would otherwise hang the process, so we exit explicitly
- * after flushing.
- */
-function finish(code: number, keepAlive: boolean): void {
-  process.exitCode = code;
-  if (keepAlive) return;
-
-  const done = (): void => process.exit(code);
-  if (process.stdout.write("")) done();
-  else process.stdout.once("drain", done);
-}
-
-const isServe =
-  process.argv[2] === "serve" || (process.argv[2] === "mcp" && process.argv[3] === "serve");
-
-main()
-  .then((code) => finish(code, isServe))
-  .catch((err: unknown) => {
-    error(err instanceof Error ? (err.stack ?? err.message) : String(err));
-    finish(1, false);
-  });
+await main();

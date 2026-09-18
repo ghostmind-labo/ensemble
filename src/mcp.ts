@@ -1,204 +1,255 @@
 /**
- * Native MCP client.
+ * MCP — one tool call per node, and never a loop.
  *
- * Our own client, so tool access needs no external agent. Servers are declared in
- * `ensemble.json` (project, then global) and connected on demand — a scene with
- * no MCP nodes never starts a server.
+ * The old version of this library gave an agent a pile of MCP tools and let it
+ * decide which to call, how many times, and when to stop. That is the loop this
+ * rewrite exists to avoid: every iteration is another chance to go wrong, and
+ * nothing about it can be drawn, proved, or replayed.
  *
- * Tools are namespaced `<server>__<tool>` when handed to the model, so a node's
- * allowlist is enforced by *construction*: we build the tool array ourselves, so
- * a tool we omit is not merely denied, it is invisible.
+ * So MCP arrives in the shape everything else here has. A node names ONE server
+ * and ONE tool. Its arguments come from code, or from a decision made upstream.
+ * It runs once. Which means the call shows up in `graph.json` like any other
+ * node — you can see which tools a workflow can reach before it runs, which you
+ * cannot do with a tool-calling agent.
+ *
+ * Choosing *which* tool is a `choice` over `listTools()`, exactly as choosing a
+ * skill is. Both are local and cheap to enumerate, so the graph stays complete.
+ *
+ * The client is hand-rolled newline-delimited JSON-RPC 2.0 over stdio — the
+ * whole of what stdio MCP is — because the alternative was a runtime dependency
+ * and this package has none.
  */
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
-import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
-import type { McpServer } from "./registry.ts";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
-/** Separator between server and tool name. Double underscore avoids collisions
- *  with tool names that contain a single underscore. */
-export const NS = "__";
+export interface McpServerSpec {
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+  /** How long any single request may take. Default 30s. */
+  timeoutMs?: number;
+}
 
 export interface McpTool {
-  /** Namespaced name as exposed to the model: `<server>__<tool>`. */
   name: string;
-  server: string;
-  toolName: string;
   description: string;
-  inputSchema: Record<string, unknown>;
+  /** JSON Schema for the tool's arguments, as the server declares it. */
+  inputSchema?: Record<string, unknown>;
 }
 
-export interface ServerStatus {
+export interface McpResult {
+  /** Text content parts, joined. */
+  text: string;
+  /** `structuredContent` when the server sends one, else undefined. */
+  data?: unknown;
+  isError: boolean;
+}
+
+export class McpError extends Error {
+  readonly server: string;
+  constructor(server: string, message: string, options: { cause?: unknown } = {}) {
+    super(`mcp "${server}": ${message}`, options);
+    this.name = "McpError";
+    this.server = server;
+  }
+}
+
+export interface McpSession {
   name: string;
-  status: "connected" | "failed" | "disabled" | "needs_auth";
-  error?: string;
-  toolCount?: number;
+  listTools(): Promise<McpTool[]>;
+  call(tool: string, args: Record<string, unknown>): Promise<McpResult>;
+  close(): void;
 }
 
-export class McpHub {
-  private clients = new Map<string, Client>();
-  private statuses = new Map<string, ServerStatus>();
-  private tools: McpTool[] = [];
-  private cwd: string;
-  /** Supplies an OAuth provider per server; omitted when auth is not wanted. */
-  private oauth: ((server: string) => OAuthClientProvider) | undefined;
+interface Pending {
+  resolve: (value: unknown) => void;
+  reject: (error: Error) => void;
+  timer: NodeJS.Timeout;
+}
 
-  constructor(cwd: string, oauth?: (server: string) => OAuthClientProvider) {
-    this.cwd = cwd;
-    this.oauth = oauth;
+const PROTOCOL_VERSION = "2024-11-05";
+
+/** Start a server and complete the handshake. */
+export async function connect(name: string, spec: McpServerSpec): Promise<McpSession> {
+  const timeoutMs = spec.timeoutMs ?? 30_000;
+  let child: ChildProcessWithoutNullStreams;
+  try {
+    child = spawn(spec.command, spec.args ?? [], {
+      cwd: spec.cwd,
+      env: { ...process.env, ...spec.env },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+  } catch (cause) {
+    throw new McpError(name, `could not start "${spec.command}"`, { cause });
   }
 
-  /**
-   * Connects the named servers. Failures are recorded, never thrown: one broken
-   * server must not take down a run that also uses three working ones.
-   */
-  async connect(servers: McpServer[]): Promise<void> {
-    await Promise.all(
-      servers.map(async (server) => {
-        if (!server.enabled) {
-          this.statuses.set(server.name, { name: server.name, status: "disabled" });
-          return;
-        }
+  const pending = new Map<number, Pending>();
+  let nextId = 1;
+  let buffer = "";
+  let closed = false;
+  let stderr = "";
 
-        try {
-          const client = new Client({ name: "ensemble", version: "0.2.2" }, { capabilities: {} });
+  const fail = (error: Error): void => {
+    for (const [, waiter] of pending) {
+      clearTimeout(waiter.timer);
+      waiter.reject(error);
+    }
+    pending.clear();
+  };
 
-          if (server.type === "remote") {
-            if (!server.url) throw new Error('remote server needs a "url"');
-            await this.connectRemote(client, server);
-          } else {
-            const [command, ...args] = server.command ?? [];
-            if (!command) throw new Error('local server needs a "command" array');
-            await client.connect(
-              new StdioClientTransport({
-                command,
-                args,
-                cwd: this.cwd,
-                // Inherit the environment so servers can see PATH, tokens, etc.
-                env: { ...(process.env as Record<string, string>), ...(server.environment ?? {}) },
-              }),
-            );
-          }
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk: string) => {
+    buffer += chunk;
+    // Newline-delimited JSON. A partial line stays in the buffer.
+    for (let at = buffer.indexOf("\n"); at !== -1; at = buffer.indexOf("\n")) {
+      const line = buffer.slice(0, at).trim();
+      buffer = buffer.slice(at + 1);
+      if (!line) continue;
 
-          const listed = await client.listTools();
-          for (const tool of listed.tools) {
-            this.tools.push({
-              name: `${server.name}${NS}${tool.name}`,
-              server: server.name,
-              toolName: tool.name,
-              description: tool.description ?? "",
-              inputSchema: (tool.inputSchema ?? { type: "object", properties: {} }) as Record<string, unknown>,
-            });
-          }
-
-          this.clients.set(server.name, client);
-          this.statuses.set(server.name, {
-            name: server.name,
-            status: "connected",
-            toolCount: listed.tools.length,
-          });
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          const needsAuth =
-            (err as Error)?.name === "UnauthorizedError" || /unauthoriz|401|403/i.test(message);
-          this.statuses.set(server.name, {
-            name: server.name,
-            status: needsAuth ? "needs_auth" : "failed",
-            error: needsAuth ? `needs authorization — run: ensemble mcp login ${server.name}` : message,
-          });
-        }
-      }),
-    );
-  }
-
-  /**
-   * Connects a remote server, covering the whole current landscape:
-   *
-   *   - **Streamable HTTP** (the current spec) — including *stateless* servers,
-   *     which simply never issue a session id. Tried first.
-   *   - **SSE** (the earlier spec) — still what a lot of deployed servers speak.
-   *     Used as a fallback when Streamable HTTP is rejected outright.
-   *   - **Header auth** — a token in `headers`, for servers that issue one.
-   *   - **OAuth** — the browser redirect flow, for the many servers that issue
-   *     no static token at all. Only engaged when there is no header auth.
-   *
-   * Nothing here forces a bearer token: a server needing OAuth gets OAuth, and
-   * `ensemble login <server>` is how the interactive half happens.
-   */
-  private async connectRemote(client: Client, server: McpServer): Promise<void> {
-    const url = new URL(server.url as string);
-    const headers = server.headers;
-
-    // A caller-supplied Authorization header means auth is already handled.
-    const preAuthed = Boolean(
-      headers && Object.keys(headers).some((h) => h.toLowerCase() === "authorization"),
-    );
-
-    const authProvider =
-      !preAuthed && this.oauth ? this.oauth(server.name) : undefined;
-
-    const httpOptions = {
-      ...(headers ? { requestInit: { headers } } : {}),
-      ...(authProvider ? { authProvider } : {}),
-    };
-
-    try {
-      await client.connect(new StreamableHTTPClientTransport(url, httpOptions));
-      return;
-    } catch (err) {
-      // An auth failure is real — surfacing it beats masking it as a transport
-      // problem and retrying against SSE, which would fail the same way.
-      const message = err instanceof Error ? err.message : String(err);
-      if (/unauthoriz|401|403/i.test(message) || (err as Error)?.name === "UnauthorizedError") {
-        throw err;
+      let message: { id?: number; result?: unknown; error?: { message?: string; code?: number } };
+      try {
+        message = JSON.parse(line);
+      } catch {
+        continue; // servers sometimes log to stdout; ignore anything that is not a message
       }
-
-      // Otherwise assume the server predates Streamable HTTP and speak SSE.
-      await client.connect(
-        new SSEClientTransport(url, {
-          ...(headers ? { requestInit: { headers }, eventSourceInit: {} } : {}),
-          ...(authProvider ? { authProvider } : {}),
-        }),
-      );
+      if (typeof message.id !== "number") continue; // a notification
+      const waiter = pending.get(message.id);
+      if (!waiter) continue;
+      pending.delete(message.id);
+      clearTimeout(waiter.timer);
+      if (message.error) waiter.reject(new McpError(name, message.error.message ?? "request failed"));
+      else waiter.resolve(message.result);
     }
+  });
+
+  // Kept only to make a startup failure legible.
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => {
+    stderr = `${stderr}${chunk}`.slice(-2000);
+  });
+
+  child.on("error", (cause) => fail(new McpError(name, `process error: ${cause.message}`, { cause })));
+  child.on("exit", (code) => {
+    closed = true;
+    fail(new McpError(name, `server exited (${code})${stderr ? `: ${stderr.trim().split("\n").slice(-3).join(" ")}` : ""}`));
+  });
+
+  const send = (payload: Record<string, unknown>): void => {
+    if (closed) throw new McpError(name, "server is not running");
+    child.stdin.write(`${JSON.stringify(payload)}\n`);
+  };
+
+  const request = (method: string, params?: Record<string, unknown>): Promise<unknown> => {
+    const id = nextId++;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        reject(new McpError(name, `${method} timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      timer.unref?.();
+      pending.set(id, { resolve, reject, timer });
+      try {
+        send({ jsonrpc: "2.0", id, method, ...(params ? { params } : {}) });
+      } catch (error) {
+        pending.delete(id);
+        clearTimeout(timer);
+        reject(error as Error);
+      }
+    });
+  };
+
+  await request("initialize", {
+    protocolVersion: PROTOCOL_VERSION,
+    capabilities: {},
+    clientInfo: { name: "ensemble", version: "2" },
+  });
+  send({ jsonrpc: "2.0", method: "notifications/initialized" });
+
+  return {
+    name,
+    async listTools() {
+      const result = (await request("tools/list")) as { tools?: Array<Record<string, unknown>> };
+      return (result?.tools ?? []).map((tool) => ({
+        name: String(tool["name"] ?? ""),
+        description: String(tool["description"] ?? ""),
+        inputSchema: tool["inputSchema"] as Record<string, unknown> | undefined,
+      }));
+    },
+    async call(tool, args) {
+      const result = (await request("tools/call", { name: tool, arguments: args })) as {
+        content?: Array<{ type?: string; text?: string }>;
+        structuredContent?: unknown;
+        isError?: boolean;
+      };
+      const text = (result?.content ?? [])
+        .filter((part) => part?.type === "text" && typeof part.text === "string")
+        .map((part) => part.text)
+        .join("\n");
+      return {
+        text,
+        ...(result?.structuredContent !== undefined ? { data: result.structuredContent } : {}),
+        isError: Boolean(result?.isError),
+      };
+    },
+    close() {
+      if (closed) return;
+      closed = true;
+      child.stdin.end();
+      child.kill();
+    },
+  };
+}
+
+/**
+ * Sessions, started once and reused across a run.
+ *
+ * A server is launched the first time a node needs it and shut down when the
+ * run ends — so a graph that never reaches its MCP branch never starts the
+ * process at all.
+ */
+export function pool(servers: Record<string, McpServerSpec>): {
+  get(name: string): Promise<McpSession>;
+  closeAll(): void;
+} {
+  const open = new Map<string, Promise<McpSession>>();
+  return {
+    get(name) {
+      const spec = servers[name];
+      if (!spec) {
+        const known = Object.keys(servers);
+        throw new McpError(
+          name,
+          `not configured. ${known.length ? `Declared: ${known.map((k) => `"${k}"`).join(", ")}` : "No servers are declared on the runner."}`,
+        );
+      }
+      let session = open.get(name);
+      if (!session) {
+        session = connect(name, spec);
+        open.set(name, session);
+      }
+      return session;
+    },
+    closeAll() {
+      for (const [, session] of open) session.then((s) => s.close()).catch(() => {});
+      open.clear();
+    },
+  };
+}
+
+/** A server's tools, as `choice` criteria — the same shape `skillOptions` returns. */
+export function toolOptions(
+  tools: readonly McpTool[],
+  config: { max?: number; chars?: number; none?: string | false } = {},
+): Record<string, { what: string }> {
+  const max = Math.min(config.max ?? 200, 254);
+  const chars = config.chars ?? 180;
+  const options: Record<string, { what: string }> = {};
+  for (const tool of tools.slice(0, max)) {
+    const text = tool.description || `The "${tool.name}" tool.`;
+    options[tool.name] = { what: text.length <= chars ? text : `${text.slice(0, chars - 1).trimEnd()}…` };
   }
-
-  /** Tools from the named servers only. An unlisted server contributes nothing. */
-  toolsFor(allowed: string[]): McpTool[] {
-    return this.tools.filter((tool) => allowed.includes(tool.server));
+  if (config.none !== false) {
+    options["none"] = { what: config.none ?? "No tool here fits; handle it without one." };
   }
-
-  status(): ServerStatus[] {
-    return [...this.statuses.values()].sort((a, b) => a.name.localeCompare(b.name));
-  }
-
-  /** Executes a namespaced tool call and returns its text content. */
-  async call(name: string, args: Record<string, unknown>): Promise<string> {
-    const tool = this.tools.find((t) => t.name === name);
-    if (!tool) throw new Error(`unknown MCP tool: ${name}`);
-
-    const client = this.clients.get(tool.server);
-    if (!client) throw new Error(`MCP server "${tool.server}" is not connected`);
-
-    const result = await client.callTool({ name: tool.toolName, arguments: args });
-
-    const content = (result as { content?: Array<{ type: string; text?: string }> }).content ?? [];
-    const text = content
-      .filter((part) => part.type === "text" && typeof part.text === "string")
-      .map((part) => part.text)
-      .join("\n");
-
-    if ((result as { isError?: boolean }).isError) {
-      throw new Error(text || "tool reported an error");
-    }
-    return text || "(no output)";
-  }
-
-  async close(): Promise<void> {
-    await Promise.all(
-      [...this.clients.values()].map((client) => client.close().catch(() => undefined)),
-    );
-    this.clients.clear();
-  }
+  return options;
 }

@@ -1,35 +1,8 @@
 node_modules/
 *.log
 
-# THIS project's own run artifacts. Anchored with a leading slash so the `dev/`
-# sandbox below is still committed — an unanchored `.ensemble/` swallowed it.
-/.ensemble/
-
-# The dev sandbox is tracked (its scenes are the fixtures you iterate on); only
-# its artifacts and editor shim are not.
-dev/.ensemble/runs/
-dev/.ensemble/node_modules/
-
-# Local MCP registration pointing at THIS checkout — machine-specific paths, so
-# it stays out of git. `plugin/.mcp.json` (the one that ships) is NOT ignored.
-/.mcp.json
-
-# opencode installs its own ~61MB dependency tree per project root.
-# It writes its own .opencode/.gitignore too; this is belt and braces.
-.opencode/node_modules/
-.opencode/package.json
-.opencode/package-lock.json
-.opencode/bun.lock
+# This project's own run artifacts.
+.ensemble/
 
 # build output
 dist/
-examples/**/node_modules/
-examples/**/.opencode/node_modules/
-
-# autoresearch run artifacts (baseline.md and best.md ARE tracked)
-bench/prompts/candidate-*.md
-bench/log.jsonl
-
-# Research-loop ledgers are run artifacts: regenerated on every run, and
-# committing one would make a rerun look like a diff.
-examples/**/results.tsv

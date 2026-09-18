@@ -1,7 +1,7 @@
 {
   "name": "@ghostmind-dev/ensemble",
-  "version": "0.23.0",
-  "description": "Multi-model agent ensembles. Describe a scene — nodes wired by edges, each node any model with scoped state — in one TypeScript file, and run it: conditions, loops, parallel groups, live visualization.",
+  "version": "0.26.0",
+  "description": "Typed decisions wired to your code. Asks Jev one calibrated question, calls models through OpenRouter when a node needs to write, draw or look, and emits the graph and the run as JSON.",
   "type": "module",
   "license": "MIT",
   "bin": {
@@ -17,38 +17,31 @@
   "files": [
     "bin",
     "dist",
-    "ui",
     "README.md",
     "LICENSE"
   ],
   "keywords": [
-    "ensemble",
-    "agents",
-    "multi-agent",
-    "multi-model",
-    "orchestration",
+    "jev",
+    "typesafe",
+    "classifier",
+    "decision",
+    "routing",
+    "workflow",
     "graph",
-    "openrouter",
-    "llm",
-    "cli",
+    "confidence",
+    "agent-skills",
     "mcp",
-    "tool-calling"
+    "openrouter",
+    "llm"
   ],
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "npm run typecheck && npm test",
-    "bench": "node bench/run.mts",
-    "bench:optimize": "node bench/optimize.mts",
-    "bench:test": "node bench/checker.test.mts",
     "test": "node test/run.mts",
-    "pretest": "npm run build"
+    "pretest": "npm run build",
+    "prepublishOnly": "npm run typecheck && npm test"
   },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
-    "yaml": "^2.7.0",
-    "zod": "^3.24.1"
-  },
+  "dependencies": {},
   "devDependencies": {
     "@types/node": "^22.10.0",
     "typescript": "^5.7.0"

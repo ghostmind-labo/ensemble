@@ -4,20 +4,24 @@
     "name": "ghostmind",
     "url": "https://github.com/ghostmind-labo"
   },
+  "metadata": {
+    "description": "Claude Code plugin for @ghostmind-dev/ensemble: skills that let an agent build, prove and tune typed-decision runners."
+  },
   "plugins": [
     {
       "name": "ensemble",
       "source": "./plugin",
-      "description": "Operate @ghostmind-dev/ensemble \u2014 author multi-model agent scenes in one TypeScript file, run them, observe state, and revise. Jury panels, score gates, cross-vendor teams.",
+      "description": "Build, prove and tune @ghostmind-dev/ensemble runners: calibrated Jev decisions wired to your own code. Skills for writing the graph, designing the questions, and reading the runs.",
+      "version": "0.26.0",
       "author": {
         "name": "ghostmind"
       },
       "keywords": [
         "ensemble",
-        "agents",
-        "multi-model",
-        "orchestration",
-        "openrouter"
+        "jev",
+        "typesafe",
+        "classifier",
+        "decision-graph"
       ]
     }
   ]

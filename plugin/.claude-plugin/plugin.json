@@ -1,27 +1,18 @@
 {
   "name": "ensemble",
-  "version": "0.23.0",
-  "description": "Author, run, observe, and revise multi-model agent scenes with @ghostmind-dev/ensemble \u2014 including sealed autoresearch loops that iterate one artefact toward a measured goal. Bundles the ensemble MCP server \u2014 installing the plugin is all the setup there is.",
+  "version": "0.26.0",
+  "description": "Lets an agent build @ghostmind-dev/ensemble runners with no human in the loop: break a use case into Jev decisions, code, model calls and handlers, write the graph, validate it, dry-run every branch for $0, then read and tune the runs.",
   "author": {
     "name": "ghostmind",
     "url": "https://github.com/ghostmind-labo"
   },
   "license": "MIT",
-  "keywords": [
-    "ensemble",
-    "agents",
-    "multi-model",
-    "orchestration",
-    "openrouter",
-    "autoresearch",
-    "karpathy",
-    "workflow-graph"
-  ],
   "repository": "https://github.com/ghostmind-labo/ensemble",
   "homepage": "https://github.com/ghostmind-labo/ensemble#readme",
+  "keywords": ["ensemble", "jev", "typesafe", "classifier", "decision-graph", "routing", "openrouter", "mcp"],
   "skills": [
-    "./skills/autoresearch",
-    "./skills/autoresearch-build",
-    "./skills/ensemble"
+    "./skills/ensemble-build",
+    "./skills/ensemble-questions",
+    "./skills/ensemble-runs"
   ]
 }
