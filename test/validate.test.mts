@@ -151,4 +151,65 @@ noKind.nodes["photo"] = { writes: ["out"] } as never;
 assert.ok(says(validate(noKind), /is none of decide \/ work \/ code/));
 console.log("ok · 10 entry, reachability and node kind are all checked");
 
-console.log("10 cases");
+// ── 11 · forks, joins and lanes: the proof that parallel never races ────────
+{
+  const fan = (): RunnerSpec => ({
+    name: "fan",
+    entry: "go",
+    nodes: {
+      go: { code: () => 1, writes: ["k"] },
+      a: { code: () => "a", writes: ["x"] },
+      b: { code: () => "b", writes: ["y"] },
+      meet: { code: () => "m", writes: ["out"], join: "all" },
+    },
+    edges: [
+      { from: "go", to: "a", fork: true },
+      { from: "go", to: "b", fork: true },
+      { from: "a", to: "meet" },
+      { from: "b", to: "meet" },
+    ],
+  });
+  assert.deepEqual(validate(fan()), []);
+
+  const mixed = fan();
+  delete mixed.edges![1]!.fork;
+  assert.ok(says(validate(mixed), /"go" has 1 forking edge and 1 ordinary — a node's edges are all forks/));
+
+  const sameKey = fan();
+  sameKey.nodes["b"] = { code: () => "b", writes: ["x"] };
+  assert.ok(says(validate(sameKey), /forks to "a" and "b", but the lanes both touch "x" — concurrent lanes must write and read disjoint keys/));
+
+  const readsSibling = fan();
+  readsSibling.nodes["b"] = { code: (s) => s["x"], reads: ["x"], writes: ["y"] };
+  assert.ok(says(validate(readsSibling), /both touch "x"/), "reading what a sibling lane writes is a race too");
+
+  const shared = fan();
+  delete shared.nodes["meet"]!.join;
+  assert.ok(says(validate(shared), /both lanes reach "meet" — a node cannot run in two lanes at once. Mark it join/));
+
+  const lonely = fan();
+  lonely.edges = lonely.edges!.filter((e) => e.from !== "b");
+  assert.ok(says(validate(lonely), /"meet" is join: "all" but only one edge leads there/));
+
+  const joinEntry = fan();
+  joinEntry.entry = "meet";
+  assert.ok(says(validate(joinEntry), /entry "meet" is a join/));
+}
+console.log("ok · 11 forks must be all-or-none, lanes must not share nodes or keys, joins need several lanes");
+
+// ── 12 · memory is declared, so it must be written and must not be an input ──
+{
+  const remembering = sound();
+  remembering.memory = ["seen"];
+  assert.ok(says(validate(remembering), /memory key "seen" is never written — it would never change between ticks/));
+
+  remembering.nodes["tally"] = { code: (s) => Number(s["seen"] ?? 0) + 1, reads: ["seen"], writes: ["seen"] };
+  remembering.edges = [...(remembering.edges ?? []), { from: "photo", to: "tally" }];
+  assert.deepEqual(validate(remembering), [], "a memory key with a writer is sound, and readable before any write");
+
+  remembering.inputs = ["seen"];
+  assert.ok(says(validate(remembering), /"seen" is both an input and memory/));
+}
+console.log("ok · 12 memory keys need a writer and are distinct from inputs");
+
+console.log("12 cases");

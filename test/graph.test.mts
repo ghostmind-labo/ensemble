@@ -123,4 +123,33 @@ console.log("ok · 6 the data graph names every writer and reader, edges include
 assert.deepEqual(JSON.parse(JSON.stringify(graph)), graph, "no functions, dates or undefined leak in");
 console.log("ok · 7 the document round-trips through JSON unchanged");
 
-console.log("7 cases");
+// ── 8 · fork, join and memory appear in the document, and nowhere else ──────
+{
+  const fan = runner({
+    name: "fan",
+    memory: ["seen"],
+    entry: "go",
+    nodes: {
+      go: { code: () => 1, writes: ["k"] },
+      a: { code: () => "a", writes: ["x"] },
+      b: { code: () => "b", writes: ["y"] },
+      meet: { code: (s) => Number(s["seen"] ?? 0) + 1, reads: ["seen"], writes: ["seen"], join: "all" },
+    },
+    edges: [
+      { from: "go", to: "a", fork: true },
+      { from: "go", to: "b", fork: true },
+      { from: "a", to: "meet" },
+      { from: "b", to: "meet" },
+    ],
+  }).graph();
+  assert.deepEqual(fan.edges.map((e) => e.fork), [true, true, undefined, undefined]);
+  assert.deepEqual(fan.nodes.map((n) => n.join), [undefined, undefined, undefined, "all"]);
+  assert.deepEqual(fan.runner.inputs, ["goal"], "memory is not an input");
+  assert.deepEqual(fan.runner.memory, ["seen"]);
+  const seen = fan.data.find((d) => d.key === "seen")!;
+  assert.deepEqual(seen.producedBy, ["$memory", "meet"], "memory arrives from the last tick, then from its writer");
+  assert.ok(!("memory" in graph.runner), "a runner without memory says nothing about it");
+}
+console.log("ok · 8 fork, join and memory are in the document only when declared");
+
+console.log("8 cases");

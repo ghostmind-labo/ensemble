@@ -16,6 +16,8 @@ combine two or three. Every snippet uses the v2 API. Imports come from
 9. Composed runners
 10. Many checks at once, combined in code
 11. Choosing between patterns
+12. A loop that runs for days, with a watcher
+13. Fan out, then decide once: fork and join
 
 ---
 
@@ -401,4 +403,106 @@ edges: [
 | "use the best/cheapest model for…" | 5 |
 | "pick the right skill / tool / doc" | 6 |
 | "several stages, each with its own decisions" | 9 |
-| "an agent that keeps choosing tools until done" | not ensemble. Say so |
+| "an agent that keeps choosing tools until done" | a `work` handler that runs the agent (any SDK), supervised and watched: 12 |
+| "keep running / monitor / every N minutes / for days" | 12 |
+| "at the same time / in parallel / all three then decide" | 13 |
+
+## 12. A loop that runs for days, with a watcher
+
+The tick is any runner from 1–10, and it can be a free-running agent inside one
+`work` handler. `supervise` adds what a long life needs: memory between ticks,
+budgets that stop or rest, a journal a restart resumes from, and a stop after a
+failure streak. The watcher is a second, tiny runner that checks the numbers in
+code first and only then asks Jev about meaning. Full code:
+`examples/06-watch/watch.mts`.
+
+```ts
+const watcher = runner({
+  name: "watcher",
+  inputs: ["goal", "vitals", "recent"],
+  nodes: {
+    vitals: { code: () => null },                       // a place for the arithmetic edges to leave from
+    judge: {
+      decide: {
+        progress: noul("Do the recent ticks show the work moving toward the goal?"),
+        looping:  noul("Do the recent ticks keep producing the same result while nothing changes?"),
+      },
+      reads: ["goal", "recent"],                        // the story as text; never the numbers
+    },
+    carry_on: { code: () => "continue" },
+    flag:     { code: () => "alert" },
+    halt:     { code: () => "stop" },
+  },
+  edges: [
+    { from: "vitals", to: "halt", when: (s) => { const v = s.vitals as Vitals | undefined; return Number(v?.failureRate) >= 0.5; } },
+    { from: "vitals", to: "judge" },
+    { from: "judge", to: "flag", on: "looping>=0.7" },
+    { from: "judge", to: "carry_on", on: "progress>=0.5" },
+    { from: "judge", to: "flag" },
+  ],
+  entry: "vitals",
+});
+
+await supervise(worker, {                      // worker declares memory: ["topics"] and a node writes it
+  next: async () => ({ goal: await inbox.next() }),
+  memory: { topics: "" },                      // starting value, until the first checkpoint
+  budget: { total: 20, perDay: 5, perRun: 0.05 },
+  run: { stepTimeout: 120_000 },
+  watch: { every: 10, runner: watcher, goal: "answer each message helpfully" },
+  journal: ".ensemble/live",
+  onAlert: ({ reason }) => pager.send(reason),
+});
+```
+
+Design rules:
+
+- **Memory is declared on the runner** (`memory: ["topics"]`) and written by a
+  node in the graph, usually a `code` node that appends and trims. It arrives
+  like an input, so validation proves the tick's data flow and `graph.json`
+  says what the system remembers. A tally or the last few results, never a
+  growing transcript.
+- **Always set `stepTimeout` and `budget.total`.** A multi-day loop with neither
+  can hang or overspend without anyone noticing.
+- **The watcher is calibrated like any runner.** Label a few `recent` texts as
+  on-track or drifting and run `ensemble calibrate` on it before trusting it.
+- **Dry-run the tick and the watcher separately.** Test `supervise` itself with
+  a stub `decider` in `run` and `watch.run`, and `maxTicks: 3`.
+
+## 13. Fan out, then decide once: fork and join
+
+When several things must be known before one decision, and none depends on
+another, run them at the same time. Full code: `examples/07-senses/senses.mts`.
+
+```ts
+nodes: {
+  sense:  { code: () => Date.now(), writes: ["at"] },
+  look:   { model: "…", sees: ["frame"], reads: ["goal"], writes: ["scene"] },   // lane e0
+  listen: { work: "sensors", reads: ["sensors"], writes: ["heard"] },            // lane e1
+  recall: { code: (s) => Number(s.seen ?? 0) + 1, reads: ["seen"], writes: ["seen"] }, // lane e2, writes memory
+  assess: { join: "all", decide: { action: choice(…) }, reads: ["goal", "scene", "heard"], gate: {…} },
+  …
+},
+edges: [
+  { from: "sense", to: "look",   fork: true },
+  { from: "sense", to: "listen", fork: true },
+  { from: "sense", to: "recall", fork: true },
+  { from: "look", to: "assess" }, { from: "listen", to: "assess" }, { from: "recall", to: "assess" },
+  { from: "assess", to: "go",   on: "action=approach" },
+  …
+],
+```
+
+Rules:
+
+- **Each lane writes its own keys.** `validate` refuses two lanes touching the
+  same key, in either direction. Combine after the join, in a `code` node if
+  arithmetic is needed.
+- **Forks can be conditional.** `{ from: "triage", to: "billing", on: "queue=billing", fork: true }`
+  alongside other forks lets a decide node start only the lanes it chose.
+- **A lane can be as long as it likes**, and can itself fork, as long as it
+  ends at the join or at an exit.
+- **A variable number of lanes is a handler.** `Promise.all` over a list inside
+  one `work` node, with `report({ cost })`. The graph shows one step; that is
+  the honest picture when the width isn't known until run time.
+- **Dry-run it.** `--explore` follows every lane; an untaken fork edge is listed
+  like any other.

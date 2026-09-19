@@ -1,6 +1,6 @@
 ---
 name: ensemble-runs
-description: Read, debug and tune ensemble runners from what they actually did. Covers reading run.json and graph.json, explaining why a run took a path, diagnosing a failed, budget or maxSteps run, summarising many runs (hot paths, gate fire rates, low-confidence decisions, cost), and calibrating gate and threshold values against a labelled set. Use this whenever there is a .ensemble/runs directory, a run.json or graph.json to explain, a runner that misroutes or escalates too often, a cost or latency question about a runner, or a request to evaluate, calibrate, benchmark or improve an ensemble / Jev decision graph.
+description: Read, debug and tune ensemble runners from what they actually did. Covers reading run.json and graph.json, explaining why a run took a path, diagnosing a failed, budget or maxSteps run, summarising many runs (hot paths, gate fire rates, low-confidence decisions, cost), calibrating gate and threshold values against a labelled set with `ensemble calibrate`, and reading a supervised loop's journal (pulse, checkpoint, alerts, vitals). Use this whenever there is a .ensemble/runs directory, a run.json or graph.json to explain, a runner that misroutes or escalates too often, a cost or latency question about a runner, or a request to evaluate, calibrate, benchmark or improve an ensemble / Jev decision graph.
 ---
 
 # Reading and tuning ensemble runs
@@ -8,7 +8,7 @@ description: Read, debug and tune ensemble runners from what they actually did. 
 A runner emits two documents, and together they record everything that happened:
 
 - **`graph.json`** is what *could* happen: every node, every edge with a stable
-  id, every declared option. Emit it with `npx ensemble graph <file>`. It's free.
+  id, every declared option. Emit it with `npm run graph -- <file>`. It's free.
 - **`run.json`** is what *did* happen: each step, the full answer distribution
   of every decision, cost, timing and the edge taken. `npx ensemble run` writes
   both to `.ensemble/runs/<id>/`.
@@ -17,6 +17,16 @@ A runner emits two documents, and together they record everything that happened:
 (`"e3"`), or `"gate"` when a confidence gate diverted the run, or `null` at the
 exit. `run.graph` is the graph's hash, so runs of different graph versions can
 be told apart.
+
+## What a step carries
+
+Every `steps[]` entry has `lane` (`main`, a forking edge id, or a join node's
+name), `started`/`ended`, `asked` (the state the node was given, per its
+declared reads), `writes`, `took` (the edge it continued on, `"gate"`, or null)
+and, on a fork step, `forked` (the edge ids that fired). `asked` is the field
+that answers "what did it know at the time"; for a decide node it is exactly
+what Jev saw. Parallel steps overlap in time, so sort by `started`, not `n`,
+when laying out a timeline.
 
 ## Answering "why did it do that?"
 
@@ -88,26 +98,31 @@ realistic inputs with the answer a good human would give. This costs money (a
 decide step is about $0.00002 and a model node more), so do it only when asked,
 and cap it.
 
-Write a small harness next to the runner that calls the runner as a function:
+Write the cases as JSONL, one per line. Each gives the state the decide node
+reads and the right answer per question (`node.key` or a bare key; a choice
+takes an option name, a noul `true`/`false`, a score its 0-based level):
 
-```ts
-// calibrate.mts — node calibrate.mts
-import triage from "./triage.mts";
-import cases from "./labelled.json" with { type: "json" };  // [{ goal, expected }]
-
-const rows = [];
-for (const c of cases) {
-  const { run } = await triage({ goal: c.goal }, { budget: 0.01 });
-  const step = run.steps.find((s) => s.node === "classify")!;
-  const a = step.answers!.team!;
-  rows.push({ goal: c.goal, expected: c.expected, got: a.value, confidence: a.confidence, ok: a.value === c.expected });
-}
-// Accuracy by confidence bucket: where does being wrong become rare?
-for (const lo of [0, 0.5, 0.6, 0.7, 0.8, 0.9]) {
-  const b = rows.filter((r) => r.confidence! >= lo);
-  console.log(`conf ≥ ${lo}: ${b.length} cases, ${(100 * b.filter((r) => r.ok).length / (b.length || 1)).toFixed(1)}% right`);
-}
+```jsonl
+{"inputs":{"goal":"I was charged twice"},"expect":{"route":"billing"}}
+{"inputs":{"goal":"parcel is two weeks late","plan":"vip"},"expect":{"route":"orders","screen.urgent":true}}
 ```
+
+```sh
+npm run calibrate -- runners/triage.mts cases.jsonl --budget 0.05
+```
+
+It tests each decide node in isolation (no handlers, no model calls), refuses a
+malformed case set before spending anything, and prints per question: accuracy,
+mean confidence, the calibration **gap** (near 0 means confidence can be
+trusted), the misses, and a price for every gate:
+
+```
+  route.team  choice · n=120 · right 91.7% · confidence 0.88 · gap 0.031
+    gate min 0.7 → keeps 93.3%, 96.4% of those right
+    gate min 0.8 → keeps 85.0%, 98.0% of those right
+```
+
+`--json` gives the full report, and `calibrate()` is the same thing as a function.
 
 Set `gate.min` at the lowest confidence where accuracy is acceptable for what a
 wrong route costs. Every case below it goes to the safe path. Do the same for
@@ -120,6 +135,28 @@ the decider in a cache keyed on `JSON.stringify([state, questions])`. Pass it as
 
 After changing a question, re-emit `graph.json`. The hash changes, and
 `summarize --graph` keeps old and new runs apart.
+
+## Reading a supervised loop
+
+A runner run by `supervise()` leaves a journal directory, not a single run.json:
+
+- `pulse.json` is rewritten on every node event. If its `at` is old, the process
+  is stuck or dead. Check this first.
+- `checkpoint.json` holds `tick`, `spent`, `memory`, the last-24h `ledger` and
+  the `recent` window. A restart resumes from it.
+- `journal.jsonl` has one JSON object per line, by `type`: `step` (as each node
+  finished), `run` (a whole run.json per tick), `watched` (the watcher's run),
+  and `start`, `tick`, `rest`, `watch`, `alert`, `stop`, `error`.
+
+```sh
+jq -c 'select(.type=="alert" or .type=="stop")' .ensemble/live/journal.jsonl     # what went wrong
+jq -c 'select(.type=="watch") | {tick, verdict, reason, f: .vitals.failureRate, g: .vitals.gateRate}' .ensemble/live/journal.jsonl
+jq -c 'select(.type=="run") | .run' .ensemble/live/journal.jsonl > runs.jsonl    # feed to summarize.mts
+```
+
+A rising `gateRate` means the decider is unsure more often, because the inputs
+drifted from what the questions were written for. Calibrate again on recent
+inputs. `sameness` near 1 on work that should vary means it is stuck.
 
 ## Building on the event stream
 

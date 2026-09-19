@@ -23,10 +23,13 @@ import {
   isMcp,
   isModel,
   isWork,
+  laneNodes,
   parseBranch,
   probeReads,
   producers,
   readsOf,
+  writesOf,
+  edgeId,
   type Branch,
   type Edge,
   type RunnerSpec,
@@ -261,6 +264,88 @@ export function validate(spec: RunnerSpec): string[] {
             `Wire ${missing.length === 1 ? "it" : "them"}, or add a default edge from "${name}" with no on/when.`,
         );
       }
+    }
+  }
+
+  /* ── parallelism: forks fan out, joins fan in, lanes never collide ── */
+  for (const name of names) {
+    const outgoing = edges.filter((edge) => edge.from === name);
+    const forks = outgoing.filter((edge) => edge.fork);
+    if (forks.length && forks.length !== outgoing.length) {
+      problems.push(
+        `node "${name}" has ${forks.length} forking edge${forks.length === 1 ? "" : "s"} and ` +
+          `${outgoing.length - forks.length} ordinary — a node's edges are all forks (they fire together) ` +
+          `or none (first match wins). Mark them all fork: true, or move the ordinary ones to another node`,
+      );
+    }
+    const node = spec.nodes[name]!;
+    if (node.join) {
+      const incoming = edges.filter((edge) => edge.to === name);
+      if (name === spec.entry) problems.push(`entry "${name}" is a join — nothing can arrive before the run starts`);
+      else if (incoming.length < 2) {
+        problems.push(
+          `node "${name}" is join: "all" but ${incoming.length === 1 ? "only one edge leads" : "no edge leads"} there — ` +
+            `a join waits for several lanes. Point every lane's last edge at it, or drop the join`,
+        );
+      }
+    }
+  }
+  for (const name of names) {
+    const forks = edges.filter((edge) => edge.from === name && edge.fork);
+    if (forks.length < 2) continue;
+    const lanes = forks.map((edge) => ({ id: edgeId(edges.indexOf(edge)), to: edge.to, nodes: laneNodes(spec, edge.to) }));
+    const touched = (lane: (typeof lanes)[number]): { writes: Set<string>; reads: Set<string> } => {
+      const writes = new Set<string>();
+      const reads = new Set<string>();
+      for (const at of lane.nodes) {
+        const node = spec.nodes[at]!;
+        for (const key of writesOf(node)) writes.add(key);
+        for (const key of readsOf(node)) reads.add(key);
+        for (const edge of edges) {
+          if (edge.from !== at) continue;
+          for (const key of edge.when ? probeReads(edge.when) : []) reads.add(key);
+        }
+      }
+      return { writes, reads };
+    };
+    for (let i = 0; i < lanes.length; i++) {
+      for (let j = i + 1; j < lanes.length; j++) {
+        const a = lanes[i]!, b = lanes[j]!;
+        const shared = [...a.nodes].filter((at) => b.nodes.has(at));
+        if (shared.length) {
+          problems.push(
+            `node "${name}" forks to "${a.to}" and "${b.to}", but both lanes reach ${list(shared)} — ` +
+              `a node cannot run in two lanes at once. Mark it join: "all" if the lanes should meet there, ` +
+              `or give each lane its own copy`,
+          );
+          continue;
+        }
+        const ta = touched(a), tb = touched(b);
+        const collide = [...ta.writes].filter((key) => tb.writes.has(key) || tb.reads.has(key))
+          .concat([...tb.writes].filter((key) => ta.reads.has(key)));
+        if (collide.length) {
+          problems.push(
+            `node "${name}" forks to "${a.to}" and "${b.to}", but the lanes both touch ${list([...new Set(collide)])} — ` +
+              `concurrent lanes must write and read disjoint keys, or the result depends on timing. ` +
+              `Write to separate keys and combine them after the join`,
+          );
+        }
+      }
+    }
+  }
+
+  /* ── memory: declared, so it must be written, and it is not also an input ── */
+  const wroteEarly = producers(spec);
+  for (const key of spec.memory ?? []) {
+    if (!IDENT.test(key)) problems.push(`memory key "${key}" is not a valid identifier`);
+    if (spec.inputs?.includes(key)) {
+      problems.push(`"${key}" is both an input and memory — an input arrives each run, memory carries over. Pick one`);
+    }
+    if (!wroteEarly[key]) {
+      problems.push(
+        `memory key "${key}" is never written — it would never change between ticks. ` +
+          `Add it to a node's writes, or declare it in inputs instead`,
+      );
     }
   }
 

@@ -243,4 +243,152 @@ console.log("ok · 7 execute refuses an unsound runner; graph() and validate() s
 }
 console.log("ok · 8 events fire in order; a score lands as a number a when() can compare");
 
-console.log("8 cases");
+// ── 9 · a step that outlives stepTimeout fails the run, and its signal aborts
+{
+  let aborted = false;
+  const hung = runner({
+    name: "hung",
+    work: {
+      // Never resolves, like a handler waiting on a socket that went away.
+      wait: ({ signal }) => {
+        signal.addEventListener("abort", () => (aborted = true));
+        return new Promise(() => {});
+      },
+    },
+    nodes: { stuck: { work: "wait", writes: ["out"] } },
+    entry: "stuck",
+  });
+  const started = Date.now();
+  const failed = await hung({ goal: "x" }, { stepTimeout: 50 }).catch((e: unknown) => e);
+  assert.ok(failed instanceof RunFailed, "a hung step fails the run instead of holding it forever");
+  assert.match(failed.message, /did not finish within 50ms/);
+  assert.equal(failed.run.run.status, "failed");
+  assert.ok(aborted, "the handler's signal fired, so a well-behaved one can clean up");
+  assert.ok(Date.now() - started < 2000);
+}
+console.log("ok · 9 stepTimeout fails a hung step and aborts its signal");
+
+// ── 10 · fork runs lanes at once; the join waits for all and merges state ──
+{
+  const order: string[] = [];
+  const slow = (label: string, ms: number, value: unknown) => async () => {
+    order.push(`${label}:start`);
+    await new Promise((r) => setTimeout(r, ms));
+    order.push(`${label}:end`);
+    return value;
+  };
+  const senses = runner({
+    name: "senses",
+    work: { eyes: slow("eyes", 40, "a red door"), ears: slow("ears", 10, "a knock") },
+    nodes: {
+      wake: { code: () => "up", writes: ["awake"] },
+      look: { work: "eyes", writes: ["scene"] },
+      listen: { work: "ears", writes: ["sound"] },
+      count: { code: (s) => String(s["awake"]).length, writes: ["n"] },
+      assess: {
+        decide: { kind: kind() },
+        reads: ["scene", "sound", "n"],
+        join: "all",
+      },
+      done: { code: (s) => `${s["scene"]} / ${s["sound"]} / ${s["n"]} / ${s["kind"]}`, writes: ["out"] },
+    },
+    edges: [
+      { from: "wake", to: "look", fork: true },
+      { from: "wake", to: "listen", fork: true },
+      { from: "wake", to: "count", fork: true },
+      { from: "look", to: "assess" },
+      { from: "listen", to: "assess" },
+      { from: "count", to: "assess" },
+      { from: "assess", to: "done" },
+    ],
+    entry: "wake",
+    result: "out",
+  });
+  assert.deepEqual(senses.validate(), []);
+  const decider = stub({ kind: chose("photo") });
+  const { result, run } = await senses({ goal: "x" }, { decider });
+
+  assert.equal(result, "a red door / a knock / 2 / photo", "every lane's writes met at the join");
+  assert.deepEqual(order, ["eyes:start", "ears:start", "ears:end", "eyes:end"], "the lanes overlapped");
+  assert.deepEqual(decider.seen[0]!.state, { scene: "a red door", sound: "a knock", n: 2 });
+
+  const byNode = Object.fromEntries(run.steps.map((s) => [s.node, s]));
+  assert.deepEqual(byNode["wake"]!.forked, ["e0", "e1", "e2"]);
+  assert.equal(byNode["wake"]!.took, null, "a fork step takes no single edge");
+  assert.equal(byNode["wake"]!.lane, "main");
+  assert.deepEqual([byNode["look"]!.lane, byNode["listen"]!.lane, byNode["count"]!.lane], ["e0", "e1", "e2"]);
+  assert.equal(byNode["assess"]!.lane, "assess", "the join runs on a lane named after itself");
+  assert.equal(byNode["done"]!.lane, "assess");
+  assert.equal(run.steps.filter((s) => s.node === "assess").length, 1, "the join ran once");
+  assert.deepEqual(byNode["assess"]!.asked, { scene: "a red door", sound: "a knock", n: 2 }, "asked records what a node was given");
+  assert.equal(byNode["done"]!.asked, undefined, "a node with no declared reads records none");
+  assert.ok(byNode["look"]!.started < byNode["look"]!.ended || byNode["look"]!.ms >= 0, "steps carry timestamps");
+  assert.ok(Date.parse(byNode["listen"]!.ended) <= Date.parse(byNode["assess"]!.started), "the join started after the last lane ended");
+  assert.equal(run.run.status, "completed");
+}
+console.log("ok · 10 fork runs lanes concurrently, and the join waits for all of them");
+
+// ── 11 · a lane that fails cancels its siblings; a conditional fork fires only what holds ──
+{
+  let siblingAborted = false;
+  const flaky = runner({
+    name: "flaky",
+    work: {
+      boom: async () => {
+        await new Promise((r) => setTimeout(r, 5));
+        throw new Error("lens cracked");
+      },
+      wait: ({ signal }) =>
+        new Promise((resolve) => {
+          signal.addEventListener("abort", () => ((siblingAborted = true), resolve("late")), { once: true });
+        }),
+    },
+    nodes: {
+      go: { code: () => 1, writes: ["k"] },
+      a: { work: "boom", writes: ["x"] },
+      b: { work: "wait", writes: ["y"] },
+      meet: { code: () => "never", writes: ["out"], join: "all" },
+    },
+    edges: [
+      { from: "go", to: "a", fork: true },
+      { from: "go", to: "b", fork: true },
+      { from: "a", to: "meet" },
+      { from: "b", to: "meet" },
+    ],
+    entry: "go",
+  });
+  const failed = await flaky({ goal: "x" }).catch((e: unknown) => e);
+  assert.ok(failed instanceof RunFailed);
+  assert.match(failed.message, /node "a" failed: lens cracked/);
+  assert.ok(siblingAborted, "the other lane's signal fired");
+  assert.equal(failed.run.run.status, "failed", "and the first reason to stop is the one recorded");
+  assert.ok(!failed.run.steps.some((s) => s.node === "meet"), "the join never ran");
+
+  const picky = runner({
+    name: "picky",
+    nodes: {
+      ask: { decide: { kind: kind(), hard: noul("Hard?") }, reads: ["goal"] },
+      p: { code: () => "p", writes: ["pp"] },
+      h: { code: () => "h", writes: ["hh"] },
+      d: { code: () => "d", writes: ["dd"] },
+      end: { code: (s) => Object.keys(s).filter((k) => k.length === 2).sort().join(","), writes: ["out"], join: "all" },
+    },
+    edges: [
+      { from: "ask", to: "p", on: "kind=photo", fork: true },
+      { from: "ask", to: "d", on: "kind=diagram", fork: true },
+      { from: "ask", to: "h", on: "hard", fork: true },
+      { from: "p", to: "end" },
+      { from: "d", to: "end" },
+      { from: "h", to: "end" },
+    ],
+    entry: "ask",
+    result: "out",
+  });
+  assert.deepEqual(picky.validate(), []);
+  const { result, run } = await picky({ goal: "x" }, { decider: stub({ kind: chose("photo"), hard: { type: "noul", noul: 0.9 } }) });
+  assert.equal(result, "hh,pp", "only the forks that held fired");
+  assert.deepEqual(run.steps[0]!.forked, ["e0", "e2"]);
+}
+console.log("ok · 11 a failing lane cancels its siblings; forks with on:/when: fire only when they hold");
+
+console.log("11 cases");

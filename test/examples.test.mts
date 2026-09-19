@@ -152,4 +152,59 @@ console.log("ok · 5 the triage example runs end to end against a stub decider")
 }
 console.log("ok · 6 the refine and robot examples run end to end, write shapes included");
 
-console.log("6 cases");
+// ── 7 · 06's watcher: numbers stop it before Jev is asked; meaning flags it ──
+{
+  const watcher = await load("examples/06-watch/watch.mts");
+  assert.deepEqual(watcher.validate(), []);
+  let asked = 0;
+  const decider: Decider = async (_state: unknown, questions: Record<string, Question>) => {
+    asked++;
+    const answers: Record<string, Answer> = {};
+    const table: Record<string, number> = { progress: 0.9, looping: 0.1, review: 0.1 };
+    for (const key of Object.keys(questions)) answers[key] = { type: "noul", noul: table[key]! };
+    return { model: "stub", answers, usage: { input_tokens: 1, output_tokens: 0 }, cost: 0 };
+  };
+  const vitals = (over: Record<string, number>) => ({ ticks: 12, failureRate: 0, gateRate: 0, sameness: 0.3, ...over });
+  const verdict = async (v: Record<string, number>) =>
+    (await watcher({ goal: "triage", vitals: vitals(v), recent: "tick 1 · completed · classify → to_billing" }, { decider })).result;
+
+  assert.equal(await verdict({}), "continue", "healthy numbers, and Jev sees progress");
+  assert.equal(asked, 1);
+  assert.equal(await verdict({ failureRate: 0.6 }), "stop", "half the ticks failing stops it");
+  assert.equal(await verdict({ gateRate: 0.5 }), "alert", "unsure too often");
+  assert.equal(await verdict({ sameness: 1 }), "alert", "the same path, tick after tick");
+  assert.equal(asked, 1, "none of those three needed Jev: arithmetic is decided in code");
+}
+console.log("ok · 7 the watch example stops on numbers in code and asks Jev only about meaning");
+
+// ── 8 · 07 forks three senses, joins once, and remembers across ticks ──────
+{
+  const senses = await load("examples/07-senses/senses.mts");
+  assert.deepEqual(senses.validate(), []);
+  const graph = senses.graph();
+  assert.deepEqual(graph.edges.filter((e) => e.fork).map((e) => e.id), ["e0", "e1", "e2"]);
+  assert.equal(graph.nodes.find((n) => n.id === "assess")!.join, "all");
+  assert.deepEqual(graph.runner.memory, ["seen"]);
+
+  const caller: Caller = async (req: ModelRequest): Promise<ModelReply> => ({
+    model: req.model, text: "a person at the door", images: [], usage: { input_tokens: 1, output_tokens: 1 }, cost: 0.0001,
+  });
+  const decider: Decider = async (state: unknown, questions: Record<string, Question>) => {
+    assert.deepEqual(Object.keys(state as object).sort(), ["goal", "heard", "scene"], "Jev sees the senses' words, not the frame");
+    const answers: Record<string, Answer> = {};
+    for (const key of Object.keys(questions)) {
+      answers[key] = key === "action"
+        ? { type: "choice", choice: "approach", confidence: 0.9, probabilities: { approach: 0.9 } }
+        : { type: "noul", noul: 0.8 };
+    }
+    return { model: "stub", answers, usage: { input_tokens: 1, output_tokens: 0 }, cost: 0.00002 };
+  };
+  const { result, state, run } = await senses({ goal: "watch the door", frame: "https://x/f.jpg", sensors: "motion", seen: 4 }, { caller, decider });
+  assert.match(String(result), /acting on "approach"/);
+  assert.equal(state["seen"], 5, "the memory key was advanced by the recall lane");
+  assert.equal(run.steps.filter((s) => s.node === "assess").length, 1);
+  assert.deepEqual(run.steps.map((s) => s.lane), ["main", "e0", "e1", "e2", "assess", "assess"]);
+}
+console.log("ok · 8 the senses example forks, joins once, and advances its memory key");
+
+console.log("8 cases");

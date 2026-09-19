@@ -48,6 +48,7 @@ interface Step {
   node: string;
   kind: string;
   took: string | null;
+  forked?: string[];
   error?: string;
   writes?: State;
   answers?: Record<string, { value: unknown }>;
@@ -255,7 +256,7 @@ for (const [label, forced] of cases) {
 
 // Which declared edges did no dry run take? With --explore, an edge left over
 // is either dead wiring or guarded by a when() the stub answers never tripped.
-const taken = new Set(outcomes.flatMap((o) => o.run?.steps.map((s) => s.took) ?? []));
+const taken = new Set(outcomes.flatMap((o) => o.run?.steps.flatMap((s) => [s.took, ...(s.forked ?? [])]) ?? []));
 const idle = (runner.spec.edges ?? [])
   .map((edge, i) => ({ id: `e${i}`, edge }))
   .filter(({ id }) => !taken.has(id));

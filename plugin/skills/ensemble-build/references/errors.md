@@ -40,6 +40,13 @@ not just the symptom.
 | `in its when() but nothing writes it` | A `when` touches a missing key | Same fix. Also check `s.k` spelling in the predicate |
 | `result: "k" is never written` | Bad `result` | Name a key that a final node writes |
 | `unreachable from "entry"` | Nodes that no edge or gate leads to | Wire them in, or delete them |
+| `has N forking edge(s) and M ordinary — a node's edges are all forks` | Mixed `fork: true` and plain edges on one node | Mark them all `fork: true`, or move the ordinary edges to another node |
+| `is join: "all" but only one edge leads there` / `no edge leads there` | A join with fewer than two incoming edges | Point each lane's last edge at it, or drop the join |
+| `entry "x" is a join` | The entry node is a join | Start from a plain node |
+| `forks to "a" and "b", but both lanes reach "x"` | Two lanes share a node that isn't a join | Mark it `join: "all"` if the lanes should meet there, or give each lane its own node |
+| `but the lanes both touch "k" — concurrent lanes must write and read disjoint keys` | One lane writes a key another lane writes or reads | Write to separate keys and combine them after the join |
+| `memory key "k" is never written` | A declared memory key with no writer | Add it to a node's `writes`, or declare it in `inputs` instead |
+| `"k" is both an input and memory` | Same key in both lists | Pick one: inputs arrive each run, memory carries over |
 
 ## Failures that validate cannot see (found by dryrun or a live run)
 
@@ -54,3 +61,20 @@ not just the symptom.
 | A safety edge is skipped on unsure answers | A `gate` on the same node fires before any edge | Split the node into screen (overrides) → route (gated choice), or send the gate to the same safe exit |
 | A `when:` key shows `readBy: []` in `graph.json` data | `&&` / `||` / `?:` short-circuited during the probe, so validation never saw that key | Read every key into a variable before combining them |
 | An edge never taken in `--explore` | Dead wiring, a shadowing edge above it, or a `when` the stubs never tripped | Reorder, delete, or confirm the `when` with `--answer` |
+
+## calibrate and supervise
+
+| Message or symptom | What it means | Fix |
+|---|---|---|
+| `case N tests X, which reads k — add "k" to its inputs` | A case lacks a key the node reads, maybe one a model node normally writes | Put that key in the case's `inputs`. For a model-written key, use the text the model would produce |
+| `expects "k", which no decide node asks` | Wrong key | Use `node.key` as listed by `ensemble graph … \| jq '.nodes[].questions'` |
+| `which more than one node asks — write it as node.key` | A bare key is ambiguous | Use `node.key` |
+| `is a choice — expect one of …` / `a noul — expect true or false` / `a score — expect a level from 0 to N` | The label has the wrong type | Option name, boolean, or 0-based integer level |
+| `did not finish within Nms` | `stepTimeout` fired: a handler, model or tool call hung | Find the slow call in the step's `node`. Raise the limit only if that call is legitimately slow |
+| status `failing`, alert `N ticks in a row did not complete` | `maxStreak` consecutive ticks failed | Read the `run` lines in `journal.jsonl` for the failing step's `error` |
+| alert `the watcher returned … — it must return "continue", "alert" or "stop"` | The watcher's `result` isn't one of the three | Make every watcher exit write one of the three strings, and set `result` or end on a node that returns it |
+| a `rest` event, then nothing for hours | `budget.perDay` is spent. It sleeps until the oldest spend is 24 h old | Expected. Raise `perDay`, or cut the cost per tick |
+| memory resets after a restart | No `journal` directory, or `resume: false` | Pass the same `journal` path every time |
+| memory never changes | The runner writes the key on a path that fails, or not at all | Only completed ticks update memory. Check the `run` lines for that node's `error` |
+| `is held by process N, which is still running` | Another supervisor owns this journal | Stop it, or use another `journal` path. A dead holder's lock is taken over automatically |
+| stopped with `SIGTERM received — stopping after the tick in flight` | A deploy or ctrl-C | Expected: the tick finished and was checkpointed. Restart with the same `journal` to resume |

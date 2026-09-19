@@ -103,7 +103,7 @@ validates and has been dry-run down every branch, with no human filling gaps:
 |---|---|
 | `ensemble-build` | Breaks the use case down, writes the graph, runs validate → graph → a $0 dry run of every branch → check |
 | `ensemble-questions` | Writing `choice` / `score` / `noul` that Jev answers well, plus gates and thresholds |
-| `ensemble-runs` | Reading `run.json`, explaining a path, summarising many runs, calibrating thresholds |
+| `ensemble-runs` | Reading `run.json` and supervised journals, explaining a path, summarising many runs, calibrating thresholds |
 
 The plugin is not part of the npm package; the library itself still ships no
 skills.
@@ -397,6 +397,36 @@ nodes ask of them, and whether your keys are set.
 
 ---
 
+## Parallel lanes
+
+Edges marked `fork: true` fire together, each on its own lane; a node marked
+`join: "all"` runs once after every lane has arrived. That is the whole of
+parallelism here, and it stays provable: `validate` refuses lanes that share a
+node or touch the same state key, so the merge can never depend on timing.
+
+```ts
+edges: [
+  { from: "sense", to: "look",   fork: true },   // a vision model
+  { from: "sense", to: "listen", fork: true },   // your handler
+  { from: "sense", to: "recall", fork: true },   // code
+  { from: "look", to: "assess" }, { from: "listen", to: "assess" }, { from: "recall", to: "assess" },
+],
+nodes: { assess: { join: "all", decide: {…}, reads: ["scene", "heard"] } }
+```
+
+Forks may carry `on:` or `when:`, so a decision can fan out to only the lanes it
+chose. One shared controller covers every lane: a failing lane cancels its
+siblings, and budget, timeout and cancellation apply to all of them. Each step
+in `run.json` says which lane it ran on.
+
+## Memory
+
+A runner is one tick. Keys declared in `memory` arrive like inputs and are
+carried to the next tick by `supervise`, as the last completed tick left them.
+They are declared, so `graph.json` says what the system remembers and
+`validate` proves something writes it. Keep it small: a tally, the last few
+results, never a transcript. Jev gets worse on padded state.
+
 ## Branching
 
 Two forms, and the split is the whole design:
@@ -567,12 +597,31 @@ The bundled terminal reporter is just one consumer: `import { reporter } from
 ## The CLI
 
 The library is the product — a runner belongs inside your server, called as an
-ordinary function. The CLI is for the development loop.
+ordinary function. The CLI is for the development loop, and it is not meant to be
+installed globally: add it to `package.json` scripts and pin it with the project.
+
+```json
+"scripts": {
+  "validate":  "ensemble validate",
+  "graph":     "ensemble graph",
+  "check":     "ensemble check",
+  "calibrate": "ensemble calibrate",
+  "start":     "node run.mts"
+}
+```
+
+```ts
+// run.mts — the way a runner actually runs: imported, not shelled out to
+import triage from "./runners/triage.mts";
+const { result } = await triage({ goal: process.argv[2] ?? "" }, { budget: 0.05 });
+console.log(result);
+```
 
 ```sh
-ensemble validate <file>      # prove the graph        — free, offline
-ensemble graph    <file>      # emit graph.json        — free, offline
-ensemble run      <file> "goal"
+npm run validate  -- <file>              # prove the graph        — free, offline
+npm run graph     -- <file> | jq         # emit graph.json        — free, offline
+npm run calibrate -- <file> cases.jsonl  # score its decisions    — ~$0.00002 a case
+npx ensemble run <file> "goal"           # one paid run from the terminal, when you must
 ```
 
 Data goes to stdout so it can be piped; commentary goes to stderr.
@@ -583,7 +632,7 @@ Data goes to stdout so it can be piped; commentary goes to stderr.
 | `-o, --out <path>` | write here instead of stdout / the default run directory |
 | `--json` | `run`: print `run.json` to stdout instead of writing a file |
 | `--input k=v` | seed a state key (repeatable) |
-| `--budget <usd>` | stop once the run costs more than this |
+| `--budget <usd>` | `run`, `calibrate`: stop once it costs more than this |
 | `--max-steps <n>` | cap node executions (default 50) |
 
 `run` writes `run.json` and `graph.json` into `.ensemble/runs/<id>/`.
@@ -658,11 +707,69 @@ Scores from rubrics of different lengths are not comparable — normalise by
 
 ---
 
+## Does it work? Calibrate it
+
+`validate` proves the wiring and a dry run proves the plumbing. Neither says
+whether a decision is *right*. `calibrate` does: give it labelled cases and it
+asks each decide node in isolation (no handlers, no models), then reports
+accuracy, how honest the confidence is, and what every gate would cost you.
+
+```jsonl
+{"inputs":{"goal":"I was charged twice"},"expect":{"team":"billing"}}
+{"inputs":{"goal":"where is my parcel"},"expect":{"team":"orders"}}
+```
+
+```sh
+ensemble calibrate triage.mts cases.jsonl --budget 0.05
+#   classify.team  choice · n=120 · right 91.7% · confidence 0.88 · gap 0.031
+#     gate min 0.7 → keeps 93.3%, 96.4% of those right
+#     gate min 0.8 → keeps 85.0%, 98.0% of those right
+```
+
+`gap` is the distance between how sure Jev was and how often it was right. Near 0
+means a gate on that question can be trusted. A malformed case set is refused
+before anything is spent.
+
+---
+
+## Running for days
+
+A runner is one tick. `supervise()` keeps one alive: memory between ticks, a
+total and a daily budget (a spent day *rests* until spend ages out, it doesn't
+die), a stop after repeated failures, a per-step timeout, and a journal that a
+restart resumes from.
+
+```ts
+import { supervise } from "@ghostmind-dev/ensemble";
+
+await supervise(worker, {                      // worker declares memory: ["seen"]
+  next: async () => ({ goal: await inbox.next() }),
+  memory: { seen: 0 },                         // starting values, until the first checkpoint
+  budget: { total: 20, perDay: 5, perRun: 0.05 },
+  run: { stepTimeout: 120_000 },
+  watch: { every: 10, runner: watcher },
+  journal: ".ensemble/live",
+  onAlert: ({ reason }) => pager.send(reason),
+});
+```
+
+The **watcher** is where the decider fits best. It is an ordinary runner that
+gets the loop's vitals as numbers (failure rate, gate rate, sameness, spend) for
+its `when:` edges, and the recent ticks as text for Jev. It answers "continue",
+"alert" or "stop". At about $0.00002 a question, a system can check whether it
+is still on track every few ticks, forever. The work being watched can be
+anything, including a free-running agent inside one `work` handler.
+[`06-watch`](examples/06-watch/watch.mts) is a complete one.
+
+---
+
 ## What this deliberately does not do
 
-No prompts of its own, no agent loop, no vendor SDKs. Skills and MCP are here,
-but as *choices and single calls* — never a model deciding its own next tool. No server, no browser viewer, no mermaid, no markdown
-reports. No parallel node groups, no resume, no replay.
+No prompts of its own, no built-in agent loop, no vendor SDKs *in the package*.
+Your handlers can use any of them. Skills and MCP are here, but as *choices and
+single calls*, never a model deciding its own next tool. No server, no browser
+viewer, no mermaid, no markdown reports. No variable-width fan-out (a handler's
+job), no replay.
 
 Those are not oversights — they were removed. Keeping them would have made this
 a framework you live inside rather than a function you call, and the whole point
@@ -686,6 +793,8 @@ ensemble run      examples/04-robot/brain.mts --input frame=https://… "keep th
 | [`03-refine`](examples/03-refine/refine.mts) | A loop that knows when to stop — a score gate, a loop budget, counting in code |
 | [`04-robot`](examples/04-robot/brain.mts) | A little brain: a vision model looks, Jev decides, your handler acts — one tick of a perception loop |
 | [`05-assistant`](examples/05-assistant/assistant.mts) | Skills and MCP, chosen rather than looped over: pick a skill, read a file, answer |
+| [`06-watch`](examples/06-watch/watch.mts) | A conscience for a loop that runs for days: numbers checked in code, drift judged by Jev, supervised end to end |
+| [`07-senses`](examples/07-senses/senses.mts) | Look, listen and count at once: three forked lanes, one join, and a memory key that survives the tick |
 
 ---
 

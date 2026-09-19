@@ -63,6 +63,8 @@ export interface GraphNode {
   writes: string[];
   /** `cheap` is a decider call, `metered` is your handler, `free` is plain code. */
   cost: "cheap" | "metered" | "free";
+  /** Waits for every lane leading here before it runs. */
+  join?: "all";
   decide?: {
     model: string;
     questions: GraphQuestion[];
@@ -96,6 +98,8 @@ export interface GraphEdge {
   on?: { question: string; option: string } | { question: string; op: string; value: number };
   when?: { source: string; reads: string[] };
   maxLoops?: number;
+  /** Fires alongside the other forks from its node, each on its own lane. */
+  fork?: true;
 }
 
 export interface GraphDoc {
@@ -108,6 +112,8 @@ export interface GraphDoc {
     hash: string;
     entry: string;
     inputs: string[];
+    /** Keys that carry over between ticks under `supervise`. */
+    memory?: string[];
     result?: string;
   };
   nodes: GraphNode[];
@@ -158,6 +164,7 @@ export function toGraph(spec: RunnerSpec): GraphDoc {
       cost,
       reads: readsOf(node),
       writes: writesOf(node),
+      ...(node.join ? { join: node.join } : {}),
     });
     if (isDecide(node)) {
       return {
@@ -222,6 +229,7 @@ export function toGraph(spec: RunnerSpec): GraphDoc {
     }
     if (edge.when) out.when = { source: edge.when.toString(), reads: probeReads(edge.when) };
     if (edge.maxLoops !== undefined) out.maxLoops = edge.maxLoops;
+    if (edge.fork) out.fork = true;
     return out;
   });
 
@@ -240,7 +248,11 @@ export function toGraph(spec: RunnerSpec): GraphDoc {
     .sort()
     .map((key) => ({
       key,
-      producedBy: external.includes(key) ? ["$input", ...(wrote[key] ?? [])] : (wrote[key] ?? []),
+      producedBy: spec.memory?.includes(key)
+        ? ["$memory", ...(wrote[key] ?? [])]
+        : external.includes(key)
+          ? ["$input", ...(wrote[key] ?? [])]
+          : (wrote[key] ?? []),
       readBy: [...new Set(readBy[key] ?? [])],
     }));
 
@@ -252,7 +264,8 @@ export function toGraph(spec: RunnerSpec): GraphDoc {
       ...(spec.description ? { description: spec.description } : {}),
       hash: "",
       entry: spec.entry,
-      inputs: external,
+      inputs: external.filter((key) => !spec.memory?.includes(key)),
+      ...(spec.memory?.length ? { memory: spec.memory } : {}),
       ...(spec.result ? { result: spec.result } : {}),
     },
     nodes,
