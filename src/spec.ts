@@ -44,7 +44,17 @@ export type Handler = (ctx: HandlerContext) => unknown | Promise<unknown>;
 
 /* ───────────────────────────────── nodes ──────────────────────────────── */
 
-export interface DecideNode {
+/**
+ * Fan-in. A node marked `join: "all"` waits until every lane that could reach
+ * it has arrived (or ended) before it runs, once. Fan-out is on the edge
+ * (`fork`); together they are the whole of parallelism here, and `validate`
+ * proves the lanes between a fork and its join never touch the same key.
+ */
+export interface Joinable {
+  join?: "all";
+}
+
+export interface DecideNode extends Joinable {
   /** The questions, asked together in one request and answered independently. */
   decide: Record<string, Question>;
   /**
@@ -61,7 +71,7 @@ export interface DecideNode {
   label?: string;
 }
 
-export interface WorkNode {
+export interface WorkNode extends Joinable {
   /** A key of the runner's `work` map. */
   work: string;
   /** Declared for the data graph; the handler still sees the whole state. */
@@ -74,7 +84,7 @@ export interface WorkNode {
   label?: string;
 }
 
-export interface CodeNode {
+export interface CodeNode extends Joinable {
   /** Deterministic, free, instant. Where every judgement about a NUMBER belongs. */
   code: (state: Readonly<State>) => unknown | Promise<unknown>;
   reads?: string[];
@@ -93,7 +103,7 @@ export interface CodeNode {
  * it sees, or what it costs. A node earns its place by making the picture
  * better, and this one does.
  */
-export interface ModelNode {
+export interface ModelNode extends Joinable {
   /** An OpenRouter id, or `{ from }` to use an id a decide node just picked. */
   model: string | { from: string };
   /** The instruction. A function receives the blackboard. */
@@ -130,7 +140,7 @@ export interface ModelNode {
  * visible before it runs — the thing a tool-calling agent can never tell you.
  * Arguments come from code, or from a decision made upstream.
  */
-export interface McpNode {
+export interface McpNode extends Joinable {
   mcp: { server: string; tool: string | { from: string } };
   /** The tool's arguments. A function receives the blackboard. */
   args?: Record<string, unknown> | ((state: Readonly<State>) => Record<string, unknown>);
@@ -159,6 +169,12 @@ export interface Edge {
   when?: (state: State) => boolean;
   /** How many times this edge may be taken before it stops matching. */
   maxLoops?: number;
+  /**
+   * Fan-out. A forking edge fires IN ADDITION to every other forking edge from
+   * the same node that holds, each starting its own lane, instead of the usual
+   * first-match-wins. A node's edges are all forks or none.
+   */
+  fork?: true;
 }
 
 /**
@@ -224,6 +240,13 @@ export interface RunnerSpec {
   description?: string;
   /** Keys supplied from outside the run. `goal` is always one. */
   inputs?: string[];
+  /**
+   * Keys that outlive a run. They arrive like inputs, and whatever a node
+   * writes to them is what the next tick starts with — `supervise` carries
+   * them across ticks and checkpoints them. Declared, so the graph can say what
+   * the system remembers and validate can prove something writes it.
+   */
+  memory?: string[];
   /** Your workers, by name. */
   work?: Record<string, Handler>;
   nodes: Record<string, NodeSpec>;
@@ -245,9 +268,9 @@ export interface RunnerSpec {
 
 /* ──────────────────────────── derived facts ───────────────────────────── */
 
-/** Keys present before any node runs. */
+/** Keys present before any node runs: inputs, and memory carried in from the last tick. */
 export const externalKeys = (spec: RunnerSpec): string[] => [
-  ...new Set(["goal", ...(spec.inputs ?? [])]),
+  ...new Set(["goal", ...(spec.inputs ?? []), ...(spec.memory ?? [])]),
 ];
 
 /** The state keys a node writes. A decide node writes one per question. */
@@ -300,6 +323,31 @@ export function producers(spec: RunnerSpec): Record<string, string[]> {
 
 /** Stable id for an edge — its declaration index. What a run record points at. */
 export const edgeId = (index: number): string => `e${index}`;
+
+/** Does this node fan out? Its edges are then all forks, which `validate` enforces. */
+export const forksFrom = (spec: RunnerSpec, node: string): boolean =>
+  (spec.edges ?? []).some((edge) => edge.from === node && edge.fork);
+
+/**
+ * The nodes a lane can visit, starting after a forking edge and stopping at
+ * the first join. This is the set that concurrency is reasoned about: two
+ * lanes of one fork are concurrent, so their sets must not share a node or a
+ * state key. Nested forks are simply inside the set.
+ */
+export function laneNodes(spec: RunnerSpec, start: string): Set<string> {
+  const seen = new Set<string>();
+  const queue = [start];
+  while (queue.length) {
+    const at = queue.shift()!;
+    const node = spec.nodes[at];
+    if (!node || seen.has(at)) continue;
+    if (node.join) continue; // the join belongs to no single lane
+    seen.add(at);
+    for (const edge of spec.edges ?? []) if (edge.from === at) queue.push(edge.to);
+    if (isDecide(node) && node.gate) queue.push(node.gate.to);
+  }
+  return seen;
+}
 
 /**
  * Learn which keys a predicate reads by running it once against a recording

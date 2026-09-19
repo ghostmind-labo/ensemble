@@ -20,7 +20,7 @@ back is the change to question.
 
 ## Project map
 
-Thirteen files, and each one has a single job.
+Fifteen files, and each one has a single job.
 
 - `src/questions.ts` — `choice` / `score` / `noul`, their answer types, and the API limits enforced at authoring time
 - `src/jev.ts` — the decider: one `fetch` to `POST /v1/systemone`, plus the `Decider` seam
@@ -32,12 +32,15 @@ Thirteen files, and each one has a single job.
 - `src/validate.ts` — the proof. Returns problems as strings, never throws
 - `src/graph.ts` — `graph.json`
 - `src/execute.ts` — the cursor, `run.json`, and the `RunEvent` stream
+- `src/calibrate.ts` — does a decision work: accuracy, calibration gap and gate prices against labelled cases, one decide node at a time
+- `src/supervise.ts` — the brainstem: a runner as a loop that lives for days. Memory, budgets, rest, journal and resume, a watcher runner
 - `src/report.ts` — the terminal reporter (one consumer of `RunEvent`, not the only possible one)
 - `src/runner.ts` — ties them into a callable; `src/index.ts` — the public surface
-- `src/cli.ts` — `validate` / `graph` / `run`
+- `src/cli.ts` — `validate` / `graph` / `run` / `calibrate` / `check` / `skills` / `servers`
 
-`examples/` — three runnable runners, each with a header comment saying what it
-demonstrates. `test/` — one `*.test.mts` per suite, auto-discovered by
+`examples/` — seven runnable runners, each with a header comment saying what it
+demonstrates. `06-watch` is a watcher runner that also supervises `01-triage`
+when executed directly; `07-senses` forks three lanes, joins them, and remembers. `test/` — one `*.test.mts` per suite, auto-discovered by
 `test/run.mts`.
 
 `plugin/` + `.claude-plugin/marketplace.json` — the Claude Code plugin (marketplace
@@ -48,7 +51,9 @@ an agent to use the library: `ensemble-build` (use case → validated runner, wi
 `ensemble-runs` (reading and tuning runs, with `scripts/summarize.mts`).
 
 The skills present ensemble as a **structure** (a graph, a shared state with a proven
-data flow, and a run record), not as a closed toolbox. Inside a `work` handler or
+data flow, and a run record), not as a closed toolbox. They install it as a library
+and drive it through `package.json` scripts and a `run.mts` that imports the runner;
+they never tell anyone to install `ensemble` globally. Inside a `work` handler or
 `code` node the user's runner may import any library, SDK or agent framework, and a
 runner is just a script that can be called without the CLI. The zero-dependency and
 OpenRouter-only rules bind this package, never the runners built with it. Don't write
@@ -66,7 +71,7 @@ not what it does. Match that when adding one.
 | `node test/<name>.test.mts` | Run one suite directly |
 | `npm run typecheck` | `tsc --noEmit` over `src/` |
 | `npm run build` | `rm -rf dist && tsc -p tsconfig.build.json` |
-| `node src/cli.ts <cmd>` | The CLI from this checkout — use this, not a globally installed `ensemble` |
+| `node src/cli.ts <cmd>` | The CLI from this checkout. It is never installed globally: users reach it through `package.json` scripts |
 
 `npx tsc` does **not** work here; use `./node_modules/.bin/tsc`.
 </important>
@@ -103,7 +108,8 @@ string-vs-object, and `steps[].took` joining a run to `graph.edges[].id`.
 <important if="you are adding a node kind, an edge form, or a question type">
 
 There are five node kinds (`decide`, `work`, `code`, `model`, `mcp`), two branch forms
-(`on:` for meaning, `when:` for arithmetic) and three questions. Each is a closed set,
+(`on:` for meaning, `when:` for arithmetic), one form of parallelism (`fork` on an
+edge, `join` on a node) and three questions. Each is a closed set,
 and the closed-ness is the feature — it is what lets `validate` prove
 exhaustiveness and `graph` emit a complete document. Adding a fourth of anything
 needs a reason that survives that argument.
@@ -119,10 +125,24 @@ If one is added anyway: a node kind needs an `isX` guard in `spec.ts`, a
 `execute` arm, and a badge in `report.ts`.
 </important>
 
+<important if="you are touching lanes, forks, joins, or anything concurrent">
+
+Parallelism is exactly two facts: a forking edge fires alongside the other forks
+from its node (each on its own lane), and a join node runs once after every lane
+has arrived. A node's edges are all forks or none. `validate` proves that lanes
+between a fork and its join share no node and touch no common state key (writes
+against writes AND writes against reads), so the merge never depends on timing.
+The scheduler in `execute.ts` fires joins only when no lane is running, and the
+first reason to stop wins (`halt`). A failing lane aborts its siblings through the
+one shared controller. Do not add a variable-width fan-out: that is a handler's
+job, and the graph could no longer say what runs.
+</important>
+
 <important if="you are changing validation or the data graph">
 
-State keys have exactly two origins: the runner's `inputs` (plus `goal`, always)
-and a node's writes — a decide node writes one key per question, and a model node
+State keys have exactly three origins: the runner's `inputs` (plus `goal`, always),
+its `memory` (keys carried in from the previous tick by `supervise`, which must have
+a writer) and a node's writes — a decide node writes one key per question, and a model node
 writes positionally (`[text]` or `[text, images]`). Everywhere else, ONE write key
 takes the return value whole and several destructure it; returning `{ rounds: n }`
 for `writes: ["rounds"]` nests it as `rounds.rounds`, which validation cannot

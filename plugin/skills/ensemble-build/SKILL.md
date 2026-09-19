@@ -1,6 +1,6 @@
 ---
 name: ensemble-build
-description: Build a working @ghostmind-dev/ensemble runner for a use case, end to end and without a human in the loop. It covers breaking the use case down, drawing the graph, writing the .mts file, validating it, dry-running every branch for $0, and a preflight check. Use this whenever someone wants to automate a decision, route or triage requests, build a classifier-driven workflow, wire Jev / TypeSafe System One into code, make a perception loop (a model looks, something decides, code acts), or asks to "set up ensemble for X". Also use it for any runner(...) .mts file, any graph of decide / work / code / model / mcp nodes, or an existing runner that needs new branches, questions or nodes, even when the word "ensemble" never appears.
+description: Build a working @ghostmind-dev/ensemble runner for a use case, end to end and without a human in the loop. It covers breaking the use case down, drawing the graph, writing the .mts file, validating it, dry-running every branch for $0, and a preflight check. Use this whenever someone wants to automate a decision, route or triage requests, build a classifier-driven workflow, wire Jev / TypeSafe System One into code, make a perception loop (a model looks, something decides, code acts), or asks to "set up ensemble for X". Also use it for any runner(...) .mts file, any graph of decide / work / code / model / mcp nodes, or an existing runner that needs new branches, questions or nodes, even when the word "ensemble" never appears. Also use it to make a runner run for days (supervise, memory between ticks, budgets, a watcher that monitors drift).
 ---
 
 # Building an ensemble runner
@@ -21,9 +21,25 @@ something, write it in a handler with whatever library does. The zero-dependency
 rule applies to the ensemble package itself, not to the runners people build
 with it.
 
-**A runner is just a script.** The CLI is optional. Import the runner and call
-it (`await r({ goal })`) from a plain `.mts` file, a server, a cron job or
-another runner. See `references/api.md` §7.
+**A runner is just a script, and the library is a dependency, not a tool.**
+Install it in the project (`npm i @ghostmind-dev/ensemble`) and never globally.
+The way a runner runs is a script that imports it: `await r({ goal })` from a
+`run.mts`, a server, a cron job or another runner (`references/api.md` §7).
+The CLI exists for the development loop only, reached through `package.json`
+scripts so the version is the project's:
+
+```json
+"scripts": {
+  "validate":  "ensemble validate",
+  "graph":     "ensemble graph",
+  "check":     "ensemble check",
+  "calibrate": "ensemble calibrate",
+  "start":     "node run.mts"
+}
+```
+
+Then `npm run validate -- runners/triage.mts`. Add these scripts if the project
+lacks them; do not tell the user to install `ensemble` on their machine.
 
 You are expected to take a use case from a sentence to a runner that validates,
 dry-runs down every branch and is ready to go live, without asking a human to
@@ -39,6 +55,8 @@ anything, because the rules below fall out of it:
 | **Perception and generation**: looking at an image, writing text, drawing | a `model` node (OpenRouter), or any SDK in a `work` handler | Jev takes text only and does not generate. The `model` node puts the model and its cost in the graph; a handler gives you any vendor-specific feature |
 | **Effects**: send, store, call an API, page a person | a `work` handler | Any library, any API. That seam belongs to the user |
 | **One tool call** | an `mcp` node | A single named call, so the graph says what it can reach |
+| **Several things at once** | `fork: true` edges meeting at a `join: "all"` node | Lanes run concurrently; `validate` proves they never touch the same key |
+| **What survives between ticks** | `memory: [...]` on the runner, written by a node | Declared, so the graph says what the system remembers |
 
 The library doesn't ship an agent loop, a prompt library or parallel groups, but
 nothing stops a handler from containing one. An agent that picks its own tools
@@ -51,8 +69,9 @@ in `graph.json` and `run.json`. Use a handler where they aren't known.
 
 1. **Node ≥ 22.18.** Runner files are `.mts` and load by Node's own type
    stripping, so there is no build step. Check with `node -v`.
-2. **The v2 library.** Versions below 0.26 on npm are an older, unrelated product
-   (scenes, a viewer) with a different API. Confirm what's installed:
+2. **The v2 library, installed locally.** Versions below 0.26 on npm are an
+   older, unrelated product (scenes, a viewer) with a different API. Confirm
+   what's installed in this project:
    `node -e "import('@ghostmind-dev/ensemble').then(m=>console.log(typeof m.choice))"`
    must print `function`. If it doesn't, run `npm view @ghostmind-dev/ensemble version`.
    If the registry is below 0.26, install from a local checkout
@@ -151,6 +170,13 @@ The mistakes that validation *cannot* catch, so avoid them as you write:
   `unknown`, and a throw fails the run.
 - **Loops need `maxLoops` on the back-edge**, plus a following edge that takes
   over once the budget is spent.
+- **Lanes own their keys.** When edges fork, each lane writes keys no other lane
+  writes or reads, and they meet at a `join: "all"` node. Combine after the
+  join. `validate` names the offending key, so this is caught, but design for
+  it up front.
+- **Memory is written by a node.** A key in `memory: [...]` must have a writer,
+  usually a `code` node that appends and trims. It is what the next tick starts
+  with, so keep it small.
 
 Never hardcode a model id from memory. Ids retire and prices move weekly. Look it
 up live
@@ -161,7 +187,7 @@ and `model: { from: "key" }`. See the model-selection pattern.
 ### 4. Validate (free, offline)
 
 ```sh
-npx ensemble validate runners/<name>.mts
+npm run validate -- runners/<name>.mts
 ```
 
 Repeat until it prints `✓ <name> is sound`. Every message names its own fix, and
@@ -172,7 +198,7 @@ The exhaustiveness check is the point.
 ### 5. Inspect the graph (free, offline)
 
 ```sh
-npx ensemble graph runners/<name>.mts | jq '{nodes: [.nodes[] | {id, kind, cost, reads, writes}], edges, data}'
+npm run graph -- runners/<name>.mts | jq '{nodes: [.nodes[] | {id, kind, cost, reads, writes}], edges, data}'
 ```
 
 Read it as a stranger would. Does every question have the options you intended?
@@ -215,7 +241,7 @@ each value has the shape the next node expects.
 ### 7. Preflight (free, reads the live catalogue)
 
 ```sh
-npx ensemble check runners/<name>.mts
+npm run check -- runners/<name>.mts
 ```
 
 This checks that each named model id exists and can do what its node asks
@@ -229,19 +255,34 @@ capable. It does **not** check tool-calling support, and
 it shouldn't: an `mcp` node makes the call itself, so any model can sit
 downstream of any tool.
 
-### 8. A live run: only when asked
+### 8. Calibrate the decisions: only when asked
+
+Validation proves the wiring and dry runs prove the plumbing, but neither says
+whether the decisions are right. When the user wants to know if it works, or
+before trusting a gate, write 20–200 labelled cases and run
+`npm run calibrate -- runners/<name>.mts cases.jsonl --budget 0.05`. It costs about
+$0.00002 a case. Use the `gates` table to set each `gate.min`. See
+`references/api.md` §9 and the `ensemble-runs` skill.
+
+### 9. A live run: only when asked
 
 A decide step costs about $0.00002 and model calls cost more. Don't launch a paid
 run unless the user asked for one. When they do, always cap it:
 
-```sh
-npx ensemble run runners/<name>.mts "goal" --budget 0.05
+```ts
+// run.mts — node run.mts "goal"
+import r from "./runners/<name>.mts";
+const { result, run } = await r({ goal: process.argv[2] ?? "" }, { budget: 0.05 });
+console.log(result);
 ```
 
-The run writes `.ensemble/runs/<id>/run.json` and `graph.json`. To read one, debug
+Prefer this over the CLI's `run`: it is how the runner will be called in
+production, and it is where `supervise` goes when the runner is one tick of
+something longer. From the terminal, `npx ensemble run runners/<name>.mts "goal" --budget 0.05`
+writes `.ensemble/runs/<id>/run.json` and `graph.json`. To read one, debug
 a path or tune thresholds from real answers, use the **`ensemble-runs`** skill.
 
-### 9. Hand over
+### 10. Hand over
 
 Report back briefly with:
 
@@ -266,6 +307,12 @@ becoming a framework:
 - **Compose runners.** A `work` handler can call another runner
   (`await sub({ goal }, { signal })`) and `report()` its cost. Each runner stays
   small, provable and separately testable.
+- **Run for days.** When the runner is one tick of something that keeps going
+  (a queue, a camera, a schedule, an agent doing long work), wrap it in
+  `supervise()`: memory between ticks, a total and daily budget, a journal it
+  resumes from after a crash, a stop after repeated failures, and a watcher
+  runner that asks Jev every few ticks whether the work is still on track.
+  Pattern 12.
 - **Fan out by asking, not by branching.** Five independent yes/no checks are
   five `noul`s in one node, then ordered edges or a `code` node that combines
   them. There are no parallel node groups.

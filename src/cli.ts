@@ -4,8 +4,8 @@
  *
  * The product is the library: a runner belongs inside your server, called as an
  * ordinary function. What you want from a terminal is narrower — prove a graph,
- * emit it, run it once to see what happens. So there are four commands, and
- * three of them are free and offline.
+ * emit it, run it once to see what happens, and score its decisions against
+ * cases someone labelled. validate and graph are free and offline.
  *
  * Everything that is data goes to stdout so it can be piped; everything that is
  * commentary goes to stderr. `ensemble graph x.mts | jq` is the point.
@@ -16,6 +16,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isRunner, type Runner } from "./runner.ts";
 import { RunFailed, RunnerError } from "./execute.ts";
+import { calibrate, CalibrationError, type Calibration, type Case } from "./calibrate.ts";
 import { money, reporter } from "./report.ts";
 import { loadSkills, validateSkill } from "./skills.ts";
 import { describeServer, isRunnable, missingEnv, preflight, searchServers, searchSkills } from "./registry.ts";
@@ -42,6 +43,8 @@ Usage
   ensemble validate <file>          Prove the graph. Free, offline.
   ensemble graph <file>             Emit graph.json to stdout. Free, offline.
   ensemble run <file> [goal]        Run it once; writes run.json.
+  ensemble calibrate <file> <cases> Score its decisions against labelled cases
+                                    (.jsonl or a .json array). ~$0.00002 a case.
   ensemble check <file>             Can it run HERE? Model capabilities, keys,
                                     MCP servers. Reads the live catalogue.
   ensemble skills [query]           Skills visible here — and what to fix.
@@ -53,9 +56,10 @@ Options
   -o, --out <path>   graph: write here instead of stdout
                      run:   write run.json here instead of .ensemble/runs/<id>/
       --json         run: print run.json to stdout instead of writing a file
+                     calibrate: print the report as JSON
       --input k=v    run: seed a state key (repeatable)
       --remote       skills: search the public index instead of this machine
-      --budget <usd> run: stop once the run costs more than this
+      --budget <usd> run, calibrate: stop once it costs more than this
       --max-steps <n> run: cap node executions (default 50)
 
 The file must default-export a runner(). Scenes are .mts, loaded by Node's own
@@ -92,6 +96,26 @@ function report(problems: string[], name: string): void {
   process.stderr.write(`✗ ${name} — ${problems.length} problem${problems.length === 1 ? "" : "s"}\n`);
   for (const problem of problems) process.stderr.write(`  · ${problem}\n`);
   process.exit(1);
+}
+
+const pct = (n: number | null): string => (n === null ? "—" : `${(n * 100).toFixed(1)}%`);
+
+function printCalibration(c: Calibration): void {
+  process.stderr.write(`${c.runner} · ${c.cases} cases · ${c.asked} asked · ${money(c.cost)}${c.stopped ? ` · stopped: ${c.stopped}` : ""}\n`);
+  for (const q of c.questions) {
+    const extra = q.brier !== undefined ? ` · brier ${q.brier}` : q.meanError !== undefined ? ` · off by ${q.meanError}` : "";
+    process.stderr.write(
+      `\n  ${q.node}.${q.key}  ${q.type} · n=${q.n} · right ${pct(q.accuracy)} · confidence ${q.confidence.toFixed(2)} · gap ${q.gap.toFixed(3)}${extra}\n`,
+    );
+    for (const gate of q.gates ?? []) {
+      process.stderr.write(`    gate min ${gate.min.toFixed(1)} → keeps ${pct(gate.keeps)}, ${pct(gate.accuracy)} of those right\n`);
+    }
+    for (const miss of q.misses.slice(0, 10)) {
+      process.stderr.write(`    miss case ${miss.case}: expected ${miss.expected}, got ${miss.got} @ ${miss.confidence}\n`);
+    }
+    if (q.misses.length > 10) process.stderr.write(`    … ${q.misses.length - 10} more misses (--json for all)\n`);
+  }
+  process.stderr.write(`\n  gap is |confidence − accuracy|: near 0 means a gate can be trusted.\n`);
 }
 
 async function main(): Promise<void> {
@@ -213,6 +237,36 @@ async function main(): Promise<void> {
       return;
     }
 
+    case "calibrate": {
+      const runner = await load(file);
+      const problems = runner.validate();
+      if (problems.length) report(problems, runner.spec.name);
+      const casesPath = rest[0];
+      if (!casesPath) die("no cases given — ensemble calibrate <file.mts> <cases.jsonl>");
+      let cases: Case[];
+      try {
+        const raw = readFileSync(resolve(casesPath!), "utf8").trim();
+        cases = raw.startsWith("[")
+          ? (JSON.parse(raw) as Case[])
+          : raw.split("\n").filter((line) => line.trim()).map((line) => JSON.parse(line) as Case);
+      } catch (error) {
+        return die(`could not read ${casesPath}: ${(error as Error).message}`);
+      }
+      try {
+        const calibration = await calibrate(runner, cases, { budget: num(values.budget) });
+        if (values.json) process.stdout.write(`${JSON.stringify(calibration, null, 2)}\n`);
+        else printCalibration(calibration);
+      } catch (error) {
+        if (error instanceof CalibrationError) {
+          process.stderr.write(`✗ ${casesPath} — ${error.problems.length} problem${error.problems.length === 1 ? "" : "s"}, nothing was asked\n`);
+          for (const problem of error.problems) process.stderr.write(`  · ${problem}\n`);
+          process.exit(1);
+        }
+        die((error as Error).message);
+      }
+      return;
+    }
+
     case "skills": {
       const query = [file, ...rest].filter(Boolean).join(" ").toLowerCase();
 
@@ -276,7 +330,7 @@ async function main(): Promise<void> {
     }
 
     default:
-      die(`unknown command "${command}" — try: validate, graph, run, skills, servers, version`);
+      die(`unknown command "${command}" — try: validate, graph, run, calibrate, check, skills, servers, version`);
   }
 }
 

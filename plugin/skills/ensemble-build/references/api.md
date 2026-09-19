@@ -9,10 +9,13 @@ guessing.
 2. The three questions
 3. Node kinds: decide · work · code · model · mcp
 4. Edges and the `on:` grammar
-5. State and writes
+4b. Parallel lanes: fork and join
+5. State, writes and memory
 6. Handlers
 7. Calling a runner: RunOptions, outcome, errors
 8. Other exports
+9. calibrate: scoring decisions against labelled cases
+10. supervise: a runner that lives for days
 
 ---
 
@@ -23,6 +26,7 @@ export default runner({
   name: "triage",                 // required; appears in graph.json and run ids
   description?: "one line",
   inputs?: ["goal", "path"],      // keys that arrive from outside; goal is always one
+  memory?: ["seen"],              // keys that carry over between ticks under supervise; a node must write them
   work?: { handlerName: (ctx) => value },
   nodes: { nodeName: NodeSpec },  // required, at least one
   edges?: Edge[],
@@ -154,7 +158,7 @@ branch reaches them, and stop when the run ends. A tool of `"none"` or empty
 ## 4. Edges
 
 ```ts
-{ from, to, on?: "grammar", when?: (s) => boolean, maxLoops?: n }
+{ from, to, on?: "grammar", when?: (s) => boolean, maxLoops?: n, fork?: true }
 ```
 
 - `on` is for **meaning**. It must leave the decide node that asked the
@@ -184,11 +188,38 @@ branch reaches them, and stop when the run ends. A tool of `"none"` or empty
 A score has **no** `on:` form. Branch on it with
 `when: (s) => Number(s.severity) >= 1.5`.
 
-## 5. State and writes
+### 4b. Parallel lanes: fork and join
 
-State is a flat blackboard. Keys come from exactly two places: `inputs` (plus
-`goal`) and node `writes`. Validation proves every key read has one of these
-origins.
+```ts
+edges: [
+  { from: "sense", to: "look",   fork: true },
+  { from: "sense", to: "listen", fork: true },
+  { from: "look", to: "assess" }, { from: "listen", to: "assess" },
+],
+nodes: { assess: { join: "all", decide: {…}, reads: ["scene", "heard"] } }
+```
+
+- A **forking edge** fires alongside every other forking edge from its node
+  that holds, each starting its own lane. A node's edges are all forks or none.
+  A fork may carry `on:` or `when:`, so a decide node can fan out to only the
+  lanes it chose.
+- A **join** (`join: "all"` on any node kind) runs once, after every lane
+  leading to it has arrived or ended. It needs at least two incoming edges and
+  cannot be the entry.
+- Lanes between a fork and its join must not share a node, and must not write a
+  key another lane writes or reads. `validate` refuses both, naming the key.
+  Write to separate keys and combine them after the join.
+- One controller covers every lane: `budget`, `stepTimeout`, `signal` and a
+  failure on any lane stop all of them. The first reason to stop is the one
+  recorded.
+- No variable-width fan-out. N parallel calls over a list is a `work` handler.
+
+## 5. State, writes and memory
+
+State is a flat blackboard. Keys come from exactly three places: `inputs` (plus
+`goal`), `memory` (carried in from the previous tick) and node `writes`.
+Validation proves every key read has one of these origins, and that every
+memory key has a writer (otherwise it could never change).
 
 - `writes: []` or omitted means the node only has an effect.
 - `writes: ["k"]` means the return value is stored **whole** under `k`.
@@ -212,6 +243,16 @@ work: {
 `state` is read-only. Return values follow the writes rules above. A throw fails
 the run with `RunFailed`, which carries the partial run record.
 
+### Every step's record
+
+Each entry in `run.json`'s `steps[]` carries: `n`, `node`, `kind`, `lane`
+(`"main"`, the forking edge id that started the lane, or the join node's name),
+`started`/`ended` (ISO) and `ms`, `cost`, `asked` (the state the node was given,
+per its declared reads), `writes`, `answers` (decide: full distributions),
+`gate`, `handler`, `meta`, `error`, `took` (the edge id, `"gate"`, or null) and
+`forked` (the edge ids a fork step fired). `asked` is what an audit or a replay
+needs; a work handler sees the whole state, but only what it declared is kept.
+
 ## 7. Calling a runner
 
 ```ts
@@ -220,6 +261,7 @@ const { result, state, run } = await myRunner(
   {
     budget?: 0.05,        // USD; stops once exceeded
     maxSteps?: 50,        // default 50
+    stepTimeout?: 30_000, // ms; fail any step that runs longer, and abort its signal. Off by default
     signal?: AbortSignal,
     decider?: Decider,    // stub or replace Jev: (state, questions) => Promise<Decision>
     caller?: Caller,      // stub or replace OpenRouter
@@ -260,5 +302,95 @@ A stub decider returns
 | `jev(config)`, `openrouter(config)` | The default decider and caller, configurable |
 | `reporter()` | The terminal progress view, an `onEvent` consumer |
 
-CLI: `ensemble validate | graph | run | check | skills [q] [--remote] | servers [q]`.
+| `calibrate(runner, cases, opts)` | Score decide nodes against labelled cases. See §9 |
+| `supervise(runner, opts)` | Run a runner as a long-lived loop. See §10 |
+
+CLI (through `package.json` scripts, never global):
+`ensemble validate | graph | run | calibrate <file> <cases> | check | skills [q] [--remote] | servers [q]`.
 Run options: `--input k=v`, `--budget`, `--max-steps`, `--json`, `-o`.
+
+## 9. calibrate(runner, cases, options?)
+
+Tests decide nodes in isolation, the way you test one neuron: each case gives
+the state the node reads, and nothing else runs (no handler, no model).
+
+```ts
+const report = await calibrate(triage, [
+  { inputs: { goal: "charged twice" }, expect: { route: "billing" } },          // bare key if one node asks it
+  { inputs: { goal: "where is it", plan: "vip" }, expect: { "screen.urgent": true, "route.anger": 1 } },
+], { budget: 0.05, concurrency: 4, decider? });
+```
+
+- `expect` values: a choice takes an option name, a noul `true`/`false`, a score
+  its **0-based** level (right when the fractional score rounds to it).
+- Every key the tested node `reads` must be in `inputs`, even keys a model node
+  would normally write. Put the text that node would have produced there.
+- A bad case set throws `CalibrationError` (`.problems`) **before anything is
+  asked**, so it costs nothing.
+- One decider call per case per node, so several questions in one node cost one call.
+
+The report has, per question: `n`, `accuracy`, `confidence` (mean), `gap`
+(expected calibration error; near 0 means confidence can be trusted), `misses`
+(`{ case, expected, got, confidence }`), plus `brier` for a noul, `meanError`
+for a score, and `gates` for a choice or score:
+`[{ min, keeps, accuracy }]`, meaning a gate at `min` keeps this share of cases
+and gets this share of those right. Set `gate.min` from that table.
+
+CLI: `npm run calibrate -- runner.mts cases.jsonl [--budget 0.05] [--json]`. It
+reads one case per line, or a JSON array.
+
+## 10. supervise(runner, options)
+
+A runner is one tick. `supervise` runs it again and again: memory between
+ticks, budgets, a crash-safe journal, a failure streak limit, signal handling,
+and an optional watcher runner that judges drift.
+
+```ts
+const outcome = await supervise(worker, {                // worker declares memory: ["notes"]
+  next: async ({ tick, memory, last, signal }) => ({ goal: await queue.pop() }), // undefined ends it
+  memory: { notes: "" },                     // starting values; ignored once a checkpoint exists
+  budget: { total: 20, perDay: 5, perRun: 0.05 }, // total stops; perDay RESTS until spend ages out; perRun caps each tick
+  maxTicks: 10_000,
+  pace: 60_000,                              // ms between tick starts
+  maxStreak: 5,                              // stop after this many failed ticks in a row
+  window: 20,                                // ticks the vitals look back over
+  run: { stepTimeout: 120_000 },             // any RunOptions except budget/signal/onEvent
+  watch: { every: 10, runner: watcher, goal: "…", run: { … } },
+  journal: ".ensemble/live",                 // journal.jsonl, checkpoint.json, pulse.json, lock; resumes on restart
+  resume: true,                              // default
+  signals: true,                             // default: SIGTERM/SIGINT stop after the tick in flight; twice aborts
+  signal,
+  onEvent: (e) => {},                        // start · tick · rest · watch · alert · stop
+  onRunEvent: (e, tick) => {},               // each tick's node events, e.g. reporter()
+  onAlert: async ({ tick, reason, vitals }) => {}, // your effect: page someone
+});
+// → { status: "exhausted" | "maxTicks" | "budget" | "failing" | "stopped" | "cancelled", ticks, spent, memory, vitals }
+```
+
+**Memory** is the runner's declared `memory` keys. The supervisor injects them
+into every tick's inputs (they win over anything `next()` sets) and, after a
+completed tick, keeps what the graph wrote to them. A tick that fails leaves
+memory untouched. Keep it small: a tally or the last few results, not a
+transcript. Jev gets worse on padded state.
+
+**Vitals** are numbers over the last `window` ticks: `tick, ticks, failed,
+failureRate, gateRate, confidence, sameness, streak, cost, spent, spentToday,
+msPerTick`. `sameness` is the share of ticks that took the most common path.
+
+**The watcher** is an ordinary runner that declares
+`inputs: ["goal", "vitals", "recent"]` and has a `result` of `"continue"`,
+`"alert"` or `"stop"`. `vitals` is the object above, for `when:` edges.
+`recent` is plain text, one line per tick (`tick 7 · completed · a → b · said: …`),
+for decide nodes. Check the numbers first in code, and ask Jev only about meaning.
+Any other result, or a watcher that throws, becomes an alert. Watcher cost counts
+toward the budget. See `examples/06-watch/watch.mts`.
+
+**The journal** is `journal.jsonl`, appended as things happen. It holds `step`
+lines as each node finishes (with `lane` and `asked`), a `run` line per tick with
+the whole run.json, `watched` lines with the watcher's run, and the supervisor's
+own events. `checkpoint.json` holds tick, spend, memory and the window, and is
+replaced atomically after every tick. `pulse.json` is rewritten on every node
+event: if its `at` goes stale, the process is stuck or dead. `lock` holds the
+pid of the one supervisor allowed on this journal; a second one is refused
+while the first is alive, and a stale lock is taken over. Run lines hold the
+whole state, so keep images as URLs, not data: URLs.

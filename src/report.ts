@@ -30,7 +30,9 @@ const BADGE: Record<RunStep["kind"], string> = { decide: "?", work: "⚙", code:
 
 /** What a finished step said, in one line. */
 export function summarise(step: RunStep, color = false): string {
-  const head = `${BADGE[step.kind]} ${step.node.padEnd(16)} ${dim(`${String(step.ms).padStart(6)}ms ${money(step.cost).padStart(10)}`, color)}`;
+  // A lane tag only when there is more than one lane to tell apart.
+  const name = step.lane && step.lane !== "main" ? `${step.node} ${dim(`[${step.lane}]`, color)}` : step.node;
+  const head = `${BADGE[step.kind]} ${name.padEnd(16 + (name.length - step.node.length))} ${dim(`${String(step.ms).padStart(6)}ms ${money(step.cost).padStart(10)}`, color)}`;
   if (step.error) return `${head}  ✗ ${step.error}`;
 
   if (step.answers) {

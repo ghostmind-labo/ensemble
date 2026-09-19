@@ -44,6 +44,21 @@ export type { Caller, CallerConfig, ModelCard, ModelFilter, ModelReply, ModelReq
 export { execute, RunFailed, RunnerError, RUN_SCHEMA } from "./execute.ts";
 export type { RunDoc, RunEvent, RunOptions, RunOutcome, RunStatus, RunStep, StepAnswer } from "./execute.ts";
 
+export { calibrate, CalibrationError } from "./calibrate.ts";
+export type { Calibration, CalibrateOptions, Case, GatePrice, Miss, QuestionReport } from "./calibrate.ts";
+
+export { supervise, vitalsOf, recentText } from "./supervise.ts";
+export type {
+  Stimulus,
+  SuperviseEvent,
+  SuperviseOptions,
+  SuperviseOutcome,
+  SuperviseStatus,
+  TickSummary,
+  Verdict,
+  Vitals,
+} from "./supervise.ts";
+
 export { toGraph, GRAPH_SCHEMA } from "./graph.ts";
 export type { GraphDoc, GraphEdge, GraphNode, GraphQuestion } from "./graph.ts";
 
