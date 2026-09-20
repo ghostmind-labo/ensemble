@@ -15,6 +15,15 @@
  * Supervision is a separate layer because the two fail differently. A tick
  * fails loudly and at once; a long-running system fails slowly, by drifting.
  *
+ * One rule about the watcher is worth stating plainly, because it is the whole
+ * reason it can be trusted: THE WATCHED WORK DOES NOT AUTHOR THE EVIDENCE. The
+ * vitals are computed here, from run records; `recent` is built here, from
+ * statuses and paths. What a tick actually SAID is withheld unless you ask for
+ * it (`watch.evidence: "facts+text"`), because a tick that processes untrusted
+ * input — a support message, a web page, a file — would otherwise be writing
+ * the text its own supervisor reads. A conscience the work can talk to is not a
+ * conscience.
+ *
  * Drift is watched two ways, mirroring the rest of the library. Arithmetic is
  * computed here, in code: failure rate, gate rate, spend, how often the same
  * path repeats. Meaning is asked of a WATCHER, which is just another runner:
@@ -127,8 +136,20 @@ export interface SuperviseOptions {
    * The conscience. Every `every` ticks, `runner` is called with
    * `{ goal, vitals, recent }` and its result must be "continue", "alert" or
    * "stop". Declare `vitals` and `recent` in its `inputs`.
+   *
+   * `evidence` decides what `recent` carries. `"facts"` (the default) is
+   * tick number, status, path and whether a gate fired — all written by the
+   * supervisor. `"facts+text"` adds what each tick returned, which is richer
+   * and is also the tick's own words: only use it where the work's output is
+   * trusted, never where a tick handles input from outside.
    */
-  watch?: { every: number; runner: Runner; goal?: string; run?: Omit<RunOptions, "signal" | "onEvent"> };
+  watch?: {
+    every: number;
+    runner: Runner;
+    goal?: string;
+    evidence?: "facts" | "facts+text";
+    run?: Omit<RunOptions, "signal" | "onEvent">;
+  };
   /** A directory. Everything is journalled there as it happens, and a restart resumes from it. */
   journal?: string;
   /** Resume from the journal's checkpoint when there is one. Default true. */
@@ -229,10 +250,18 @@ export function vitalsOf(recent: TickSummary[], tick: number, spent: number, led
   };
 }
 
-/** The recent ticks as plain text, one line each: what a watcher's decide node reads. */
-export function recentText(recent: TickSummary[]): string {
+/**
+ * The recent ticks as plain text, one line each: what a watcher's decide node
+ * reads. Facts only by default — everything on the line is written by the
+ * supervisor, not by the work being watched. `withText` adds each tick's own
+ * output, which is exactly the part an untrusted input could have steered.
+ */
+export function recentText(recent: TickSummary[], withText = false): string {
   return recent
-    .map((t) => `tick ${t.tick} · ${t.status}${t.gated ? " · unsure" : ""} · ${t.path.join(" → ")}${t.said ? ` · said: ${t.said}` : ""}`)
+    .map((t) => {
+      const facts = `tick ${t.tick} · ${t.status}${t.gated ? " · unsure" : ""} · ${t.path.join(" → ") || "no steps"} · ${t.ms}ms`;
+      return withText && t.said ? `${facts} · said: ${t.said}` : facts;
+    })
     .join("\n");
 }
 
@@ -458,7 +487,11 @@ export async function supervise(runner: Runner, options: SuperviseOptions): Prom
       let reason: string | undefined;
       try {
         const { result, run } = await options.watch.runner(
-          { goal: options.watch.goal ?? `keep "${runner.spec.name}" doing its job`, vitals: v, recent: recentText(recent) },
+          {
+            goal: options.watch.goal ?? `keep "${runner.spec.name}" doing its job`,
+            vitals: v,
+            recent: recentText(recent, options.watch.evidence === "facts+text"),
+          },
           { ...options.watch.run, signal },
         );
         charge(run.run.cost.total);

@@ -16,7 +16,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isRunner, type Runner } from "./runner.ts";
 import { RunFailed, RunnerError } from "./execute.ts";
-import { calibrate, CalibrationError, type Calibration, type Case } from "./calibrate.ts";
+import { calibrate, CalibrationError, type Calibration, type Case, type QuestionReport } from "./calibrate.ts";
 import { money, reporter } from "./report.ts";
 import { loadSkills, validateSkill } from "./skills.ts";
 import { describeServer, isRunnable, missingEnv, preflight, searchServers, searchSkills } from "./registry.ts";
@@ -45,6 +45,8 @@ Usage
   ensemble run <file> [goal]        Run it once; writes run.json.
   ensemble calibrate <file> <cases> Score its decisions against labelled cases
                                     (.jsonl or a .json array). ~$0.00002 a case.
+                                    --holdout <file> scores a second, frozen set
+                                    separately and reports the gap.
   ensemble check <file>             Can it run HERE? Model capabilities, keys,
                                     MCP servers. Reads the live catalogue.
   ensemble skills [query]           Skills visible here — and what to fix.
@@ -102,7 +104,18 @@ const pct = (n: number | null): string => (n === null ? "—" : `${(n * 100).toF
 
 function printCalibration(c: Calibration): void {
   process.stderr.write(`${c.runner} · ${c.cases} cases · ${c.asked} asked · ${money(c.cost)}${c.stopped ? ` · stopped: ${c.stopped}` : ""}\n`);
-  for (const q of c.questions) {
+  printQuestions(c.questions, c.holdout ? "dev" : undefined);
+  if (c.holdout) printQuestions(c.holdout, "holdout");
+  for (const g of c.gap ?? []) {
+    const verdict = g.drop >= 0.1 ? "  ← tuned to the dev cases" : g.drop <= -0.1 ? "  ← holdout is easier" : "";
+    process.stderr.write(`\n  ${g.node}.${g.key}  dev ${pct(g.dev)} → holdout ${pct(g.holdout)} (${g.drop >= 0 ? "-" : "+"}${pct(Math.abs(g.drop))})${verdict}\n`);
+  }
+  process.stderr.write(`\n  gap is |confidence − accuracy|: near 0 means a gate can be trusted.\n`);
+}
+
+function printQuestions(questions: QuestionReport[], set?: string): void {
+  if (set) process.stderr.write(`\n${set.toUpperCase()}\n`);
+  for (const q of questions) {
     const extra = q.brier !== undefined ? ` · brier ${q.brier}` : q.meanError !== undefined ? ` · off by ${q.meanError}` : "";
     process.stderr.write(
       `\n  ${q.node}.${q.key}  ${q.type} · n=${q.n} · right ${pct(q.accuracy)} · confidence ${q.confidence.toFixed(2)} · gap ${q.gap.toFixed(3)}${extra}\n`,
@@ -115,7 +128,6 @@ function printCalibration(c: Calibration): void {
     }
     if (q.misses.length > 10) process.stderr.write(`    … ${q.misses.length - 10} more misses (--json for all)\n`);
   }
-  process.stderr.write(`\n  gap is |confidence − accuracy|: near 0 means a gate can be trusted.\n`);
 }
 
 async function main(): Promise<void> {
@@ -130,6 +142,7 @@ async function main(): Promise<void> {
       input: { type: "string", multiple: true },
       budget: { type: "string" },
       "max-steps": { type: "string" },
+      holdout: { type: "string" },
       remote: { type: "boolean", default: false },
     },
   });
@@ -251,6 +264,17 @@ async function main(): Promise<void> {
           : raw.split("\n").filter((line) => line.trim()).map((line) => JSON.parse(line) as Case);
       } catch (error) {
         return die(`could not read ${casesPath}: ${(error as Error).message}`);
+      }
+      if (values.holdout) {
+        try {
+          const raw = readFileSync(resolve(values.holdout), "utf8").trim();
+          const held: Case[] = raw.startsWith("[")
+            ? (JSON.parse(raw) as Case[])
+            : raw.split("\n").filter((line) => line.trim()).map((line) => JSON.parse(line) as Case);
+          cases = [...cases, ...held.map((test) => ({ ...test, set: "holdout" as const }))];
+        } catch (error) {
+          return die(`could not read ${values.holdout}: ${(error as Error).message}`);
+        }
       }
       try {
         const calibration = await calibrate(runner, cases, { budget: num(values.budget) });

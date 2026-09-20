@@ -464,7 +464,11 @@ Design rules:
 - **Always set `stepTimeout` and `budget.total`.** A multi-day loop with neither
   can hang or overspend without anyone noticing.
 - **The watcher is calibrated like any runner.** Label a few `recent` texts as
-  on-track or drifting and run `ensemble calibrate` on it before trusting it.
+  on-track or drifting and run `ensemble calibrate` on it before trusting it,
+  with a `holdout` split so the wording is not fitted to the examples.
+- **The watched work must not author the evidence.** `recent` defaults to facts
+  the supervisor wrote. Opt into the tick's own output (`evidence: "facts+text"`)
+  only when that output cannot carry anything from outside the system.
 - **Dry-run the tick and the watcher separately.** Test `supervise` itself with
   a stub `decider` in `run` and `watch.run`, and `maxTicks: 3`.
 

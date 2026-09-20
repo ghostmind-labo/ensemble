@@ -70,6 +70,9 @@ not just the symptom.
 | `expects "k", which no decide node asks` | Wrong key | Use `node.key` as listed by `ensemble graph … \| jq '.nodes[].questions'` |
 | `which more than one node asks — write it as node.key` | A bare key is ambiguous | Use `node.key` |
 | `is a choice — expect one of …` / `a noul — expect true or false` / `a score — expect a level from 0 to N` | The label has the wrong type | Option name, boolean, or 0-based integer level |
+| `has set "…" — a case is "dev" or "holdout"` | A third set name | Cases are tuned against (`dev`, the default) or frozen (`holdout`) |
+| `gap` shows a drop of 0.1+ between dev and holdout | The questions were fitted to the dev cases | Rewrite the boundaries (`not_for`) from the holdout misses, then get NEW holdout cases — the old ones are now dev |
+| the watcher never mentions what a tick produced | Default: `recent` carries supervisor-written facts only | `watch: { evidence: "facts+text" }`, and only where the tick's output is trusted |
 | `did not finish within Nms` | `stepTimeout` fired: a handler, model or tool call hung | Find the slow call in the step's `node`. Raise the limit only if that call is legitimately slow |
 | status `failing`, alert `N ticks in a row did not complete` | `maxStreak` consecutive ticks failed | Read the `run` lines in `journal.jsonl` for the failing step's `error` |
 | alert `the watcher returned … — it must return "continue", "alert" or "stop"` | The watcher's `result` isn't one of the three | Make every watcher exit write one of the three strings, and set `result` or end on a node that returns it |
