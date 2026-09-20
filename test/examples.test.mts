@@ -27,6 +27,7 @@ const picture = await load("examples/02-picture/picture.mts");
 const refine = await load("examples/03-refine/refine.mts");
 const robot = await load("examples/04-robot/brain.mts");
 const studio = await load("examples/08-studio/studio.mts");
+const frontdesk = await load("examples/09-frontdesk/frontdesk.mts");
 
 // ── 1 · every example validates ─────────────────────────────────────────────
 for (const [name, example] of [
@@ -35,13 +36,14 @@ for (const [name, example] of [
   ["03-refine", refine],
   ["04-robot", robot],
   ["08-studio", studio],
+  ["09-frontdesk", frontdesk],
 ] as const) {
   assert.deepEqual(example.validate(), [], `${name} must be sound`);
 }
 console.log("ok · 1 every example validates clean");
 
 // ── 2 · every example serialises to a complete graph ────────────────────────
-for (const example of [triage, picture, refine, robot, studio]) {
+for (const example of [triage, picture, refine, robot, studio, frontdesk]) {
   const graph = example.graph();
   assert.deepEqual(JSON.parse(JSON.stringify(graph)), graph);
   assert.match(graph.runner.hash, /^sha256:/);
@@ -256,4 +258,61 @@ console.log("ok · 8 the senses example forks, joins once, and advances its memo
 }
 console.log("ok · 9 the studio example loops twice, then hands off; a memo skips the illustrator");
 
-console.log("9 cases");
+// ── 10 · 09 is every concept at once, and the graph says so ────────────────
+{
+  const graph = frontdesk.graph();
+  const kinds = new Set(graph.nodes.map((n) => n.kind));
+  assert.deepEqual([...kinds].sort(), ["code", "decide", "mcp", "model", "work"], "all five node kinds");
+
+  // three lanes, one join
+  assert.deepEqual(graph.edges.filter((e) => e.fork).map((e) => e.to), ["look", "pick_tool", "recall"]);
+  assert.deepEqual(graph.nodes.filter((n) => n.join).map((n) => n.id), ["triage"]);
+
+  // one call, three question types
+  const triage = graph.nodes.find((n) => n.id === "triage")!;
+  assert.deepEqual(triage.decide!.questions.map((q) => q.type), ["choice", "noul", "score"]);
+  assert.deepEqual(triage.decide!.gate, { on: "area", min: 0.65, to: "hand_off" });
+  assert.ok(!triage.reads.includes("screenshot"), "the decider never sees the image");
+
+  // memory, both keys, each with a writer
+  assert.deepEqual(graph.runner.memory, ["seen", "last_area"]);
+  const byKey = Object.fromEntries(graph.data.map((d) => [d.key, d]));
+  assert.deepEqual(byKey["seen"]!.producedBy, ["$memory", "recall"]);
+  assert.deepEqual(byKey["last_area"]!.producedBy, ["$memory", "remember"]);
+
+  // safety is first, and the loop has a budget with a following edge
+  assert.deepEqual(graph.edges[7]!.on, { question: "hazard", op: ">=", value: 0.6 });
+  assert.equal(graph.edges.find((e) => e.from === "tally" && e.to === "answer")!.maxLoops, 2);
+  assert.equal(graph.edges.filter((e) => e.from === "tally").at(-1)!.to, "hand_off");
+
+  // it runs: a hazard pages someone before anything is generated
+  let called = 0;
+  const caller: Caller = async (req: ModelRequest): Promise<ModelReply> => (
+    called++, { model: req.model, text: "x", images: [], usage: { input_tokens: 1, output_tokens: 1 }, cost: 0 }
+  );
+  const decider: Decider = async (_s: unknown, questions: Record<string, Question>) => {
+    const answers: Record<string, Answer> = {};
+    for (const key of Object.keys(questions)) {
+      answers[key] =
+        key === "area"
+          ? { type: "choice", choice: "bug", confidence: 0.9, probabilities: {} }
+          : key === "urgency" || key === "quality"
+            ? { type: "score", score: 0, confidence: 0.9, probabilities: {}, legend: {} }
+            : { type: "noul", noul: key === "hazard" ? 0.9 : 0.1 };
+    }
+    return { model: "stub", answers, usage: { input_tokens: 1, output_tokens: 0 }, cost: 0 };
+  };
+  const { result, run } = await frontdesk(
+    { goal: "the modal is blank", screenshot: "https://x/s.png", log_path: "README.md", seen: 3 },
+    { decider, caller },
+  );
+  assert.match(String(result), /^PAGED:/, "a hazard outranks the routing");
+  assert.equal(called, 1, "only the vision lane called a model; nothing was generated");
+  // A lane keeps the id of the forking edge that started it: read_log is the
+  // second node of lane e1, not a lane of its own.
+  assert.deepEqual(run.steps.map((s) => s.lane), ["main", "e0", "e1", "e2", "e1", "triage", "triage"]);
+  assert.equal(run.state["seen"], 4, "memory advanced in its own lane");
+}
+console.log("ok · 10 the frontdesk example carries every concept, and safety outranks the routing");
+
+console.log("10 cases");

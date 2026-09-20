@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/ghostmind-labo/ensemble/main/docs/images/hero.png" alt="ensemble — one calibrated decision, wired to your code" width="100%">
+  <img src="https://raw.githubusercontent.com/ghostmind-labo/ensemble/main/docs/images/hero.png" alt="ensemble — one calibrated decision, wired to your code" width="760">
 </p>
 
 <p align="center">
@@ -251,118 +251,145 @@ Nothing else is remembered — and that is visible too.
 
 ---
 
-# Demo 3 · A pipeline: four models, a loop, and if/then
+# Demo 3 · Everything at once
 
-The first two demos are one decision and one fan-out. Real graphs are longer
-than that. This one runs **four generative calls in sequence**, loops back while
-the work is not good enough, and branches three different ways — and every part
-of it is checked before a token is spent.
+The demos above isolate one idea each. This is what a graph looks like by its
+third week — **every concept in the library, in one file**, and every path
+through it proved for $0 before a token is spent.
+
+A support front desk: look at the screenshot, read the log and recall what has
+been seen before — **all three at the same time** — then decide once, answer
+with a skill inlined, have a second model critique it, score that critique, loop
+while it is weak, illustrate only if it matters, and deliver.
 
 ```mermaid
 flowchart TB
-  B{{"brief · decide<br/>format / depth / risk"}}
-  B -. "risk ≥ 0.6 — tried first" .-> H["hand_off · work"]
-  B --> P["pick_writer · code"]
-  P --> R["research · model ①"]
-  R --> W["write · model ②"]
-  W --> C["critique · model ③"]
-  C --> V{{"review · decide<br/>quality / unsupported"}}
-  V -->|"weak or unsupported"| T["tally · code"]
-  T -->|"maxLoops: 2"| W
-  T -. "budget spent" .-> H
-  V -->|"format = article"| I["illustrate · model ④"]
-  V --> S["ship · work"]
-  I --> S
+  ST["start · code"]
+  ST -. fork .-> LK["look · model 👁<br/>sees: screenshot"]
+  ST -. fork .-> PT["pick_tool · code"]
+  ST -. fork .-> RC["recall · code<br/>memory: seen"]
+  PT --> RL["read_log · mcp<br/>tool from state"]
+  LK --> TR{{"triage · decide · join: all<br/>area / hazard / urgency<br/>gate: area ≥ 0.65"}}
+  RL --> TR
+  RC --> TR
+  TR -. "1 · hazard ≥ 0.6" .-> AL["alarm · work"]
+  TR -. "2 · urgency ≥ 1.7 (when)" .-> AL
+  TR -->|"3 · area=cosmetic"| PK["park · work"]
+  TR -->|"4 · area=bug / question"| PS["pick_skill · code"]
+  PS --> CW["choose_writer · code<br/>catalog + shortlist"]
+  CW --> AN["answer · model<br/>id from state · skill inlined"]
+  AN --> CR["critique · model<br/>another vendor, in prose"]
+  CR --> RV{{"review · decide<br/>quality / grounded"}}
+  RV -->|"weak or ungrounded"| TL["tally · code"]
+  TL -->|"maxLoops: 2"| AN
+  TL -. "budget spent" .-> HO["hand_off · work"]
+  RV --> RM["remember · code<br/>memory: last_area"]
+  RM -->|"urgency ≥ 1 (when)"| CD["card · model 🎨"]
+  RM --> SN["send · work"]
+  CD --> SN
 ```
 
-**Four models, and not one of them judges anything.** A model researches, a model
-writes, a model critiques *in prose* — and then a `decide` node reads that prose
-and returns a calibrated score. Generation is open-ended and unrankable;
-judgement is closed and comparable. Mixing them is how a pipeline ends up with a
-critic whose verdict nobody can audit.
+**Every concept, and where it is:**
 
-```ts
-nodes: {
-  brief:       { decide: { format: choice(…), depth: choice(…), risk: noul(…) },
-                 reads: ["goal"], gate: { on: "format", min: 0.6, to: "hand_off" } },
-  pick_writer: { code: async (s) => …shortlist(await catalog(), …), reads: ["depth"], writes: ["writer"] },
+| Concept | In this graph |
+|---|---|
+| all five node kinds | `decide` (triage, review) · `work` (alarm, park, hand_off, send) · `code` (start, pick_tool, recall, pick_skill, choose_writer, tally, remember) · `model` (look, answer, critique, card) · `mcp` (read_log) |
+| all three questions, one call | `area` choice · `hazard` noul · `urgency` score — asked together at `triage` |
+| a confidence gate | `gate: { on: "area", min: 0.65, to: "hand_off" }` |
+| safety that outranks the gate | the `hazard>=0.6` edge is **declared first**, so it is tried first |
+| fork / join | three lanes from `start`, meeting at `join: "all"` on `triage` |
+| a model that looks | `look` with `sees: ["screenshot"]` — and `triage` reads `scene`, never the image |
+| a model that draws | `card`, writing `["caption", "image"]` positionally |
+| a model chosen at run time | `answer` with `model: { from: "writer" }`, resolved by `choose_writer` |
+| a skill, inlined | `pick_skill` returns a name (or `"none"`); `answer` takes `skills: { from: "skill" }` |
+| one MCP tool call | `read_log`, with `tool: { from: "tool" }` — the graph still says what it can reach |
+| memory across ticks | `memory: ["seen", "last_area"]`, written by `recall` and `remember` |
+| a loop with a budget | `{ from: "tally", to: "answer", maxLoops: 2 }`, then `tally → hand_off` |
+| both branch forms | `on: "area=bug"` (the node that asked) · `when: (s) => Number(s.urgency) >= 1.7` (arithmetic) |
 
-  research:    { model: "google/gemini-2.5-flash",        …, writes: ["notes"] },      // ①
-  write:       { model: { from: "writer" },               …, writes: ["draft"] },      // ② id from state
-  critique:    { model: "anthropic/claude-sonnet-4.5",    …, writes: ["critique"] },   // ③ another vendor
-  illustrate:  { model: "google/gemini-2.5-flash-image",  …, writes: ["caption", "image"] },  // ④ draws
-
-  review:      { decide: { quality: score(…), unsupported: noul(…) },
-                 reads: ["goal", "draft", "critique"] },                 // the critique IS the evidence
-  tally:       { code: (s) => Number(s.rounds ?? 0) + 1, writes: ["rounds"] },
-  ship:        { work: "publish", writes: ["outcome"] },
-  hand_off:    { work: "brief_a_human", writes: ["outcome"] },
-}
-```
-
-The edges are where the shape lives, and **order is the control flow** — first
-match wins:
+The edges are the control flow, and **order is part of it** — first match wins:
 
 ```ts
 edges: [
-  // Safety first, because it is first. Nothing is spent on a risky brief.
-  { from: "brief", to: "hand_off", on: "risk>=0.6" },
-  { from: "brief", to: "pick_writer" },
+  { from: "start", to: "look",      fork: true },   // three lanes, all forks or none
+  { from: "start", to: "pick_tool", fork: true },
+  { from: "start", to: "recall",    fork: true },
+  { from: "pick_tool", to: "read_log" },
+  { from: "look", to: "triage" }, { from: "read_log", to: "triage" }, { from: "recall", to: "triage" },
 
-  { from: "pick_writer", to: "research" }, { from: "research", to: "write" },
-  { from: "write", to: "critique" },       { from: "critique", to: "review" },
-
-  // ① back round while it is weak OR unsupported — arithmetic, so `when:`
+  // Safety outranks the gate and the routing, because it is declared first.
+  { from: "triage", to: "alarm", on: "hazard>=0.6" },
+  { from: "triage", to: "alarm", when: (s) => Number(s.urgency) >= 1.7 },
+  { from: "triage", to: "park",       on: "area=cosmetic" },
+  { from: "triage", to: "pick_skill", on: "area=bug" },
+  { from: "triage", to: "pick_skill", on: "area=question" },
+  …
   { from: "review", to: "tally", when: (s) => {
-      const quality = Number(s.quality), unsupported = Number(s.unsupported);
-      return quality < 1.5 || unsupported >= 0.5;     // read both BEFORE combining
+      const quality = Number(s.quality), grounded = Number(s.grounded);
+      return quality < 1.5 || grounded < 0.5;       // read both BEFORE combining
   } },
-  // ② `format` was answered at the brief, not here — so this is a when(), not an on:
-  { from: "review", to: "illustrate", when: (s) => s.format === "article" },
-  // ③ anything else is good enough, and needs no picture
-  { from: "review", to: "ship" },
-
-  { from: "tally", to: "write", maxLoops: 2 },   // the loop, and its budget
-  { from: "tally", to: "hand_off" },             // spent: two passes did not fix it
-  { from: "illustrate", to: "ship" },
+  { from: "review", to: "remember" },
+  { from: "tally", to: "answer", maxLoops: 2 },     // the loop, and its budget
+  { from: "tally", to: "hand_off" },                // spent: a person takes it
+  { from: "remember", to: "card", when: (s) => Number(s.urgency) >= 1 },
+  { from: "remember", to: "send" },
+  { from: "card", to: "send" },
 ]
 ```
 
-Three kinds of branch, and the difference is not stylistic:
-
-| | Use for | Example |
-|---|---|---|
-| `on:` | a **declared answer of the node that just asked** — static, drawable, provable | `on: "risk>=0.6"` |
-| `when:` | arithmetic, or a key written **earlier** in the run | `when: (s) => s.format === "article"` |
-| `maxLoops` | a budget on the edge itself; when spent it stops matching and the next edge takes over | `maxLoops: 2` |
-
-There is no loop counter in the engine and no `while` anywhere: a back-edge with
-a budget, plus a following edge, *is* the loop. That is why it terminates and why
-the graph can still be drawn.
-
-**Proving it without paying for it.** The dry run stubs every model and every
-decision, runs it once per declared answer, and prints the path each one took:
+**Proving thirteen paths for $0.** The dry run stubs Jev, OpenRouter and MCP,
+runs *your* handlers for real, and goes once per declared answer:
 
 ```
-✓ default                    brief → pick_writer → research → write → critique → review → tally →
-                             write → critique → review → tally → write → critique → review → tally → hand_off
-✓ brief.risk=0.9             brief → hand_off
-✓ review.quality=2           brief → pick_writer → research → write → critique → review → illustrate → ship
-  edges never taken: e8 (review→ship)
-✓ studio: 13/13 dry runs completed · $0
+✓ default              start → look → pick_tool → recall → read_log → triage → pick_skill → choose_writer →
+                       answer → critique → review → tally → answer → critique → review → tally →
+                       answer → critique → review → tally → hand_off
+✓ triage.hazard=0.9    start → look → pick_tool → recall → read_log → triage → alarm
+✓ triage.area=cosmetic start → look → pick_tool → recall → read_log → triage → park
+✓ triage gate tripped  start → look → pick_tool → recall → read_log → triage → hand_off
+  edges never taken: e17 (review→remember), e20 (remember→card), e21 (remember→send), e22 (card→send)
+✓ frontdesk: 13/13 dry runs completed · $0
 ```
 
-Read that first line: the writer ran three times — the first pass plus a budget
-of two — and then a person got it. And the report is honest about what it did
-*not* reach: `review→ship` needs a good draft **and** a non-article format, which
-`--explore` never combines because it varies one answer at a time. Force it, and
-the edge is proven live:
+Read the first line: three lanes ran, the writer ran three times — one pass plus
+a budget of two — and then a person got it. And the report is honest about what
+it did **not** reach: the tail needs a *good, grounded* draft, which `--explore`
+never produces because it varies one answer at a time. Force it and those edges
+are proven live:
 
 ```sh
-… --answer brief.format=memo --answer review.quality=2
+… --answer review.quality=2 --answer review.grounded=0.9                  # → remember → card → send
+… --answer review.quality=2 --answer review.grounded=0.9 --answer triage.urgency=0   # → remember → send
 ```
 
-Full source: [`examples/08-studio/studio.mts`](examples/08-studio/studio.mts).
+That is the whole development loop: **the graph tells you which branches you have
+never tested, and testing them costs nothing.**
+
+Full source: [`examples/09-frontdesk/frontdesk.mts`](examples/09-frontdesk/frontdesk.mts).
+A smaller version of the same shape, without the parallel lanes and MCP, is
+[`examples/08-studio`](examples/08-studio/studio.mts).
+
+---
+
+## Short runs and long runs
+
+Everything above is **one function call**. The frontdesk graph is three lanes in
+parallel, one ~100 ms decision, and a model or two: seconds to a couple of
+minutes, inside your request handler, your queue worker or your cron job.
+
+```ts
+const { result, run } = await frontdesk({ goal, screenshot, log_path });
+```
+
+At that scale the useful parts are the ones that cost nothing: `validate` before
+you deploy, `budget` and `stepTimeout` so one bad call cannot hang a request,
+and `run.json` so the answer can be explained afterwards.
+
+`supervise` is what you add **when the tick should repeat** — not something the
+tick needs in order to exist. Same graph, same guarantees; it just gains memory
+between runs, budgets across runs, a journal and a watcher. A two-minute run and
+a two-day loop are the same code, and you only pay for the second when you want
+it.
 
 ---
 
@@ -792,6 +819,7 @@ node plugin/skills/ensemble-build/scripts/dryrun.mts examples/07-senses/senses.m
 | [`06-watch`](examples/06-watch/watch.mts) | A conscience for a loop that runs for days — and it supervises `01-triage` when run directly |
 | [`07-senses`](examples/07-senses/senses.mts) | Look, listen and count at once: three forked lanes, one join, a memory key |
 | [`08-studio`](examples/08-studio/studio.mts) | The complex shape: four models in sequence, a budgeted loop, both branch forms, safety first |
+| [`09-frontdesk`](examples/09-frontdesk/frontdesk.mts) | **Everything at once**: five node kinds, three lanes, memory, a skill, MCP, a loop, and both branch forms |
 
 ---
 
