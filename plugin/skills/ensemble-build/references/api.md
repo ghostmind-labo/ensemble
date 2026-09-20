@@ -318,8 +318,16 @@ the state the node reads, and nothing else runs (no handler, no model).
 const report = await calibrate(triage, [
   { inputs: { goal: "charged twice" }, expect: { route: "billing" } },          // bare key if one node asks it
   { inputs: { goal: "where is it", plan: "vip" }, expect: { "screen.urgent": true, "route.anger": 1 } },
+  { inputs: { goal: "refund please" }, expect: { route: "billing" }, set: "holdout" },
 ], { budget: 0.05, concurrency: 4, decider? });
 ```
+
+**Split the cases.** `set: "dev"` (the default) is what you tune questions
+against; `set: "holdout"` is scored separately and should be read **once**,
+after the wording is frozen. Tuning against the cases that judge you is how a
+graph comes to score well on those cases and nowhere else. The report keeps the
+sets apart and adds `gap`, the dev-minus-holdout accuracy per question: a drop
+of 0.1 or more means the dev set is flattering you.
 
 - `expect` values: a choice takes an option name, a noul `true`/`false`, a score
   its **0-based** level (right when the fractional score rounds to it).
@@ -336,8 +344,9 @@ for a score, and `gates` for a choice or score:
 `[{ min, keeps, accuracy }]`, meaning a gate at `min` keeps this share of cases
 and gets this share of those right. Set `gate.min` from that table.
 
-CLI: `npm run calibrate -- runner.mts cases.jsonl [--budget 0.05] [--json]`. It
-reads one case per line, or a JSON array.
+CLI: `npm run calibrate -- runner.mts cases.jsonl [--holdout held.jsonl] [--budget 0.05] [--json]`.
+It reads one case per line, or a JSON array; `--holdout` tags a second file as
+the frozen set and prints both blocks plus the gap.
 
 ## 10. supervise(runner, options)
 
@@ -380,10 +389,18 @@ msPerTick`. `sameness` is the share of ticks that took the most common path.
 **The watcher** is an ordinary runner that declares
 `inputs: ["goal", "vitals", "recent"]` and has a `result` of `"continue"`,
 `"alert"` or `"stop"`. `vitals` is the object above, for `when:` edges.
-`recent` is plain text, one line per tick (`tick 7 · completed · a → b · said: …`),
-for decide nodes. Check the numbers first in code, and ask Jev only about meaning.
-Any other result, or a watcher that throws, becomes an alert. Watcher cost counts
-toward the budget. See `examples/06-watch/watch.mts`.
+`recent` is plain text, one line per tick, for decide nodes. Check the numbers
+first in code, and ask Jev only about meaning. Any other result, or a watcher
+that throws, becomes an alert. Watcher cost counts toward the budget. See
+`examples/06-watch/watch.mts`.
+
+**The watched work does not author the evidence.** By default `recent` carries
+only what the supervisor wrote — `tick 7 · completed · look → assess · 412ms`.
+`watch: { evidence: "facts+text" }` appends what each tick returned, which is
+richer and is also the tick's own words: use it where the work's output is
+trusted, never where a tick handles a support message, a web page, a file or
+anything else from outside. A conscience the work can talk to is not a
+conscience.
 
 **The journal** is `journal.jsonl`, appended as things happen. It holds `step`
 lines as each node finishes (with `lane` and `asked`), a `run` line per tick with

@@ -45,7 +45,7 @@ export { execute, RunFailed, RunnerError, RUN_SCHEMA } from "./execute.ts";
 export type { RunDoc, RunEvent, RunOptions, RunOutcome, RunStatus, RunStep, StepAnswer } from "./execute.ts";
 
 export { calibrate, CalibrationError } from "./calibrate.ts";
-export type { Calibration, CalibrateOptions, Case, GatePrice, Miss, QuestionReport } from "./calibrate.ts";
+export type { Calibration, CalibrateOptions, Case, CaseSet, GatePrice, Miss, QuestionReport } from "./calibrate.ts";
 
 export { supervise, vitalsOf, recentText } from "./supervise.ts";
 export type {

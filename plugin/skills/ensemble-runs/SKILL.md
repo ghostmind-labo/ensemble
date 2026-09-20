@@ -108,8 +108,13 @@ takes an option name, a noul `true`/`false`, a score its 0-based level):
 ```
 
 ```sh
-npm run calibrate -- runners/triage.mts cases.jsonl --budget 0.05
+npm run calibrate -- runners/triage.mts cases.jsonl --holdout held.jsonl --budget 0.05
 ```
+
+Split them: `set: "dev"` cases (the default) are what you tune the wording
+against, `set: "holdout"` cases are read once, after freezing. The report scores
+them apart and prints the drop between them — 0.1 or more means the questions
+have been fitted to the dev cases rather than to the job.
 
 It tests each decide node in isolation (no handlers, no model calls), refuses a
 malformed case set before spending anything, and prints per question: accuracy,

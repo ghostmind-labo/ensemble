@@ -173,4 +173,35 @@ console.log("ok · 4 a broken case set is refused with fixes, and costs nothing"
 }
 console.log("ok · 5 the budget stops a calibration part way and says so");
 
-console.log("5 cases");
+// ── 6 · dev and holdout are scored apart, and the gap is reported ──────────
+{
+  // Same question, easy on dev, hard on holdout: the shape overfitting takes.
+  const decider = scripted({
+    ...Object.fromEntries(Array.from({ length: 4 }, (_, i) => [`d${i}`, { queue: chose("billing", 0.9) }])),
+    ...Object.fromEntries(Array.from({ length: 4 }, (_, i) => [`h${i}`, { queue: chose(i < 1 ? "billing" : "orders", 0.9) }])),
+  });
+  const cases: Case[] = [
+    ...Array.from({ length: 4 }, (_, i) => ({ inputs: { goal: `d${i}`, plan: "x" }, expect: { queue: "billing" } })),
+    ...Array.from({ length: 4 }, (_, i) => ({ inputs: { goal: `h${i}`, plan: "x" }, expect: { queue: "billing" }, set: "holdout" as const })),
+  ];
+  const report = await calibrate(triage, cases, { decider });
+
+  assert.equal(report.questions.length, 1, "dev is what `questions` holds");
+  assert.equal(report.questions[0]!.accuracy, 1, "4/4 on the cases it was tuned against");
+  assert.equal(report.holdout![0]!.accuracy, 0.25, "1/4 on the frozen set");
+  assert.deepEqual(report.gap, [{ node: "route", key: "queue", dev: 1, holdout: 0.25, drop: 0.75 }]);
+  assert.equal(report.questions[0]!.n + report.holdout![0]!.n, 8, "every case was scored, once, in its own set");
+
+  // With no holdout cases, nothing changes for existing callers.
+  const devOnly = await calibrate(triage, cases.slice(0, 4), { decider });
+  assert.equal(devOnly.holdout, undefined);
+  assert.equal(devOnly.gap, undefined);
+
+  const bad = await calibrate(triage, [{ inputs: { goal: "d0", plan: "x" }, expect: { queue: "billing" }, set: "train" as never }], { decider })
+    .catch((e: unknown) => e);
+  assert.ok(bad instanceof CalibrationError);
+  assert.match(bad.problems[0]!, /has set "train" — a case is "dev" \(tuned against\) or "holdout"/);
+}
+console.log("ok · 6 dev and holdout are scored separately, and the drop between them is named");
+
+console.log("6 cases");

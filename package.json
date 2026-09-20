@@ -1,6 +1,6 @@
 {
   "name": "@ghostmind-dev/ensemble",
-  "version": "0.27.0",
+  "version": "0.28.0",
   "description": "Typed decisions wired to your code. Asks Jev one calibrated question, calls models through OpenRouter when a node needs to write, draw or look, and emits the graph and the run as JSON.",
   "type": "module",
   "license": "MIT",

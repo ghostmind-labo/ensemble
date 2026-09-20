@@ -18,14 +18,29 @@
  * case supplies exactly the state the node reads, and nothing else runs. No
  * handler fires, no model is called, and a case set costs about $0.00002 a
  * case. A case set with a problem is refused before anything is spent.
+ *
+ * Cases carry a `set`, and the split is the point. Tuning a question against
+ * the cases that judge it is how a graph comes to score well on those cases and
+ * nowhere else — the same overfitting that has been measured on evolved agent
+ * harnesses. So: tune against `dev`, freeze, then run `holdout` ONCE. The report
+ * keeps them apart and says how far apart they landed, because the gap between
+ * them is the only honest estimate of what the next unseen input will do.
  */
 import { jev, type Decider } from "./jev.ts";
 import type { Answer, Question } from "./questions.ts";
 import { isDecide, type RunnerSpec, type State } from "./spec.ts";
 
+export type CaseSet = "dev" | "holdout";
+
 export interface Case {
   /** The state the decide node reads. Every key in its `reads` must be here. */
   inputs: State;
+  /**
+   * Which set this case belongs to. `dev` (the default) is what you tune
+   * against. `holdout` is scored separately and should be looked at once, after
+   * the questions are frozen.
+   */
+  set?: CaseSet;
   /**
    * The right answer per question, by `node.key` or a bare key when only one
    * node asks it. A choice takes an option name, a noul `true`/`false`, a score
@@ -85,7 +100,15 @@ export interface Calibration {
   cost: number;
   /** Set when the budget ran out before every case was asked. */
   stopped?: "budget" | "cancelled";
+  /** The `dev` cases — what you tune against. */
   questions: QuestionReport[];
+  /** The `holdout` cases, when any were given. Look once, after freezing. */
+  holdout?: QuestionReport[];
+  /**
+   * Per question, dev accuracy minus holdout accuracy. A positive number is the
+   * amount the dev set is flattering you. Only present when both sets have it.
+   */
+  gap?: Array<{ node: string; key: string; dev: number; holdout: number; drop: number }>;
 }
 
 /** The case set is wrong. Nothing was asked, so nothing was spent. */
@@ -179,11 +202,15 @@ export async function calibrate(
   const problems: string[] = [];
 
   // Resolve every case to the decide nodes it tests, before a cent is spent.
-  const plan: Array<{ index: number; node: string; tested: Array<{ target: Target; expected: string | number | boolean }> }> = [];
+  const plan: Array<{ index: number; node: string; set: CaseSet; tested: Array<{ target: Target; expected: string | number | boolean }> }> = [];
   for (const [index, test] of cases.entries()) {
     const label = `case ${index + 1}`;
     if (!test || typeof test.inputs !== "object" || typeof test.expect !== "object") {
       problems.push(`${label} needs { inputs: {…}, expect: {…} }`);
+      continue;
+    }
+    if (test.set !== undefined && test.set !== "dev" && test.set !== "holdout") {
+      problems.push(`${label} has set ${JSON.stringify(test.set)} — a case is "dev" (tuned against) or "holdout" (looked at once)`);
       continue;
     }
     const byNode = new Map<string, Array<{ target: Target; expected: string | number | boolean }>>();
@@ -211,7 +238,7 @@ export async function calibrate(
         problems.push(`${label} tests ${node}, which reads ${missing.join(", ")} — add ${missing.map((k) => `"${k}"`).join(", ")} to its inputs`);
         continue;
       }
-      plan.push({ index, node, tested });
+      plan.push({ index, node, set: test.set ?? "dev", tested });
     }
   }
   if (cases.length === 0) problems.push("no cases — a calibration needs labelled examples");
@@ -244,15 +271,17 @@ export async function calibrate(
       for (const { target, expected } of item.tested) {
         const answer = decision.answers[target.key];
         if (!answer) throw new Error(`the decider returned no answer for ${target.node}.${target.key}`);
-        const id = `${target.node}.${target.key}`;
+        const id = `${item.set}\u0000${target.node}.${target.key}`;
         results.set(id, [...(results.get(id) ?? []), { case: item.index + 1, expected, answer, ...judge(answer, expected) }]);
       }
     }
   };
   await Promise.all(Array.from({ length: Math.max(1, options.concurrency ?? 4) }, worker));
 
-  const questions: QuestionReport[] = [];
-  for (const [id, points] of [...results].sort(([a], [b]) => a.localeCompare(b))) {
+  const bySet: Record<CaseSet, QuestionReport[]> = { dev: [], holdout: [] };
+  for (const [tagged, points] of [...results].sort(([a], [b]) => a.localeCompare(b))) {
+    const set = tagged.slice(0, tagged.indexOf("\u0000")) as CaseSet;
+    const id = tagged.slice(tagged.indexOf("\u0000") + 1);
     const target = known.get(id) as Target;
     points.sort((a, b) => a.case - b.case);
     const n = points.length;
@@ -287,8 +316,16 @@ export async function calibrate(
         };
       });
     }
-    questions.push(report);
+    bySet[set].push(report);
   }
+
+  // How much the dev set flatters us, per question. The number to watch.
+  const gap = bySet.holdout.flatMap((held) => {
+    const dev = bySet.dev.find((d) => d.node === held.node && d.key === held.key);
+    return dev
+      ? [{ node: held.node, key: held.key, dev: dev.accuracy, holdout: held.accuracy, drop: round(dev.accuracy - held.accuracy) }]
+      : [];
+  });
 
   return {
     runner: spec.name,
@@ -296,6 +333,8 @@ export async function calibrate(
     asked,
     cost: round(cost, 8),
     ...(stopped ? { stopped } : {}),
-    questions,
+    questions: bySet.dev,
+    ...(bySet.holdout.length ? { holdout: bySet.holdout } : {}),
+    ...(gap.length ? { gap } : {}),
   };
 }
