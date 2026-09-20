@@ -38,9 +38,11 @@ Fifteen files, and each one has a single job.
 - `src/runner.ts` — ties them into a callable; `src/index.ts` — the public surface
 - `src/cli.ts` — `validate` / `graph` / `run` / `calibrate` / `check` / `skills` / `servers`
 
-`examples/` — seven runnable runners, each with a header comment saying what it
+`examples/` — eight runnable runners, each with a header comment saying what it
 demonstrates. `06-watch` is a watcher runner that also supervises `01-triage`
-when executed directly; `07-senses` forks three lanes, joins them, and remembers. `test/` — one `*.test.mts` per suite, auto-discovered by
+when executed directly; `07-senses` forks three lanes, joins them, and remembers;
+`08-studio` is the complex shape — four models in sequence, a budgeted loop, and
+both branch forms in one graph. `test/` — one `*.test.mts` per suite, auto-discovered by
 `test/run.mts`.
 
 `plugin/` + `.claude-plugin/marketplace.json` — the Claude Code plugin (marketplace

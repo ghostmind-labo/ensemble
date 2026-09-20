@@ -26,6 +26,7 @@ const triage = await load("examples/01-triage/triage.mts");
 const picture = await load("examples/02-picture/picture.mts");
 const refine = await load("examples/03-refine/refine.mts");
 const robot = await load("examples/04-robot/brain.mts");
+const studio = await load("examples/08-studio/studio.mts");
 
 // ── 1 · every example validates ─────────────────────────────────────────────
 for (const [name, example] of [
@@ -33,13 +34,14 @@ for (const [name, example] of [
   ["02-picture", picture],
   ["03-refine", refine],
   ["04-robot", robot],
+  ["08-studio", studio],
 ] as const) {
   assert.deepEqual(example.validate(), [], `${name} must be sound`);
 }
-console.log("ok · 1 all four examples validate clean");
+console.log("ok · 1 every example validates clean");
 
 // ── 2 · every example serialises to a complete graph ────────────────────────
-for (const example of [triage, picture, refine, robot]) {
+for (const example of [triage, picture, refine, robot, studio]) {
   const graph = example.graph();
   assert.deepEqual(JSON.parse(JSON.stringify(graph)), graph);
   assert.match(graph.runner.hash, /^sha256:/);
@@ -207,4 +209,51 @@ console.log("ok · 7 the watch example stops on numbers in code and asks Jev onl
 }
 console.log("ok · 8 the senses example forks, joins once, and advances its memory key");
 
-console.log("8 cases");
+// ── 9 · 08 is the complex shape: four models in a row, a budgeted loop, both branch forms
+{
+  const graph = studio.graph();
+  const models = graph.nodes.filter((n) => n.kind === "model");
+  assert.equal(models.length, 4, "research → write → critique → illustrate");
+  assert.equal(models.filter((n) => n.model?.from).length, 1, "one model id is chosen at run time");
+
+  const back = graph.edges.find((e) => e.from === "tally" && e.to === "write")!;
+  assert.equal(back.maxLoops, 2, "the loop budget lives on the edge");
+  const after = graph.edges.filter((e) => e.from === "tally");
+  assert.equal(after.at(-1)!.to, "hand_off", "and a following edge takes over once it is spent");
+
+  // Safety is first BECAUSE edges are tried in declaration order.
+  assert.deepEqual(graph.edges[0]!.on, { question: "risk", op: ">=", value: 0.6 });
+  assert.equal(graph.edges[0]!.to, "hand_off");
+
+  // `format` was answered at the brief, so branching on it later must be a when().
+  const toIllustrate = graph.edges.find((e) => e.to === "illustrate")!;
+  assert.equal(toIllustrate.on, undefined);
+  assert.deepEqual(toIllustrate.when!.reads, ["format"]);
+
+  // The loop actually loops, and ends: three writes, then a person.
+  const seen: string[] = [];
+  const decider: Decider = async (_state: unknown, questions: Record<string, Question>) => {
+    const answers: Record<string, Answer> = {};
+    for (const key of Object.keys(questions)) {
+      answers[key] =
+        key === "quality"
+          ? { type: "score", score: 0.2, confidence: 0.9, probabilities: {}, legend: {} }   // always weak
+          : key === "unsupported" || key === "risk"
+            ? { type: "noul", noul: 0.1 }
+            : { type: "choice", choice: key === "format" ? "memo" : "quick", confidence: 0.9, probabilities: {} };
+    }
+    return { model: "stub", answers, usage: { input_tokens: 1, output_tokens: 0 }, cost: 0.00002 };
+  };
+  const caller: Caller = async (req: ModelRequest): Promise<ModelReply> => (
+    seen.push(req.model),
+    { model: req.model, text: "draft", images: [], usage: { input_tokens: 1, output_tokens: 1 }, cost: 0.001 }
+  );
+  const { result, run } = await studio({ goal: "x", sources: "y" }, { decider, caller, maxSteps: 40 });
+  assert.match(String(result), /a person will take this/, "two bad passes and it goes to a human");
+  assert.equal(run.steps.filter((s) => s.node === "write").length, 3, "the first pass plus maxLoops: 2");
+  assert.ok(!run.steps.some((s) => s.node === "illustrate"), "a memo gets no picture");
+  assert.equal(run.run.status, "completed");
+}
+console.log("ok · 9 the studio example loops twice, then hands off; a memo skips the illustrator");
+
+console.log("9 cases");

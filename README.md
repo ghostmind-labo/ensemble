@@ -251,7 +251,122 @@ Nothing else is remembered — and that is visible too.
 
 ---
 
-# Demo 3 · Run for days, and notice when it drifts
+# Demo 3 · A pipeline: four models, a loop, and if/then
+
+The first two demos are one decision and one fan-out. Real graphs are longer
+than that. This one runs **four generative calls in sequence**, loops back while
+the work is not good enough, and branches three different ways — and every part
+of it is checked before a token is spent.
+
+```mermaid
+flowchart TB
+  B{{"brief · decide<br/>format / depth / risk"}}
+  B -. "risk ≥ 0.6 — tried first" .-> H["hand_off · work"]
+  B --> P["pick_writer · code"]
+  P --> R["research · model ①"]
+  R --> W["write · model ②"]
+  W --> C["critique · model ③"]
+  C --> V{{"review · decide<br/>quality / unsupported"}}
+  V -->|"weak or unsupported"| T["tally · code"]
+  T -->|"maxLoops: 2"| W
+  T -. "budget spent" .-> H
+  V -->|"format = article"| I["illustrate · model ④"]
+  V --> S["ship · work"]
+  I --> S
+```
+
+**Four models, and not one of them judges anything.** A model researches, a model
+writes, a model critiques *in prose* — and then a `decide` node reads that prose
+and returns a calibrated score. Generation is open-ended and unrankable;
+judgement is closed and comparable. Mixing them is how a pipeline ends up with a
+critic whose verdict nobody can audit.
+
+```ts
+nodes: {
+  brief:       { decide: { format: choice(…), depth: choice(…), risk: noul(…) },
+                 reads: ["goal"], gate: { on: "format", min: 0.6, to: "hand_off" } },
+  pick_writer: { code: async (s) => …shortlist(await catalog(), …), reads: ["depth"], writes: ["writer"] },
+
+  research:    { model: "google/gemini-2.5-flash",        …, writes: ["notes"] },      // ①
+  write:       { model: { from: "writer" },               …, writes: ["draft"] },      // ② id from state
+  critique:    { model: "anthropic/claude-sonnet-4.5",    …, writes: ["critique"] },   // ③ another vendor
+  illustrate:  { model: "google/gemini-2.5-flash-image",  …, writes: ["caption", "image"] },  // ④ draws
+
+  review:      { decide: { quality: score(…), unsupported: noul(…) },
+                 reads: ["goal", "draft", "critique"] },                 // the critique IS the evidence
+  tally:       { code: (s) => Number(s.rounds ?? 0) + 1, writes: ["rounds"] },
+  ship:        { work: "publish", writes: ["outcome"] },
+  hand_off:    { work: "brief_a_human", writes: ["outcome"] },
+}
+```
+
+The edges are where the shape lives, and **order is the control flow** — first
+match wins:
+
+```ts
+edges: [
+  // Safety first, because it is first. Nothing is spent on a risky brief.
+  { from: "brief", to: "hand_off", on: "risk>=0.6" },
+  { from: "brief", to: "pick_writer" },
+
+  { from: "pick_writer", to: "research" }, { from: "research", to: "write" },
+  { from: "write", to: "critique" },       { from: "critique", to: "review" },
+
+  // ① back round while it is weak OR unsupported — arithmetic, so `when:`
+  { from: "review", to: "tally", when: (s) => {
+      const quality = Number(s.quality), unsupported = Number(s.unsupported);
+      return quality < 1.5 || unsupported >= 0.5;     // read both BEFORE combining
+  } },
+  // ② `format` was answered at the brief, not here — so this is a when(), not an on:
+  { from: "review", to: "illustrate", when: (s) => s.format === "article" },
+  // ③ anything else is good enough, and needs no picture
+  { from: "review", to: "ship" },
+
+  { from: "tally", to: "write", maxLoops: 2 },   // the loop, and its budget
+  { from: "tally", to: "hand_off" },             // spent: two passes did not fix it
+  { from: "illustrate", to: "ship" },
+]
+```
+
+Three kinds of branch, and the difference is not stylistic:
+
+| | Use for | Example |
+|---|---|---|
+| `on:` | a **declared answer of the node that just asked** — static, drawable, provable | `on: "risk>=0.6"` |
+| `when:` | arithmetic, or a key written **earlier** in the run | `when: (s) => s.format === "article"` |
+| `maxLoops` | a budget on the edge itself; when spent it stops matching and the next edge takes over | `maxLoops: 2` |
+
+There is no loop counter in the engine and no `while` anywhere: a back-edge with
+a budget, plus a following edge, *is* the loop. That is why it terminates and why
+the graph can still be drawn.
+
+**Proving it without paying for it.** The dry run stubs every model and every
+decision, runs it once per declared answer, and prints the path each one took:
+
+```
+✓ default                    brief → pick_writer → research → write → critique → review → tally →
+                             write → critique → review → tally → write → critique → review → tally → hand_off
+✓ brief.risk=0.9             brief → hand_off
+✓ review.quality=2           brief → pick_writer → research → write → critique → review → illustrate → ship
+  edges never taken: e8 (review→ship)
+✓ studio: 13/13 dry runs completed · $0
+```
+
+Read that first line: the writer ran three times — the first pass plus a budget
+of two — and then a person got it. And the report is honest about what it did
+*not* reach: `review→ship` needs a good draft **and** a non-article format, which
+`--explore` never combines because it varies one answer at a time. Force it, and
+the edge is proven live:
+
+```sh
+… --answer brief.format=memo --answer review.quality=2
+```
+
+Full source: [`examples/08-studio/studio.mts`](examples/08-studio/studio.mts).
+
+---
+
+# Demo 4 · Run for days, and notice when it drifts
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/ghostmind-labo/ensemble/main/docs/images/supervise-loop.png" alt="tick, memory, journal, vitals — with a watcher inside the loop" width="100%">
@@ -676,6 +791,7 @@ node plugin/skills/ensemble-build/scripts/dryrun.mts examples/07-senses/senses.m
 | [`05-assistant`](examples/05-assistant/assistant.mts) | Skills and MCP, chosen rather than looped over |
 | [`06-watch`](examples/06-watch/watch.mts) | A conscience for a loop that runs for days — and it supervises `01-triage` when run directly |
 | [`07-senses`](examples/07-senses/senses.mts) | Look, listen and count at once: three forked lanes, one join, a memory key |
+| [`08-studio`](examples/08-studio/studio.mts) | The complex shape: four models in sequence, a budgeted loop, both branch forms, safety first |
 
 ---
 
