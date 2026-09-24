@@ -20,16 +20,16 @@ import {
   imageKeys,
   isCode,
   isDecide,
+  isHuman,
   isMcp,
   isModel,
   isWork,
-  laneNodes,
+  lanesOf,
   parseBranch,
   probeReads,
   producers,
   readsOf,
   writesOf,
-  edgeId,
   type Branch,
   type Edge,
   type RunnerSpec,
@@ -114,6 +114,27 @@ export function validate(spec: RunnerSpec): string[] {
           problems.push(`node "${name}" has gate.min ${node.gate.min} — confidence is between 0 and 1`);
         }
       }
+      if (node.by !== undefined && node.by !== "human") {
+        problems.push(`node "${name}" has by: ${JSON.stringify(node.by)} — omit it for the decider, or write by: "human" to ask a person`);
+      }
+      if (node.by === "human" && node.gate) {
+        problems.push(
+          `node "${name}" is answered by a person and has a gate — a person's answer carries no confidence to gate on. ` +
+            `Remove the gate and route on the answer with on: edges`,
+        );
+      }
+      if (node.comment !== undefined) {
+        if (node.by !== "human") {
+          problems.push(`node "${name}" declares comment but is not by: "human" — only a person leaves a note`);
+        } else if (!IDENT.test(node.comment)) {
+          problems.push(`node "${name}" has comment "${node.comment}", which is not a valid identifier — it becomes a state key`);
+        } else if (keys.includes(node.comment)) {
+          problems.push(`node "${name}" writes its comment to "${node.comment}", which is also a question key — give the note its own key`);
+        }
+      }
+      if (node.fallback !== undefined && !names.has(node.fallback)) {
+        problems.push(`node "${name}" falls back to "${node.fallback}", which is not a node`);
+      }
     }
 
     if (isWork(node) && !spec.work?.[node.work]) {
@@ -189,6 +210,14 @@ export function validate(spec: RunnerSpec): string[] {
     if (edge.on && edge.when) {
       problems.push(`${where}: has both on and when — a branch is on meaning or on arithmetic, not both`);
     }
+    // An edge that can never be taken is an edge that does not exist, and it
+    // fails the way everything here fails: quietly, as a path nobody walks.
+    if (edge.maxLoops !== undefined && !(Number.isInteger(edge.maxLoops) && edge.maxLoops >= 1)) {
+      problems.push(
+        `${where}: maxLoops is ${JSON.stringify(edge.maxLoops)} — it is how many times the edge may be ` +
+          `taken, so it must be a whole number of 1 or more. Drop it for no limit`,
+      );
+    }
     if (!edge.on) continue;
 
     let branch: Branch;
@@ -235,6 +264,44 @@ export function validate(spec: RunnerSpec): string[] {
     }
   }
 
+  /**
+   * Does a set of threshold branches cover the whole 0–1 range a noul can
+   * answer? Returns the first value that nothing handles, or undefined.
+   *
+   * Worth proving because the gap is invisible otherwise: `on: "sure>=0.7"` as
+   * the only edge routes a confident yes and drops everything below it at the
+   * exit, and `"sure>=0.7"` next to `"!sure"` leaves the 0.5–0.7 band nobody
+   * looks at. Both read as complete and neither is.
+   */
+  const uncovered = (thresholds: Branch[]): { at: number; inclusive: boolean } | undefined => {
+    type Span = { lo: number; loOpen: boolean; hi: number; hiOpen: boolean };
+    const spans = thresholds.flatMap((branch): Span[] => {
+      if (branch.kind !== "threshold") return [];
+      const { op, value } = branch;
+      return op === ">=" ? [{ lo: value, loOpen: false, hi: 1, hiOpen: false }]
+        : op === ">" ? [{ lo: value, loOpen: true, hi: 1, hiOpen: false }]
+        : op === "<=" ? [{ lo: 0, loOpen: false, hi: value, hiOpen: false }]
+        : [{ lo: 0, loOpen: false, hi: value, hiOpen: true }];
+    });
+    spans.sort((a, b) => a.lo - b.lo || Number(a.loOpen) - Number(b.loOpen));
+    // The smallest point not yet known to be covered: `at` itself when
+    // `inclusive`, otherwise everything just above `at`.
+    let at = 0;
+    let inclusive = true;
+    for (const span of spans) {
+      if (span.lo > at) break;
+      if (span.lo === at && inclusive && span.loOpen) break;
+      const reaches = { at: span.hi, inclusive: span.hiOpen };
+      if (reaches.at > at || (reaches.at === at && !reaches.inclusive && inclusive)) {
+        at = reaches.at;
+        inclusive = reaches.inclusive;
+      }
+    }
+    // `inclusive` distinguishes "nothing handles 0.3" from "nothing handles
+    // anything above 0.3", which are different mistakes and different fixes.
+    return at > 1 || (at === 1 && !inclusive) ? undefined : { at, inclusive };
+  };
+
   /* ── exhaustiveness: every declared option goes somewhere ── */
   for (const [name, node] of nodes) {
     if (!isDecide(node)) continue;
@@ -265,6 +332,63 @@ export function validate(spec: RunnerSpec): string[] {
         );
       }
     }
+
+    /*
+     * The same proof for a noul, whose answer space is the 0–1 range rather than
+     * a list of options.
+     *
+     * Held to a higher bar than the choice check above, because a decide node
+     * asks SEVERAL questions and one exhaustive key is enough to keep the run on
+     * the graph. A threshold edge is very often a priority override — "a hazard
+     * outranks whatever the classifier picked" — sitting in front of edges that
+     * are already exhaustive, and flagging that would be crying wolf. So this
+     * only speaks when a fall-through is provable: no forks (they all fire
+     * anyway), no `when:` edge (opaque code that may well catch everything), and
+     * no choice at this node already covered end to end.
+     */
+    if (outgoing.some((edge) => edge.fork || edge.when)) continue;
+    const settled = [...branchedOn].some((key) => {
+      const question = node.decide[key];
+      if (question?.type !== "choice") return false;
+      const covered = new Set(
+        outgoing
+          .map((edge) => branches.get(edge))
+          .filter((branch): branch is Extract<Branch, { kind: "option" }> => branch?.kind === "option" && branch.key === key)
+          .map((branch) => branch.option),
+      );
+      return optionsOf(question).every((option) => covered.has(option));
+    });
+    if (settled) continue;
+    const thresholded = new Set(
+      outgoing
+        .map((edge) => branches.get(edge))
+        .filter((branch): branch is Branch => branch?.kind === "threshold")
+        .map((branch) => branch.key),
+    );
+    for (const key of thresholded) {
+      if (node.decide[key]?.type !== "noul") continue;
+      const mine = outgoing
+        .map((edge) => branches.get(edge))
+        .filter((branch): branch is Extract<Branch, { kind: "threshold" }> => branch?.kind === "threshold" && branch.key === key);
+      const gap = uncovered(mine);
+      if (gap === undefined) continue;
+      // Name the edge that closes it: everything from the gap up to the lowest
+      // band already handled above it, or up to 1 when nothing is.
+      const above = mine
+        .filter((branch) => (branch.op === ">=" || branch.op === ">") && branch.value > gap.at)
+        .map((branch) => branch.value)
+        .sort((a, b) => a - b)[0];
+      const where = gap.inclusive ? `an answer of ${gap.at}` : `an answer just above ${gap.at}`;
+      const fix = above === undefined
+        ? `${key}${gap.inclusive ? ">=" : ">"}${gap.at}`
+        : `${key}<${above}`;
+      problems.push(
+        `node "${name}" asks "${key}", a noul, but nothing handles ${where}` +
+          `${above === undefined ? "" : ` up to ${above}`} — a noul answers anywhere from 0 to 1, ` +
+          `and the run would fall through to the exit there. Cover it with on: "${fix}", ` +
+          `or add a default edge from "${name}" with no on/when.`,
+      );
+    }
   }
 
   /* ── parallelism: forks fan out, joins fan in, lanes never collide ── */
@@ -293,7 +417,7 @@ export function validate(spec: RunnerSpec): string[] {
   for (const name of names) {
     const forks = edges.filter((edge) => edge.from === name && edge.fork);
     if (forks.length < 2) continue;
-    const lanes = forks.map((edge) => ({ id: edgeId(edges.indexOf(edge)), to: edge.to, nodes: laneNodes(spec, edge.to) }));
+    const lanes = lanesOf(spec, name);
     const touched = (lane: (typeof lanes)[number]): { writes: Set<string>; reads: Set<string> } => {
       const writes = new Set<string>();
       const reads = new Set<string>();
@@ -308,6 +432,15 @@ export function validate(spec: RunnerSpec): string[] {
       }
       return { writes, reads };
     };
+    for (const lane of lanes) {
+      const asks = [...lane.nodes].filter((at) => isHuman(spec.nodes[at]!));
+      if (asks.length) {
+        problems.push(
+          `node "${name}" forks to "${lane.to}", and that lane asks a person at ${list(asks)} — a run can pause on ` +
+            `only one lane. Move the question after the join`,
+        );
+      }
+    }
     for (let i = 0; i < lanes.length; i++) {
       for (let j = i + 1; j < lanes.length; j++) {
         const a = lanes[i]!, b = lanes[j]!;
@@ -395,6 +528,7 @@ export function validate(spec: RunnerSpec): string[] {
       const node = spec.nodes[at];
       const next = edges.filter((edge) => edge.from === at).map((edge) => edge.to);
       if (node && isDecide(node) && node.gate) next.push(node.gate.to);
+      if (node && isDecide(node) && node.fallback) next.push(node.fallback);
       for (const to of next) {
         if (names.has(to) && !reached.has(to)) {
           reached.add(to);

@@ -39,7 +39,16 @@
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { RunFailed, RunnerError, type RunDoc, type RunEvent, type RunOptions, type RunOutcome } from "./execute.ts";
+import {
+  RunFailed,
+  RunnerError,
+  type Paused,
+  type RunDoc,
+  type RunEvent,
+  type RunOptions,
+  type RunOutcome,
+  type RunStep,
+} from "./execute.ts";
 import type { Runner } from "./runner.ts";
 import type { State } from "./spec.ts";
 
@@ -50,8 +59,10 @@ export interface Vitals {
   tick: number;
   /** Ticks in the window. */
   ticks: number;
-  /** Ticks that did not complete: a failed node, a per-run budget, maxSteps. */
+  /** Ticks that did not complete: a failed node, a per-run budget, maxSteps. Not paused ones. */
   failed: number;
+  /** Ticks in the window that paused for a person and are waiting to be resumed. */
+  waiting: number;
   failureRate: number;
   /** Ticks where a confidence gate fired, sending the run down its unsure path. */
   gateRate: number;
@@ -67,6 +78,32 @@ export interface Vitals {
   /** Spent in the last 24 hours. */
   spentToday: number;
   msPerTick: number;
+  /**
+   * Spend in the window divided by the ticks that COMPLETED — what a finished
+   * task actually costs, with the failed attempts it took charged to it. Null
+   * when nothing in the window completed. Watch this, not the per-call price: a
+   * cheap decision that sends the work down the wrong branch is not cheap.
+   */
+  costPerCompleted: number | null;
+}
+
+/**
+ * A tick that was running when the process stopped. Its `work` steps may have
+ * already had their effects — an email sent, a row written, a charge made — and
+ * re-running the tick blindly would do them twice. So the steps that finished
+ * are handed to `next()`, which is the only place that knows what "already done"
+ * means for this system.
+ */
+export interface Interrupted {
+  /** The tick that was running. `next()` is about to be asked for this same tick number. */
+  tick: number;
+  /** Every step that finished before the stop, in order, as the journal recorded it. */
+  steps: RunStep[];
+  /**
+   * True when the run itself finished but the checkpoint after it was never
+   * written: every effect happened, and only the memory update was lost.
+   */
+  finished: boolean;
 }
 
 /** One tick, reduced to what supervision needs. Kept for the window and in the checkpoint. */
@@ -87,6 +124,8 @@ export type Verdict = "continue" | "alert" | "stop";
 
 export type SuperviseEvent =
   | { type: "start"; tick: number; resumed: boolean }
+  | { type: "interrupted"; tick: number; steps: number; finished: boolean }
+  | { type: "paused"; tick: number; node: string; file?: string }
   | { type: "tick"; summary: TickSummary; spent: number }
   | { type: "rest"; until: string; reason: string }
   | { type: "watch"; tick: number; verdict: Verdict; vitals: Vitals; reason?: string }
@@ -100,6 +139,12 @@ export interface Stimulus {
   memory: State;
   /** The previous tick, when there was one in this process. */
   last?: RunOutcome;
+  /**
+   * Present once, on the first call after a restart, when the journal shows a
+   * tick that started and never checkpointed. Look at what it already did
+   * before asking for it again.
+   */
+  interrupted?: Interrupted;
   signal: AbortSignal;
 }
 
@@ -166,6 +211,15 @@ export interface SuperviseOptions {
   onRunEvent?: (event: RunEvent, tick: number) => void;
   /** Your effect: page someone, post to a channel. Called for watcher alerts and for every stop that is not a normal finish. */
   onAlert?: (alert: { tick: number; reason: string; vitals: Vitals }) => void | Promise<void>;
+  /**
+   * A tick stopped to wait for a person. The loop does NOT wait with it — the
+   * next tick runs — so this is where the snapshot goes to whoever will answer:
+   * a queue, a chat thread, a review screen. Resume it later with
+   * `runner.resume(paused, answer)`. Without this, the pause raises an alert
+   * instead, so it is never silent. With a journal, the snapshot is also saved
+   * under `paused/<tick>.json`.
+   */
+  onPaused?: (paused: Paused, tick: number) => void | Promise<void>;
 }
 
 export interface SuperviseOutcome {
@@ -227,9 +281,13 @@ function summarise(tick: number, run: RunDoc, result: unknown, error?: string): 
 
 export function vitalsOf(recent: TickSummary[], tick: number, spent: number, ledger: Array<[string, number]>): Vitals {
   const ticks = recent.length;
-  const failed = recent.filter((t) => t.status !== "completed").length;
+  // Waiting for a person is not failing. It is counted, but apart.
+  const failing = (t: TickSummary): boolean => t.status !== "completed" && t.status !== "paused";
+  const failed = recent.filter(failing).length;
+  const waiting = recent.filter((t) => t.status === "paused").length;
+  const completed = recent.filter((t) => t.status === "completed").length;
   let streak = 0;
-  for (let i = recent.length - 1; i >= 0 && recent[i]!.status !== "completed"; i--) streak++;
+  for (let i = recent.length - 1; i >= 0 && failing(recent[i]!); i--) streak++;
   const confidences = recent.flatMap((t) => t.confidences);
   const paths = new Map<string, number>();
   for (const t of recent) paths.set(t.path.join(">"), (paths.get(t.path.join(">")) ?? 0) + 1);
@@ -238,6 +296,7 @@ export function vitalsOf(recent: TickSummary[], tick: number, spent: number, led
     tick,
     ticks,
     failed,
+    waiting,
     failureRate: ticks ? round(failed / ticks, 4) : 0,
     gateRate: ticks ? round(recent.filter((t) => t.gated).length / ticks, 4) : 0,
     confidence: confidences.length ? round(confidences.reduce((a, b) => a + b, 0) / confidences.length, 4) : null,
@@ -247,7 +306,38 @@ export function vitalsOf(recent: TickSummary[], tick: number, spent: number, led
     spent: round(spent),
     spentToday: round(ledger.filter(([at]) => Date.parse(at) >= since).reduce((sum, [, cost]) => sum + cost, 0)),
     msPerTick: ticks ? Math.round(recent.reduce((sum, t) => sum + t.ms, 0) / ticks) : 0,
+    costPerCompleted: completed ? round(recent.reduce((sum, t) => sum + t.cost, 0) / completed) : null,
   };
+}
+
+/**
+ * Read the journal backwards for a tick newer than the checkpoint. Backwards
+ * because a journal that has run for days is long, and the interrupted tick —
+ * if there is one — is always at the end.
+ */
+function findInterrupted(journalPath: string, checkpointed: number): Interrupted | undefined {
+  if (!existsSync(journalPath)) return undefined;
+  const lines = readFileSync(journalPath, "utf8").split("\n");
+  const steps: RunStep[] = [];
+  let tick: number | undefined;
+  let finished = false;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]!.trim();
+    if (!line) continue;
+    let entry: { type?: string; tick?: number; step?: RunStep };
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue; // a line torn by the crash itself
+    }
+    if (typeof entry.tick !== "number") continue;
+    if (entry.tick <= checkpointed) break;
+    tick ??= entry.tick;
+    if (entry.tick !== tick) continue;
+    if (entry.type === "step" && entry.step) steps.unshift(entry.step);
+    if (entry.type === "run") finished = true;
+  }
+  return tick === undefined ? undefined : { tick, steps, finished };
 }
 
 /**
@@ -338,11 +428,13 @@ export async function supervise(runner: Runner, options: SuperviseOptions): Prom
   let resumed = false;
 
   const checkpointPath = dir ? join(dir, "checkpoint.json") : undefined;
+  let interrupted: Interrupted | undefined;
   if (checkpointPath && options.resume !== false && existsSync(checkpointPath)) {
     const saved = JSON.parse(readFileSync(checkpointPath, "utf8")) as Checkpoint;
     ({ tick, spent, ledger, recent } = saved);
     memory = Object.fromEntries(memoryKeys.map((key) => [key, saved.memory?.[key]]));
     resumed = true;
+    interrupted = findInterrupted(join(dir!, "journal.jsonl"), tick);
   }
   const checkpoint = (): void => {
     if (!checkpointPath) return;
@@ -385,6 +477,9 @@ export async function supervise(runner: Runner, options: SuperviseOptions): Prom
   };
 
   emit({ type: "start", tick, resumed });
+  if (interrupted) {
+    emit({ type: "interrupted", tick: interrupted.tick, steps: interrupted.steps.length, finished: interrupted.finished });
+  }
   let last: RunOutcome | undefined;
   let lastStart = 0;
 
@@ -418,7 +513,14 @@ export async function supervise(runner: Runner, options: SuperviseOptions): Prom
 
     let inputs: State | undefined;
     try {
-      inputs = await options.next({ tick: tick + 1, memory: { ...memory }, ...(last ? { last } : {}), signal });
+      inputs = await options.next({
+        tick: tick + 1,
+        memory: { ...memory },
+        ...(last ? { last } : {}),
+        ...(interrupted ? { interrupted } : {}),
+        signal,
+      });
+      interrupted = undefined; // handed over once; the next tick is a fresh one
     } catch (error) {
       write({ type: "error", tick: tick + 1, where: "next", error: (error as Error).message });
       const failed: TickSummary = {
@@ -463,6 +565,17 @@ export async function supervise(runner: Runner, options: SuperviseOptions): Prom
       if (outcome.run.run.status === "completed") {
         memory = Object.fromEntries(memoryKeys.map((key) => [key, outcome.state[key]]));
       }
+      if (outcome.paused) {
+        let file: string | undefined;
+        if (dir) {
+          mkdirSync(join(dir, "paused"), { recursive: true });
+          file = join("paused", `${now}.json`);
+          writeFileSync(join(dir, file), `${JSON.stringify(outcome.paused, null, 2)}\n`);
+        }
+        emit({ type: "paused", tick: now, node: outcome.paused.node, ...(file ? { file } : {}) });
+        if (options.onPaused) await options.onPaused(outcome.paused, now);
+        else await alert(`tick ${now} is waiting for a person at "${outcome.paused.node}"${file ? ` — ${file}` : ""}`);
+      }
     } catch (error) {
       if (!(error instanceof RunFailed)) {
         write({ type: "error", tick: now, where: "run", error: (error as Error).message });
@@ -471,6 +584,12 @@ export async function supervise(runner: Runner, options: SuperviseOptions): Prom
       }
       last = undefined;
       summary = summarise(now, error.run, undefined, error.message);
+      // A tick that threw is a failed tick whatever its record says. Trusting
+      // the document here once let a broken run whose status read "paused" be
+      // filed as patiently waiting: the failing streak never tripped, no alert
+      // fired, and a loop meant to notice it had stopped making sense reported
+      // a clean finish. Broken must never look like patient.
+      summary.status = "failed";
       write({ type: "run", tick: now, run: error.run });
     }
     charge(summary.cost);

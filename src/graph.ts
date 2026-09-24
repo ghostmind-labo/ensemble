@@ -66,9 +66,16 @@ export interface GraphNode {
   /** Waits for every lane leading here before it runs. */
   join?: "all";
   decide?: {
+    /** The decider's model id, or "human" when a person answers. */
     model: string;
     questions: GraphQuestion[];
     gate?: { on: string; min: number; to: string };
+    /** Present when a person answers. A renderer can draw a person here. */
+    by?: "human";
+    /** The state key a person's free-text note lands on. */
+    comment?: string;
+    /** Where the run goes when the decider cannot answer at all. */
+    fallback?: string;
   };
   work?: { handler: string };
   model?: {
@@ -167,12 +174,17 @@ export function toGraph(spec: RunnerSpec): GraphDoc {
       ...(node.join ? { join: node.join } : {}),
     });
     if (isDecide(node)) {
+      const human = node.by === "human";
       return {
-        ...head("decide", "cheap"),
+        // A person costs no API money; `cost` is about the bill, not the wait.
+        ...head("decide", human ? "free" : "cheap"),
         decide: {
-          model,
+          model: human ? "human" : model,
           questions: Object.entries(node.decide).map(([key, q]) => question(key, q)),
           ...(node.gate ? { gate: node.gate } : {}),
+          ...(human ? { by: "human" as const } : {}),
+          ...(node.comment ? { comment: node.comment } : {}),
+          ...(node.fallback ? { fallback: node.fallback } : {}),
         },
       };
     }

@@ -173,3 +173,51 @@ export function confidenceOf(answer: Answer): number | undefined {
 export function optionsOf(question: Question): string[] {
   return question.type === "choice" ? Object.keys(question.criteria) : [];
 }
+
+/**
+ * Does this answer land inside the question that was asked?
+ *
+ * `validate` proves the graph handles every DECLARED answer, statically and for
+ * free. That proof is only worth what the answers are worth: an answer outside
+ * the declared set matches no edge, so the run falls through to the exit and
+ * reports success having done nothing — the exact silent failure the validator
+ * exists to prevent, arriving at run time where it cannot reach.
+ *
+ * So the domain is checked again the moment an answer lands. Returns the reason
+ * it does not fit, or undefined when it does. Cheap: a lookup and two compares.
+ */
+export function misfit(question: Question, answer: Answer): string | undefined {
+  if (answer.type !== question.type) {
+    return `a ${question.type} question was answered with a ${JSON.stringify(answer.type)}`;
+  }
+  switch (question.type) {
+    case "choice": {
+      const options = Object.keys(question.criteria);
+      const said = (answer as ChoiceAnswer).choice;
+      return options.includes(said)
+        ? undefined
+        : `${JSON.stringify(said)} is not one of its options (${options.join(", ")})`;
+    }
+    case "score": {
+      const top = question.criteria.length - 1;
+      const said = (answer as ScoreAnswer).score;
+      return within(said, 0, top) ? undefined : `${JSON.stringify(said)} is not a level from 0 to ${top}`;
+    }
+    case "noul": {
+      const said = (answer as NoulAnswer).noul;
+      return within(said, 0, 1) ? undefined : `${JSON.stringify(said)} is not a probability between 0 and 1`;
+    }
+  }
+}
+
+/**
+ * Inside a range, with a hair of slack at each end.
+ *
+ * The slack is not sloppiness. A score is Σ(level × P(level)) and a noul is a
+ * probability, so both legitimately arrive at the very top of their range with a
+ * float's last bit wrong — 2.0000000000000004 for a two-level score. This check
+ * is here to catch an answer that is the wrong SHAPE, and failing a run over
+ * ULP-sized error would be a worse bug than the one it guards against.
+ */
+const within = (value: unknown, low: number, high: number): boolean =>
+  typeof value === "number" && Number.isFinite(value) && value >= low - 1e-9 && value <= high + 1e-9;

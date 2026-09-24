@@ -33,6 +33,12 @@ Rules of thumb:
 - A `choice` must be closed and known when the code is written. Never enumerate
   something that changes at run time, like a model catalogue, a user list or
   search results. Ask a stable question and resolve the volatile part in code.
+- **A menu that changes every turn is a handler, not a decide node.** Driving a
+  browser means choosing among whatever controls are on the page *now*, and the
+  options must be rebuilt after every action. That is legitimate, and it is the
+  one shape a declared `choice` cannot express. Put that loop inside a `work`
+  handler that builds the menu each turn and calls Jev itself; the graph shows
+  it as one step, and the decisions *around* it stay declared and provable.
 
 ## Write one property per question
 
@@ -53,6 +59,26 @@ urgency_pressure: noul("Does the message threaten a consequence unless the reade
 
 Speculative extra questions are almost free. When a later branch *might* need a
 fact, ask for it now and let code decide whether it mattered.
+
+## The key is not an instruction
+
+**Jev never sees the question's key.** It is a state key and a branch label for
+*your* code, nothing more. `safe_to_publish: noul("Is it OK?")` asks Jev "Is it
+OK?" — the words "safe" and "publish" never reach it.
+
+```ts
+// ✗ the requirement lives in the key, where Jev cannot read it
+safe_to_publish: noul("Is it OK?"),
+
+// ✓ the requirement is in the question
+safe_to_publish: noul("Can this draft be published without a person reviewing it first?", {
+  true:  { what: "Routine content with no claims that need checking" },
+  false: { what: "Makes a factual, legal or financial claim, or names a person" },
+}),
+```
+
+Read each question aloud with its key covered. If it no longer makes sense, the
+meaning was in the key.
 
 ## Write the options: `what` and `not_for`
 
@@ -117,6 +143,11 @@ exact key, because indirection costs accuracy.
 accuracy falls as irrelevant detail grows.
 
 - Send the key the question is about, and nothing that merely might be relevant.
+- **Send the evidence, not a report about it.** `"the researcher finished"`
+  tells Jev far less than the sources, the findings and the gaps. Keep evidence
+  in its own keys, separate from the original request, so the question can point
+  at each (`compare: ["`findings`", "`request`"]`) and `reads` can include
+  exactly what is needed.
 - Never send image keys (validation refuses them). Send the sentence a model
   node wrote about the image instead.
 - If a key is large (a whole document), add a `code` or `model` node first that
@@ -133,6 +164,22 @@ accuracy falls as irrelevant detail grows.
 - Unvetted user text can contain instructions aimed at the classifier. Jev does
   not treat state as hostile. Put a screening noul before any routing that
   matters, and write criteria that describe content, not obedience.
+
+## When a person answers
+
+A `decide` node with `by: "human"` asks a person the **same** questions, and
+everything above still applies — more so. A person reads criteria less
+literally than Jev, but they are just as confused by two options with no
+boundary, and they cannot see what `reads` did not send them.
+
+- **Ask the person the question Jev was asked**, on the same key, so both land
+  in one place and share the downstream edges. Add Jev's answer to the
+  person's `reads` so they can see what it proposed.
+- A person's **yes is 1 and no is 0** on state, so `on: "ok>=0.6"` works the same
+  whoever answered. A score is a whole level.
+- **No gate** on a human node: a person's answer carries no confidence.
+- Want their reasoning? Declare `comment: "review_note"` and the note lands on
+  that key for the next node — a writer revising a draft, say.
 
 ## Keep numbers, dates and counts out of questions
 
@@ -160,22 +207,31 @@ Likewise, don't ask one fact two ways and derive one threshold from the other.
 - **score cut-offs** go in `when:`. A score is an expected value, so `1.4` on a
   0–2 rubric means "leaning good". Compare scores from rubrics of different
   lengths only after dividing by `levels − 1`.
-- Starting values are guesses. Calibrate them on real runs: plot confidence
-  against being right, then move each cut-off to where errors become
-  unacceptable. The `ensemble-runs` skill covers reading answers out of
-  `run.json`.
+- **Confidence is not an accuracy percentage.** It measures how concentrated
+  the distribution is. An independent audit on unseen data
+  ([jev-ood-calibration](https://github.com/scienthoon/jev-ood-calibration))
+  found `choice` and `score` running **overconfident** and `noul` running
+  **underconfident**. If that holds for your data, a `min: 0.7` gate on a choice
+  lets through more errors than it looks like it should, and a noul threshold at
+  0.5 throws away usable decisions. Don't take the audit's word or ours:
+  measure it.
+- Starting values are guesses. Calibrate them with `ensemble calibrate`, which
+  reports the gap between confidence and accuracy per question and prices every
+  gate threshold, with a `holdout` set so the thresholds are not fitted to the
+  examples. The `ensemble-runs` skill covers it.
 
 ## Check your questions before you ship
 
 For each question, answer these:
 
 1. Does it ask exactly one property?
-2. Could a literal reader put a borderline input in two options? If so, sharpen
+2. Does it still make sense with the key hidden? Jev never sees the key.
+3. Could a literal reader put a borderline input in two options? If so, sharpen
    `not_for` or add a boundary example.
-3. Is there an honest way out (`none`, `other`, or a gate)?
-4. Is anything numeric, date-based or counted? Move it to code.
-5. Does `reads` hold only what this question needs?
-6. Would the answer mean the same thing a year from now? If not, the options are
+4. Is there an honest way out (`none`, `other`, or a gate)?
+5. Is anything numeric, date-based or counted? Move it to code.
+6. Does `reads` hold the evidence this question needs, and nothing else?
+7. Would the answer mean the same thing a year from now? If not, the options are
    too volatile for a choice.
 
 Then prove the wiring for $0 with the dry-run described in the `ensemble-build`

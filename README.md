@@ -68,9 +68,12 @@ auditing.
 
 ```sh
 npm install @ghostmind-dev/ensemble
-export TYPESAFE_API_KEY=...       # https://console.typesafe.ai/settings/keys
-export OPENROUTER_API_KEY=...     # https://openrouter.ai/keys — only for model nodes
+export OPENROUTER_API_KEY=...     # https://openrouter.ai/keys — the only key
 ```
+
+One key, one bill: Jev is served on OpenRouter's System One route, so the
+decider and every model node go through the same account. Pass it as
+`openrouter: { apiKey }` on the runner instead of the environment if you prefer.
 
 Node 22.18+. Runner files are `.mts`, loaded by Node's own type stripping, so
 there is no build step. Zero runtime dependencies.
@@ -273,6 +276,7 @@ flowchart TB
   RL --> TR
   RC --> TR
   TR -. "1 · hazard ≥ 0.6" .-> AL["alarm · work"]
+  TR -. "decider down (fallback)" .-> HO
   TR -. "2 · urgency ≥ 1.7 (when)" .-> AL
   TR -->|"3 · area=cosmetic"| PK["park · work"]
   TR -->|"4 · area=bug / question"| PS["pick_skill · code"]
@@ -286,7 +290,9 @@ flowchart TB
   RV --> RM["remember · code<br/>memory: last_area"]
   RM -->|"urgency ≥ 1 (when)"| CD["card · model 🎨"]
   RM --> SN["send · work"]
-  CD --> SN
+  CD --> AP{{"approve · decide 👤<br/>by: human"}}
+  AP -->|"send_it"| SN
+  AP -. "no" .-> HO
 ```
 
 **Every concept, and where it is:**
@@ -296,6 +302,8 @@ flowchart TB
 | all five node kinds | `decide` (triage, review) · `work` (alarm, park, hand_off, send) · `code` (start, pick_tool, recall, pick_skill, choose_writer, tally, remember) · `model` (look, answer, critique, card) · `mcp` (read_log) |
 | all three questions, one call | `area` choice · `hazard` noul · `urgency` score — asked together at `triage` |
 | a confidence gate | `gate: { on: "area", min: 0.65, to: "hand_off" }` |
+| a fallback when the decider is down | `fallback: "hand_off"` on `triage` — an outage becomes a route, not a crash |
+| a person in the loop | `approve`, a `decide` node with `by: "human"` — same closed question, same `on:` edges |
 | safety that outranks the gate | the `hazard>=0.6` edge is **declared first**, so it is tried first |
 | fork / join | three lanes from `start`, meeting at `join: "all"` on `triage` |
 | a model that looks | `look` with `sees: ["screenshot"]` — and `triage` reads `scene`, never the image |
@@ -333,12 +341,15 @@ edges: [
   { from: "tally", to: "hand_off" },                // spent: a person takes it
   { from: "remember", to: "card", when: (s) => Number(s.urgency) >= 1 },
   { from: "remember", to: "send" },
-  { from: "card", to: "send" },
+  { from: "card", to: "approve" },
+  { from: "approve", to: "send", on: "send_it" },   // a person's yes, routed like Jev's
+  { from: "approve", to: "hand_off" },
 ]
 ```
 
-**Proving thirteen paths for $0.** The dry run stubs Jev, OpenRouter and MCP,
-runs *your* handlers for real, and goes once per declared answer:
+**Proving fifteen paths for $0.** The dry run stubs Jev, OpenRouter and MCP,
+answers for the person from the same script, runs *your* handlers for real, and
+goes once per declared answer — the person's included:
 
 ```
 ✓ default              start → look → pick_tool → recall → read_log → triage → pick_skill → choose_writer →
@@ -347,8 +358,10 @@ runs *your* handlers for real, and goes once per declared answer:
 ✓ triage.hazard=0.9    start → look → pick_tool → recall → read_log → triage → alarm
 ✓ triage.area=cosmetic start → look → pick_tool → recall → read_log → triage → park
 ✓ triage gate tripped  start → look → pick_tool → recall → read_log → triage → hand_off
-  edges never taken: e17 (review→remember), e20 (remember→card), e21 (remember→send), e22 (card→send)
-✓ frontdesk: 13/13 dry runs completed · $0
+✓ approve.send_it=0.9  …
+  edges never taken: e17 (review→remember), e20 (remember→card), e21 (remember→send),
+                     e22 (card→approve), e23 (approve→send), e24 (approve→hand_off)
+✓ frontdesk: 15/15 dry runs completed · $0
 ```
 
 Read the first line: three lanes ran, the writer ran three times — one pass plus
@@ -358,8 +371,9 @@ never produces because it varies one answer at a time. Force it and those edges
 are proven live:
 
 ```sh
-… --answer review.quality=2 --answer review.grounded=0.9                  # → remember → card → send
-… --answer review.quality=2 --answer review.grounded=0.9 --answer triage.urgency=0   # → remember → send
+… --answer review.quality=2 --answer review.grounded=0.9 --answer approve.send_it=0.9   # → remember → card → approve → send
+… --answer review.quality=2 --answer review.grounded=0.9                               # → … → approve → hand_off
+… --answer review.quality=2 --answer review.grounded=0.9 --answer triage.urgency=0     # → remember → send
 ```
 
 That is the whole development loop: **the graph tells you which branches you have
@@ -390,6 +404,46 @@ tick needs in order to exist. Same graph, same guarantees; it just gains memory
 between runs, budgets across runs, a journal and a watcher. A two-minute run and
 a two-day loop are the same code, and you only pay for the second when you want
 it.
+
+---
+
+## A person in the loop
+
+**A person is just another decider.** Give a `decide` node `by: "human"` and it
+asks a *person* the same closed questions it would ask Jev — so their answer is
+typed, their options are wired, and `validate` proves every answer has an edge.
+No new node kind, no hole in the graph; `graph.json` shows where the people are.
+
+```ts
+approve: {
+  decide: { ok: noul("Should this refund be issued as drafted?") },
+  reads: ["goal", "draft", "amount"],     // what the person is shown
+  by: "human",
+  comment: "reason",                      // their optional note lands here
+},
+edges: [
+  { from: "approve", to: "pay",    on: "ok" },   // a yes lands as 1 — on: works unchanged
+  { from: "approve", to: "refuse" },
+],
+```
+
+It works at both scales:
+
+- **A short run waits.** Pass a `human` handler — a terminal prompt, a chat
+  message with buttons, a form — and the run waits for it. `ensemble run` does
+  exactly that when there's a terminal.
+- **A long wait pauses.** With no handler, the run stops cleanly with
+  `status: "paused"` and hands back a plain-JSON snapshot. Store it anywhere and
+  continue later, in any process: `await approvals.resume(paused, { answers: { ok: "no" }, by: "dana" })`.
+  It's one continuous `run.json`, loop budgets survive the pause, and `resume`
+  refuses if the graph changed in between. Under `supervise`, a paused tick is
+  parked and the loop keeps going.
+
+The shape that earns it: **Jev takes the common case, a person takes the unsure
+or consequential one** — via a `gate` (Jev isn't sure), a `when:` (the amount is
+large whatever Jev thinks), or a `fallback` (Jev couldn't answer at all, because
+the service was down). Every road ends at the same kind of node, asked the same
+question.
 
 ---
 
@@ -463,6 +517,13 @@ message or a web page would otherwise be writing the text its own supervisor
 reads. Opt in with `watch: { evidence: "facts+text" }` only where the output is
 trusted.
 
+**Restarts don't repeat side effects blindly.** If the process dies mid-tick,
+the first `next()` after the restart is told which tick was running and which
+steps already finished — so an email that was sent is not sent again. And the
+vitals include `costPerCompleted`: spend divided by tasks that actually finished,
+with the failed attempts charged to them. A cheap decision that sends the work
+down the wrong branch is not cheap, and that is the number that shows it.
+
 What the loop leaves behind:
 
 ```
@@ -532,6 +593,10 @@ level 1 with some level 2. That is what makes it useful in a threshold.
 answered independently — one answer never becomes hidden context for another. A
 speculative extra question is nearly free, so ask it and let your code decide
 whether it mattered.
+
+**The key is not an instruction.** Jev never sees a question's key — it is a
+state key and a branch label for your code. `safe_to_publish: noul("Is it OK?")`
+asks "Is it OK?". Put the whole requirement in the question.
 
 **Describe the boundary, not just the option.** `not_for` says what belongs in
 the *neighbouring* option, which is exactly where classifiers fail.
@@ -709,7 +774,8 @@ npm run validate  -- <file>                 # prove the graph      — free, off
 npm run graph     -- <file> | jq            # emit graph.json      — free, offline
 npm run check     -- <file>                 # can it run HERE?     — reads the live catalogue
 npm run calibrate -- <file> cases.jsonl     # score its decisions  — ~$0.00002 a case
-npx ensemble run  <file> "goal" --budget 0.05
+npx ensemble run  <file> "goal" --budget 0.05     # asks you at a terminal; pauses (exit 3) without one
+npx ensemble resume <file> paused.json --answer ok=no --by dana
 ```
 
 Data goes to stdout so it can be piped; commentary goes to stderr.
@@ -750,8 +816,9 @@ The plugin is not part of the npm package; the library itself ships no skills.
 
 **Skills** follow the [Agent Skills standard](https://agentskills.io).
 `loadSkills()` reads them from `.claude/skills`, `.ensemble/skills`,
-`~/.claude/skills` and installed plugins; `skillOptions()` turns them into a
-`choice`. Choosing a skill *is* a classification, so a classifier should do it —
+`~/.claude/skills`, `~/.ensemble/skills` and installed plugins;
+`skillOptions()` turns them into a `choice`. Choosing a skill *is* a
+classification, so a classifier should do it —
 TypeSafe measured the case at 182 skills: an agent working from truncated index
 entries loaded the wrong one 16.8% of the time, against 7.3% when a System One
 model ranked them first. Skills are local files, so the options are knowable
@@ -819,7 +886,7 @@ node plugin/skills/ensemble-build/scripts/dryrun.mts examples/07-senses/senses.m
 | [`06-watch`](examples/06-watch/watch.mts) | A conscience for a loop that runs for days — and it supervises `01-triage` when run directly |
 | [`07-senses`](examples/07-senses/senses.mts) | Look, listen and count at once: three forked lanes, one join, a memory key |
 | [`08-studio`](examples/08-studio/studio.mts) | The complex shape: four models in sequence, a budgeted loop, both branch forms, safety first |
-| [`09-frontdesk`](examples/09-frontdesk/frontdesk.mts) | **Everything at once**: five node kinds, three lanes, memory, a skill, MCP, a loop, and both branch forms |
+| [`09-frontdesk`](examples/09-frontdesk/frontdesk.mts) | **Everything at once**: five node kinds, three lanes, memory, a skill, MCP, a loop, both branch forms, a person in the loop, and a fallback |
 
 ---
 
@@ -832,6 +899,7 @@ import {
   validate, toGraph, execute,       // prove, emit, run
   calibrate,                        // score the decisions against labelled cases
   supervise,                        // run it as a loop that lives for days
+  resume,                           // continue a run that paused for a person
   jev, openrouter, reporter,        // the decider, the caller, the terminal view
   catalog, shortlist, modelOptions, // the live model list, filtered in code
   loadSkills, skillOptions,         // Agent Skills from disk
@@ -841,9 +909,9 @@ import {
 ```
 
 Every seam is a function type, so anything can be replaced: `Decider` (Jev),
-`Caller` (OpenRouter), `Handler` (your code). That is what makes the test suite
-free and offline, and what keeps one young vendor from being a single point of
-failure.
+`Human` (a person), `Caller` (OpenRouter), `Handler` (your code). That is what
+makes the test suite free and offline — and, with `fallback:` on a decide node,
+what keeps one young vendor from being a single point of failure.
 
 ```ts
 await triage(inputs, { decider: myStub, caller: myStub });

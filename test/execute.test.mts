@@ -391,4 +391,24 @@ console.log("ok · 10 fork runs lanes concurrently, and the join waits for all o
 }
 console.log("ok · 11 a failing lane cancels its siblings; forks with on:/when: fire only when they hold");
 
-console.log("11 cases");
+// ── 12 · a step that spent money and then failed still counts ──────────────
+{
+  const costly = runner({
+    name: "costly",
+    work: {
+      spend: ({ report }) => {
+        report({ cost: 0.4 });            // the call went out and was billed…
+        throw new Error("…and then the response was unusable");
+      },
+    },
+    nodes: { try_it: { work: "spend", writes: ["out"] } },
+    entry: "try_it",
+  });
+  const failed = await costly({ goal: "x" }).catch((e: unknown) => e);
+  assert.ok(failed instanceof RunFailed);
+  assert.equal(failed.run.steps[0]!.cost, 0.4);
+  assert.equal(failed.run.run.cost.total, 0.4, "a failed run is not a free run");
+}
+console.log("ok · 12 cost reported before a failure is counted in the run total");
+
+console.log("12 cases");

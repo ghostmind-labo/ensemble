@@ -18,11 +18,22 @@ A runner emits two documents, and together they record everything that happened:
 exit. `run.graph` is the graph's hash, so runs of different graph versions can
 be told apart.
 
+## Paused runs and people
+
+A run with `status: "paused"` is waiting for a person, not broken. Its
+`pending` block says which node, which questions (in graph.json's readable
+form) and what the person should be shown (`asked`); the snapshot to resume it
+is `paused.json` beside it (from the CLI) or `outcome.paused` (from code). A
+human step records `meta: { by: "human", who }`, answers with no confidence,
+and a noul as 1 or 0. A step with `took: "fallback"` means the decider could not
+answer and the node's declared fallback was used — its `error` says why.
+
 ## What a step carries
 
 Every `steps[]` entry has `lane` (`main`, a forking edge id, or a join node's
 name), `started`/`ended`, `asked` (the state the node was given, per its
-declared reads), `writes`, `took` (the edge it continued on, `"gate"`, or null)
+declared reads), `writes`, `took` (the edge it continued on, `"gate"`,
+`"fallback"`, or null)
 and, on a fork step, `forked` (the edge ids that fired). `asked` is the field
 that answers "what did it know at the time"; for a decide node it is exactly
 what Jev saw. Parallel steps overlap in time, so sort by `started`, not `n`,
@@ -59,6 +70,7 @@ noul, a `when:`) matched first. That's usually the explanation.
 | `budget` | Cost passed `--budget` | Which step was expensive. Usually a model node, and image models bill output as tokens |
 | `maxSteps` | Hit the step cap (default 50) | A loop without `maxLoops`, or a `when:` that never flips |
 | `cancelled` | The signal aborted | the caller |
+| `paused` | A `by: "human"` node is waiting for a person | `pending` (the node, its questions and what it showed). Not a failure: resume it with the saved `paused.json` |
 
 Reproduce a failing path for $0 with the `ensemble-build` dry-run, forcing the
 same answers:
@@ -151,13 +163,20 @@ A runner run by `supervise()` leaves a journal directory, not a single run.json:
   the `recent` window. A restart resumes from it.
 - `journal.jsonl` has one JSON object per line, by `type`: `step` (as each node
   finished), `run` (a whole run.json per tick), `watched` (the watcher's run),
-  and `start`, `tick`, `rest`, `watch`, `alert`, `stop`, `error`.
+  and `start`, `interrupted`, `paused`, `tick`, `rest`, `watch`, `alert`, `stop`,
+  `error`. A `paused` line names the tick and the node a person is waiting at,
+  and the `paused/<tick>.json` snapshot to resume from.
 
 ```sh
 jq -c 'select(.type=="alert" or .type=="stop")' .ensemble/live/journal.jsonl     # what went wrong
 jq -c 'select(.type=="watch") | {tick, verdict, reason, f: .vitals.failureRate, g: .vitals.gateRate}' .ensemble/live/journal.jsonl
 jq -c 'select(.type=="run") | .run' .ensemble/live/journal.jsonl > runs.jsonl    # feed to summarize.mts
 ```
+
+After a crash, look for an `interrupted` line: it names the tick that was
+running and how many of its steps finished. `costPerCompleted` in the vitals is
+the number to watch for money — it charges failed attempts to the tasks that
+finished, which is what a task actually cost.
 
 A rising `gateRate` means the decider is unsure more often, because the inputs
 drifted from what the questions were written for. Calibrate again on recent

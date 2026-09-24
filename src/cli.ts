@@ -11,11 +11,13 @@
  * commentary goes to stderr. `ensemble graph x.mts | jq` is the point.
  */
 import { parseArgs } from "node:util";
+import { createInterface } from "node:readline/promises";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isRunner, type Runner } from "./runner.ts";
-import { RunFailed, RunnerError } from "./execute.ts";
+import { ResumeError, RunFailed, RunnerError, type Human, type HumanAnswer, type Paused, type RunOutcome } from "./execute.ts";
+import type { GraphQuestion } from "./graph.ts";
 import { calibrate, CalibrationError, type Calibration, type Case, type QuestionReport } from "./calibrate.ts";
 import { money, reporter } from "./report.ts";
 import { loadSkills, validateSkill } from "./skills.ts";
@@ -42,7 +44,11 @@ const USAGE = `ensemble ${version()} — typed decisions, wired to your code
 Usage
   ensemble validate <file>          Prove the graph. Free, offline.
   ensemble graph <file>             Emit graph.json to stdout. Free, offline.
-  ensemble run <file> [goal]        Run it once; writes run.json.
+  ensemble run <file> [goal]        Run it once; writes run.json. At a terminal, a
+                                    by: "human" node asks you; otherwise the run
+                                    pauses, writes paused.json, and exits 3.
+  ensemble resume <file> <paused>   Continue a paused run: --answer key=value per
+                                    question, or answer at the terminal.
   ensemble calibrate <file> <cases> Score its decisions against labelled cases
                                     (.jsonl or a .json array). ~$0.00002 a case.
                                     --holdout <file> scores a second, frozen set
@@ -67,7 +73,9 @@ Options
 The file must default-export a runner(). Scenes are .mts, loaded by Node's own
 type stripping — Node 22.18 or newer.
 
-  TYPESAFE_API_KEY   required by 'run'; 'validate' and 'graph' never call out.
+  OPENROUTER_API_KEY the one key: Jev decides and models write through it.
+                     Required by 'run' and 'calibrate'; 'validate' and 'graph'
+                     never call out.
 `;
 
 const die = (message: string): never => {
@@ -102,6 +110,60 @@ function report(problems: string[], name: string): void {
 
 const pct = (n: number | null): string => (n === null ? "—" : `${(n * 100).toFixed(1)}%`);
 
+/** A description, as graph.json normalises it, down to one readable line. */
+const said = (d: unknown): string => {
+  if (!d || typeof d !== "object") return "";
+  const what = (d as { what?: unknown }).what;
+  return typeof what === "string" ? ` — ${what}` : "";
+};
+
+/**
+ * Ask the person at this terminal. The development loop's own `human`: the
+ * library ships no prompt, but the CLI is where someone is actually sitting.
+ */
+const terminal = (): Human => async ({ node, questions, asked, comment }) => {
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  try {
+    process.stderr.write(`\n  ${node} needs an answer from you. What it is looking at:\n`);
+    for (const [key, value] of Object.entries(asked)) {
+      const text = typeof value === "string" ? value : JSON.stringify(value);
+      process.stderr.write(`    ${key}: ${String(text).slice(0, 400)}\n`);
+    }
+    const answers: HumanAnswer["answers"] = {};
+    for (const q of questions) answers[q.key] = await askOne(rl, q);
+    const note = comment ? (await rl.question(`  a note for "${comment}" (enter to skip): `)).trim() : "";
+    process.stderr.write("\n");
+    return { answers, by: process.env["USER"] ?? "terminal", ...(note ? { comment: note } : {}) };
+  } finally {
+    rl.close();
+  }
+};
+
+async function askOne(rl: ReturnType<typeof createInterface>, q: GraphQuestion): Promise<string | number | boolean> {
+  const text = typeof q.instructions === "string" ? q.instructions : JSON.stringify(q.instructions);
+  process.stderr.write(`\n  ${q.key}: ${text}\n`);
+  for (;;) {
+    if (q.type === "choice") {
+      const options = q.options ?? [];
+      options.forEach((o, i) => process.stderr.write(`    ${i + 1}. ${o.name}${said(o.description)}\n`));
+      const raw = (await rl.question(`  pick 1–${options.length}: `)).trim();
+      const byNumber = options[Number(raw) - 1]?.name;
+      const byName = options.find((o) => o.name === raw)?.name;
+      if (byNumber ?? byName) return (byNumber ?? byName)!;
+    } else if (q.type === "noul") {
+      const raw = (await rl.question("  yes or no: ")).trim().toLowerCase();
+      if (["y", "yes", "true"].includes(raw)) return true;
+      if (["n", "no", "false"].includes(raw)) return false;
+    } else {
+      const levels = q.levels ?? [];
+      levels.forEach((l) => process.stderr.write(`    ${l.value}. ${said(l.description).slice(3) || `level ${l.value}`}\n`));
+      const raw = Number((await rl.question(`  level 0–${levels.length - 1}: `)).trim());
+      if (Number.isInteger(raw) && raw >= 0 && raw < levels.length) return raw;
+    }
+    process.stderr.write("  that is not one of the answers — try again\n");
+  }
+}
+
 function printCalibration(c: Calibration): void {
   process.stderr.write(`${c.runner} · ${c.cases} cases · ${c.asked} asked · ${money(c.cost)}${c.stopped ? ` · stopped: ${c.stopped}` : ""}\n`);
   printQuestions(c.questions, c.holdout ? "dev" : undefined);
@@ -130,6 +192,40 @@ function printQuestions(questions: QuestionReport[], set?: string): void {
   }
 }
 
+/**
+ * Write what a run left behind and set the exit code. A pause is not a failure,
+ * but a script that expected an answer must notice: it exits 3, next to a
+ * paused.json that `ensemble resume` takes.
+ */
+function finishRun(runner: Runner, outcome: RunOutcome, file: string, flags: { out?: string; json?: boolean }): void {
+  const { run, paused } = outcome;
+  const json = `${JSON.stringify(run, null, 2)}\n`;
+  const out = flags.out;
+  if (flags.json) {
+    // The snapshot goes out WITH the record, because `run.pending` alone cannot
+    // be resumed — it has no state, steps, loop budgets or spend. Printing the
+    // record on its own would hand back a run that says it is waiting for a
+    // person and give nobody any way to answer.
+    process.stdout.write(paused ? `${JSON.stringify({ run, paused }, null, 2)}\n` : json);
+  } else {
+    const dir = out ? dirname(resolve(out)) : resolve(".ensemble", "runs", run.run.id);
+    const path = out ? resolve(out) : join(dir, "run.json");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path, json, "utf8");
+    writeFileSync(join(dirname(path), "graph.json"), `${JSON.stringify(runner.graph(), null, 2)}\n`, "utf8");
+    process.stderr.write(`  ${path}\n`);
+    if (paused) {
+      const saved = join(dirname(path), "paused.json");
+      writeFileSync(saved, `${JSON.stringify(paused, null, 2)}\n`, "utf8");
+      const hint = paused.pending.questions.map((q) => `--answer ${q.key}=…`).join(" ");
+      process.stderr.write(`  ⏸ waiting for a person at "${paused.node}" — ${saved}\n`);
+      process.stderr.write(`    npx ensemble resume ${file} ${saved} ${hint}\n`);
+    }
+  }
+  if (paused) process.exit(3);
+  if (run.run.status !== "completed") process.exit(1);
+}
+
 async function main(): Promise<void> {
   const { values, positionals } = parseArgs({
     args: process.argv.slice(2),
@@ -143,6 +239,9 @@ async function main(): Promise<void> {
       budget: { type: "string" },
       "max-steps": { type: "string" },
       holdout: { type: "string" },
+      answer: { type: "string", multiple: true },
+      comment: { type: "string" },
+      by: { type: "string" },
       remote: { type: "boolean", default: false },
     },
   });
@@ -220,26 +319,69 @@ async function main(): Promise<void> {
 
       const live = reporter();
       try {
-        const { run } = await runner(inputs, {
+        const outcome = await runner(inputs, {
           budget: num(values.budget),
           maxSteps: num(values["max-steps"]),
           onEvent: live,
+          ...(process.stdin.isTTY && !values.json ? { human: terminal() } : {}),
         });
-
-        const json = `${JSON.stringify(run, null, 2)}\n`;
-        if (values.json) {
-          process.stdout.write(json);
-        } else {
-          const dir = values.out ? dirname(resolve(values.out)) : resolve(".ensemble", "runs", run.run.id);
-          const path = values.out ? resolve(values.out) : join(dir, "run.json");
-          mkdirSync(dir, { recursive: true });
-          writeFileSync(path, json, "utf8");
-          writeFileSync(join(dirname(path), "graph.json"), `${JSON.stringify(runner.graph(), null, 2)}\n`, "utf8");
-          process.stderr.write(`  ${path}\n`);
-        }
-        if (run.run.status !== "completed") process.exit(1);
+        finishRun(runner, outcome, file!, { out: values.out, json: values.json });
       } catch (error) {
         live.stop();
+        if (error instanceof RunnerError) report(error.problems, runner.spec.name);
+        if (error instanceof RunFailed) {
+          process.stderr.write(`  ✗ ${error.message} · ${money(error.run.run.cost.total)}\n`);
+          process.exit(1);
+        }
+        die((error as Error).message);
+      }
+      return;
+    }
+
+    case "resume": {
+      const runner = await load(file);
+      const pausedPath = rest[0];
+      if (!pausedPath) die("no paused run given — ensemble resume <file.mts> <paused.json> [--answer key=value]");
+      let paused: Paused;
+      try {
+        // Either a bare snapshot (what `run` writes as paused.json) or the
+        // `{ run, paused }` envelope `run --json` prints, so a piped run can be
+        // resumed from the file it was piped into without being unwrapped first.
+        const read = JSON.parse(readFileSync(resolve(pausedPath!), "utf8")) as Paused | { paused?: Paused };
+        paused = ("paused" in read && read.paused ? read.paused : read) as Paused;
+      } catch (error) {
+        return die(`could not read ${pausedPath}: ${(error as Error).message}`);
+      }
+      const given = values.answer ?? [];
+      let answer: HumanAnswer;
+      if (given.length) {
+        const answers: HumanAnswer["answers"] = {};
+        for (const pair of given) {
+          const at = pair.indexOf("=");
+          if (at === -1) die(`--answer needs key=value, got "${pair}"`);
+          answers[pair.slice(0, at)] = pair.slice(at + 1);
+        }
+        answer = { answers, ...(values.comment ? { comment: values.comment } : {}), ...(values.by ? { by: values.by } : {}) };
+      } else if (process.stdin.isTTY) {
+        const p = paused.pending;
+        answer = (await terminal()({ run: paused.run.id, node: p.node, questions: p.questions, asked: p.asked, ...(p.comment ? { comment: p.comment } : {}), signal: new AbortController().signal }))!;
+      } else {
+        return die(`nothing to answer with — pass --answer ${paused.pending?.questions.map((q) => `${q.key}=…`).join(" --answer ")}`);
+      }
+
+      process.stderr.write(`${runner.spec.name} — resuming at ${paused.node}\n`);
+      const live = reporter();
+      try {
+        const outcome = await runner.resume(paused, answer, {
+          budget: num(values.budget),
+          maxSteps: num(values["max-steps"]),
+          onEvent: live,
+          ...(process.stdin.isTTY && !values.json ? { human: terminal() } : {}),
+        });
+        finishRun(runner, outcome, file!, { out: values.out, json: values.json });
+      } catch (error) {
+        live.stop();
+        if (error instanceof ResumeError) die(error.message);
         if (error instanceof RunnerError) report(error.problems, runner.spec.name);
         if (error instanceof RunFailed) {
           process.stderr.write(`  ✗ ${error.message} · ${money(error.run.run.cost.total)}\n`);
@@ -354,7 +496,7 @@ async function main(): Promise<void> {
     }
 
     default:
-      die(`unknown command "${command}" — try: validate, graph, run, calibrate, check, skills, servers, version`);
+      die(`unknown command "${command}" — try: validate, graph, run, resume, calibrate, check, skills, servers, version`);
   }
 }
 

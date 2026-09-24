@@ -26,7 +26,7 @@
  * keeps them apart and says how far apart they landed, because the gap between
  * them is the only honest estimate of what the next unseen input will do.
  */
-import { jev, type Decider } from "./jev.ts";
+import { jev, jevConfigFor, type Decider } from "./jev.ts";
 import type { Answer, Question } from "./questions.ts";
 import { isDecide, type RunnerSpec, type State } from "./spec.ts";
 
@@ -244,7 +244,7 @@ export async function calibrate(
   if (cases.length === 0) problems.push("no cases — a calibration needs labelled examples");
   if (problems.length) throw new CalibrationError(problems);
 
-  const decider = options.decider ?? jev(spec.jev);
+  const decider = options.decider ?? jev(jevConfigFor(spec.openrouter, spec.jev));
   const results = new Map<string, Array<{ case: number; right: boolean; confidence: number; got: string | number; expected: string | number | boolean; answer: Answer }>>();
   let cost = 0;
   let asked = 0;

@@ -1,9 +1,9 @@
 // The decider client, against a mocked fetch. Offline by construction: the
 // suite never reaches the network and needs no key beyond a fake one.
 import assert from "node:assert/strict";
-import { choice, jev, JevError, noul, USD_PER_INPUT_TOKEN } from "../src/index.ts";
+import { choice, jev, jevConfigFor, JevError, noul, runner, USD_PER_INPUT_TOKEN } from "../src/index.ts";
 
-process.env["TYPESAFE_API_KEY"] = "test-key";
+process.env["OPENROUTER_API_KEY"] = "test-key";
 
 interface Call {
   url: string;
@@ -37,7 +37,7 @@ const questions = { team: choice("Which?", { a: null, b: null }), sure: noul("Su
   await jev({ fetch })({ goal: "hello" }, questions);
 
   const call = fetch.calls[0]!;
-  assert.equal(call.url, "https://api.typesafe.ai/v1/systemone");
+  assert.equal(call.url, "https://openrouter.ai/api/v1/systemone", "Jev is reached through OpenRouter's System One route");
   assert.equal(call.init.method, "POST");
   const headers = call.init.headers as Record<string, string>;
   assert.equal(headers["authorization"], "Bearer test-key");
@@ -63,17 +63,17 @@ console.log("ok · 2 cost is input tokens only — output is free");
 
 // ── 3 · a missing key fails before any request is made ──────────────────────
 {
-  const saved = process.env["TYPESAFE_API_KEY"];
-  delete process.env["TYPESAFE_API_KEY"];
+  const saved = process.env["OPENROUTER_API_KEY"];
+  delete process.env["OPENROUTER_API_KEY"];
   const fetch = mock([ok({})]);
   await assert.rejects(() => jev({ fetch })("x", questions), (error: Error) => {
     assert.ok(error instanceof JevError);
-    assert.match(error.message, /TYPESAFE_API_KEY/);
-    assert.match(error.message, /console\.typesafe\.ai/, "it says where a key comes from");
+    assert.match(error.message, /OPENROUTER_API_KEY/);
+    assert.match(error.message, /openrouter\.ai\/keys/, "it says where a key comes from");
     return true;
   });
   assert.equal(fetch.calls.length, 0, "nothing was sent");
-  process.env["TYPESAFE_API_KEY"] = saved;
+  process.env["OPENROUTER_API_KEY"] = saved;
 }
 console.log("ok · 3 no key means no request, and a message naming the fix");
 
@@ -123,9 +123,47 @@ console.log("ok · 5 retries are bounded, and the failure names the status");
 {
   const fetch = mock([ok({ sure: { type: "noul", noul: 0.9 } })]);
   await jev({ fetch, baseUrl: "https://proxy.internal/", model: "jev-1.13.0" })("x", { sure: noul("Sure?") });
-  assert.equal(fetch.calls[0]!.url, "https://proxy.internal/v1/systemone", "a trailing slash is tolerated");
+  assert.equal(fetch.calls[0]!.url, "https://proxy.internal/systemone", "a trailing slash is tolerated");
   assert.equal(JSON.parse(String(fetch.calls[0]!.init.body))["model"], "jev-1.13.0");
 }
 console.log("ok · 6 base url and model can be pointed elsewhere");
 
-console.log("6 cases");
+// ── 7 · a billed cost wins over the list price ──────────────────────────────
+{
+  // OpenRouter states what each call cost. That figure knows the price that
+  // actually applied; the constant here is only what the list said once.
+  const fetch = mock([
+    { status: 200, body: { model: "typesafe/jev-1.13-20260917", answers: { sure: { type: "noul", noul: 0.9 } }, usage: { input_tokens: 476, output_tokens: 70, cost: 0.000019992 } } },
+  ]);
+  const decision = await jev({ fetch })("x", { sure: noul("Sure?") });
+  assert.equal(decision.cost, 0.000019992, "the billed figure, not 476 × the list price");
+  assert.deepEqual(decision.usage, { input_tokens: 476, output_tokens: 70 });
+}
+console.log("ok · 7 a billed usage.cost is the cost");
+
+// ── 8 · one key, set once, reaches the decider ──────────────────────────────
+{
+  const saved = process.env["OPENROUTER_API_KEY"];
+  delete process.env["OPENROUTER_API_KEY"];
+  const fetch = mock([ok({ sure: { type: "noul", noul: 0.9 } })]);
+  // The key goes where the model nodes already look for it. The decider reads
+  // it from there, so a runner names its one credential in one place.
+  const r = runner({
+    name: "one-key",
+    openrouter: { apiKey: "shared-key", fetch },
+    nodes: { ask: { decide: { sure: noul("Sure?") }, reads: ["goal"] }, done: { code: () => "done" } },
+    edges: [{ from: "ask", to: "done" }],
+    entry: "ask",
+  });
+  await r({ goal: "x" });
+  assert.equal(fetch.calls.length, 1);
+  assert.equal(new Headers(fetch.calls[0]!.init.headers).get("authorization"), "Bearer shared-key");
+  assert.equal(fetch.calls[0]!.url, "https://openrouter.ai/api/v1/systemone");
+  // And a decider-specific setting still wins where one is given.
+  assert.equal(jevConfigFor({ apiKey: "shared" }, { apiKey: "own" }).apiKey, "own");
+  assert.equal(jevConfigFor({ apiKey: "shared" }, { model: "jev-1.13" }).apiKey, "shared");
+  process.env["OPENROUTER_API_KEY"] = saved;
+}
+console.log("ok · 8 the runner's one OpenRouter key reaches the decider");
+
+console.log("8 cases");

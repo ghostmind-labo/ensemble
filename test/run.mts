@@ -6,7 +6,7 @@
  * other. Isolation is cheap and the failures stay readable.
  *
  * Every suite is offline. The decider is stubbed or fetch is mocked, so `npm
- * test` needs no TYPESAFE_API_KEY and spends nothing — which is also what CI
+ * test` needs no OPENROUTER_API_KEY and spends nothing — which is also what CI
  * runs.
  */
 import { readdirSync } from "node:fs";

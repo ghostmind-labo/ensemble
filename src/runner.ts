@@ -10,7 +10,7 @@
  * something is wrong, and a factory that threw on import would take them away
  * at the moment they are needed. `execute` is what refuses.
  */
-import { execute, type RunOptions, type RunOutcome } from "./execute.ts";
+import { execute, resume, type HumanAnswer, type Paused, type RunOptions, type RunOutcome } from "./execute.ts";
 import { toGraph, type GraphDoc } from "./graph.ts";
 import { validate } from "./validate.ts";
 import type { RunnerSpec, State } from "./spec.ts";
@@ -18,6 +18,8 @@ import type { RunnerSpec, State } from "./spec.ts";
 export interface Runner {
   /** Run it. Throws RunnerError if the spec does not validate, RunFailed if a node does. */
   (inputs?: State, options?: RunOptions): Promise<RunOutcome>;
+  /** Continue a run that paused for a person, with their answer. */
+  resume(paused: Paused, answer: HumanAnswer, options?: RunOptions): Promise<RunOutcome>;
   readonly spec: RunnerSpec;
   /** The structure, as data. Free and offline. */
   graph(): GraphDoc;
@@ -31,6 +33,8 @@ export function runner(spec: RunnerSpec): Runner {
 
   return Object.assign(call, {
     spec,
+    resume: (paused: Paused, answer: HumanAnswer, options: RunOptions = {}): Promise<RunOutcome> =>
+      resume(spec, paused, answer, options),
     graph: (): GraphDoc => toGraph(spec),
     validate: (): string[] => validate(spec),
   });

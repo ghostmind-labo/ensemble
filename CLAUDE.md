@@ -4,7 +4,12 @@
 routes to code the user wrote. It asks [Jev](https://docs.typesafe.ai)
 (TypeSafe's System One classifier: yes/no, one-of-N, or a rubric position) and
 emits the graph and the run as JSON. TypeScript ESM on Node ≥ 22.18, **zero
-runtime dependencies**, one credential: `TYPESAFE_API_KEY`.
+runtime dependencies**, one credential: `OPENROUTER_API_KEY`.
+
+Jev itself is reached **through OpenRouter** (`POST /api/v1/systemone`, the same
+request and the same calibrated answers as TypeSafe's own API), so the decider
+and every model node share one key and one bill. Never ask a user for a
+`TYPESAFE_API_KEY`; that is a decision the owner made, not an oversight.
 
 It calls generative models through **OpenRouter only** — one endpoint, one key,
 one billing line, every vendor. Do not add `openai`, `@anthropic-ai/sdk` or
@@ -23,7 +28,7 @@ back is the change to question.
 Fifteen files, and each one has a single job.
 
 - `src/questions.ts` — `choice` / `score` / `noul`, their answer types, and the API limits enforced at authoring time
-- `src/jev.ts` — the decider: one `fetch` to `POST /v1/systemone`, plus the `Decider` seam
+- `src/jev.ts` — the decider: one `fetch` to OpenRouter's `POST /api/v1/systemone`, plus the `Decider` seam
 - `src/openrouter.ts` — the caller: generation, vision, image output, the live model catalogue, and the `Caller` seam
 - `src/skills.ts` — the Agent Skills standard, read from disk; `skillOptions` for a choice
 - `src/mcp.ts` — a hand-rolled stdio JSON-RPC client. One tool call per node, never a loop
@@ -127,6 +132,23 @@ can now say which model, whether it sees, and what it costs.
 If one is added anyway: a node kind needs an `isX` guard in `spec.ts`, a
 `writesOf`/`readsOf` branch, a `validate` check, a `graph` cost class, an
 `execute` arm, and a badge in `report.ts`.
+</important>
+
+<important if="you are touching human-in-the-loop, pause/resume, or the decider fallback">
+
+A person is a DECIDER, not a node kind: `decide` with `by: "human"` asks the same
+closed questions, so the closed set of node kinds stays at five and validate's
+exhaustiveness proof covers people too. Keep it that way — a "human node" kind
+would be the change to question.
+
+Invariants: a human answer carries no confidence (so no gate on a human node) and
+a noul answer lands as 1/0; a malformed answer is `HumanAnswerError` and must
+never take `fallback`, which is for NO answer (outage, timeout); a human node may
+not sit inside a fork lane, because a run pauses on one lane; a person's wait is
+not bounded by `stepTimeout`. A pause is not a failure: status `"paused"`,
+`run.json` gains `pending`, and `outcome.paused` is a plain-JSON snapshot that
+`resume` refuses if the graph hash changed. Loop budgets (`taken`) travel inside
+the snapshot — a pause must never reset them.
 </important>
 
 <important if="you are touching lanes, forks, joins, or anything concurrent">

@@ -285,6 +285,12 @@ console.log("ok · 9 the studio example loops twice, then hands off; a memo skip
   assert.equal(graph.edges.find((e) => e.from === "tally" && e.to === "answer")!.maxLoops, 2);
   assert.equal(graph.edges.filter((e) => e.from === "tally").at(-1)!.to, "hand_off");
 
+  // a person in the loop, and a fallback for when the decider is down
+  const approve = graph.nodes.find((n) => n.id === "approve")!;
+  assert.equal(approve.decide!.by, "human");
+  assert.equal(approve.decide!.comment, "reviewer_note");
+  assert.equal(triage.decide!.fallback, "hand_off");
+
   // it runs: a hazard pages someone before anything is generated
   let called = 0;
   const caller: Caller = async (req: ModelRequest): Promise<ModelReply> => (
@@ -312,6 +318,34 @@ console.log("ok · 9 the studio example loops twice, then hands off; a memo skip
   // second node of lane e1, not a lane of its own.
   assert.deepEqual(run.steps.map((s) => s.lane), ["main", "e0", "e1", "e2", "e1", "triage", "triage"]);
   assert.equal(run.state["seen"], 4, "memory advanced in its own lane");
+}
+// and without a person to ask, an urgent reply pauses at approval — then resumes
+{
+  const good: Decider = async (_s: unknown, questions: Record<string, Question>) => {
+    const answers: Record<string, Answer> = {};
+    for (const key of Object.keys(questions)) {
+      answers[key] =
+        key === "area"
+          ? { type: "choice", choice: "bug", confidence: 0.9, probabilities: {} }
+          : key === "urgency"
+            ? { type: "score", score: 1.2, confidence: 0.9, probabilities: {}, legend: {} }
+            : key === "quality"
+              ? { type: "score", score: 2, confidence: 0.9, probabilities: {}, legend: {} }
+              : { type: "noul", noul: key === "hazard" ? 0.1 : 0.9 };
+    }
+    return { model: "stub", answers, usage: { input_tokens: 1, output_tokens: 0 }, cost: 0 };
+  };
+  const quiet: Caller = async (req: ModelRequest): Promise<ModelReply> => ({
+    model: req.model, text: "a reply", images: [], usage: { input_tokens: 1, output_tokens: 1 }, cost: 0,
+  });
+  // the MCP lane is stubbed out so the test never spawns a server
+  (frontdesk.spec.nodes["read_log"] as unknown) = { code: () => ({ log_text: "log", log_data: {} }), reads: ["log_path"], writes: ["log_text", "log_data"] };
+  const first = await frontdesk({ goal: "blank modal", screenshot: "https://x/s.png", log_path: "README.md" }, { decider: good, caller: quiet });
+  assert.equal(first.run.run.status, "paused");
+  assert.equal(first.run.pending!.node, "approve");
+  const done = await frontdesk.resume(JSON.parse(JSON.stringify(first.paused)), { answers: { send_it: true }, by: "lead" }, { decider: good, caller: quiet });
+  assert.match(String(done.result), /^sent:/);
+  assert.deepEqual(done.run.steps.slice(-2).map((s) => s.node), ["approve", "send"]);
 }
 console.log("ok · 10 the frontdesk example carries every concept, and safety outranks the routing");
 
