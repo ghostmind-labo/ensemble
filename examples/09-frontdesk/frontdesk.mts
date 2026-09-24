@@ -14,7 +14,7 @@
  *                                          ▲              │ weak or ungrounded
  *                                          └── tally ◄────┘ (loop, budget 2)
  *                                                └─ spent ─► a person
- *                                       review ─► remember ─► card? ─► deliver
+ *                                       review ─► remember ─► card? ─► a person approves ─► deliver
  *
  * What is in here, and where to look:
  *
@@ -31,6 +31,11 @@
  *   · a loop with its budget on the edge, and a following edge that takes over
  *   · both branch forms: `on:` for a declared answer, `when:` for arithmetic and
  *     for keys written earlier in the run
+ *   · a PERSON in the loop: `approve` asks the same kind of closed question Jev
+ *     does, so its answers are wired and proven like any other. With a `human`
+ *     handler the run waits; without one it pauses and can be resumed later
+ *   · a fallback: if the decider is down, `triage` routes to a person instead of
+ *     failing the run
  *
  * It is also a SHORT run. The whole graph is one function call: three lanes in
  * parallel, one ~100 ms decision, and a model or two. Two or three minutes, not
@@ -129,6 +134,8 @@ export default runner({
       // by name. `seen` is here because a repeat report is a different report.
       reads: ["goal", "scene", "log_text", "seen"],
       gate: { on: "area", min: 0.65, to: "hand_off" },
+      // Low confidence is the gate's job. NO answer — an outage, a timeout — is this.
+      fallback: "hand_off",
     },
 
     /* ── the answer path ───────────────────────────────────────────────────── */
@@ -207,6 +214,20 @@ export default runner({
       writes: ["caption", "image"], // positional: [text, images]
     },
 
+    // A person, asked a closed question like any other. Urgent replies are seen
+    // by a human before they go out; their note travels with the run.
+    approve: {
+      decide: {
+        send_it: noul("Should this reply go to the customer as written?", {
+          true: { what: "Accurate, on-tone, and safe to send unchanged" },
+          false: { what: "Wrong, off-tone, or needs a person to rewrite it" },
+        }),
+      },
+      reads: ["goal", "reply", "caption"],
+      by: "human",
+      comment: "reviewer_note",
+    },
+
     /* ── the exits ─────────────────────────────────────────────────────────── */
 
     alarm: { work: "page", reads: ["goal", "scene"], writes: ["outcome"] },
@@ -264,7 +285,11 @@ export default runner({
     // when() — an `on:` branch must leave the node that asked the question.
     { from: "remember", to: "card", when: (s) => Number(s["urgency"]) >= 1 },
     { from: "remember", to: "send" },
-    { from: "card", to: "send" },
+    { from: "card", to: "approve" },
+
+    // The person's answer is branched on like Jev's: on: for a declared answer.
+    { from: "approve", to: "send", on: "send_it" },
+    { from: "approve", to: "hand_off" },
   ],
 
   entry: "start",

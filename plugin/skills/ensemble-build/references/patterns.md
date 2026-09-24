@@ -18,6 +18,8 @@ combine two or three. Every snippet uses the v2 API. Imports come from
 11. Choosing between patterns
 12. A loop that runs for days, with a watcher
 13. Fan out, then decide once: fork and join
+14. Gate an action, then check it happened
+15. A person in the loop
 
 ---
 
@@ -335,10 +337,11 @@ wiring.
 
 ## 10. Many checks at once, combined in code
 
-There are no parallel node groups. The equivalent is several questions in one
-decide node, which go out in one request and are answered independently. Then
-either route on them with ordered edges, or fold them into one value in a `code`
-node when the rule is arithmetic.
+A fixed set of lanes is a fork and a join (pattern 13), but a variable number of
+them is never the graph's job. For independent checks the cheaper shape is
+several questions in one decide node, which go out in one request and are
+answered independently. Then either route on them with ordered edges, or fold
+them into one value in a `code` node when the rule is arithmetic.
 
 ```ts
 screen: {
@@ -406,6 +409,10 @@ edges: [
 | "an agent that keeps choosing tools until done" | a `work` handler that runs the agent (any SDK), supervised and watched: 12 |
 | "keep running / monitor / every N minutes / for days" | 12 |
 | "at the same time / in parallel / all three then decide" | 13 |
+| "before it runs a command / sends / pays / deletes" | 14 |
+| "a person approves / signs off / reviews before…" | 15 |
+| "keep working if the classifier is down" | `fallback:` on the decide node (15) |
+| "click the right button / pick from what's on the page now" | a `work` handler that rebuilds the menu each turn. The options change every step, so they can't be a declared `choice` |
 
 ## 12. A loop that runs for days, with a watcher
 
@@ -510,3 +517,112 @@ Rules:
   the honest picture when the width isn't known until run time.
 - **Dry-run it.** `--explore` follows every lane; an untaken fork edge is listed
   like any other.
+
+## 14. Gate an action, then check it happened
+
+Two separate facts, and the classic mistake is to treat the first as the second.
+**A confident "safe to run" is not permission to skip review of the risky case,
+and a confident "done" is not proof that anything was done.**
+
+```ts
+nodes: {
+  vet: {
+    decide: {
+      destructive: noul("Would running this command delete, overwrite or move data that cannot be recovered?"),
+      reaches_out:  noul("Would running this command send data to a machine other than this one?"),
+    },
+    reads: ["command"],
+  },
+  run_it:  { work: "execute", reads: ["command"], writes: ["receipt"] },
+  confirm: {                                  // deterministic, and free
+    code: async (s) => existsSync(String(s.expected_path)) && (await stat(String(s.expected_path))).size > 0,
+    reads: ["expected_path", "receipt"],
+    writes: ["verified"],
+  },
+  ask_a_person: { work: "request_approval", reads: ["command"], writes: ["receipt"] },
+  done:   { work: "report", reads: ["receipt"], writes: ["outcome"] },
+  failed: { work: "report_failure", reads: ["receipt"], writes: ["outcome"] },
+},
+edges: [
+  // Asymmetric on purpose: the model may only make the CHEAP mistake.
+  // Auto-run only when it is very sure the command is harmless; everything
+  // else goes to a person. Never the other way round.
+  { from: "vet", to: "run_it", when: (s) => {
+      const destructive = Number(s.destructive), reaches = Number(s.reaches_out);
+      return destructive < 0.1 && reaches < 0.1;
+  } },
+  { from: "vet", to: "ask_a_person" },
+
+  { from: "run_it", to: "confirm" },
+  { from: "confirm", to: "done",   when: (s) => s.verified === true },
+  { from: "confirm", to: "failed" },
+]
+```
+
+Rules:
+
+- **The gate is asymmetric.** Choose which mistake the model is allowed to make.
+  Here a false "dangerous" costs a person a click; a false "safe" costs data. So
+  the auto-run threshold sits near zero and every other case escalates.
+- **Check the effect, not the decision.** After an action, a `code` node looks at
+  the world — the file exists, the row is there, the API returned the id —
+  instead of asking a model whether it went well. It is free, deterministic, and
+  the only thing that turns "it said it did it" into "it did it".
+- **Under `supervise`, this is also what makes a restart safe.** A tick that
+  died after `run_it` but before `confirm` comes back through
+  `next({ interrupted })` with the steps it already took, so the next attempt can
+  check before running the command a second time.
+
+## 15. A person in the loop
+
+A person is just another decider: a `decide` node with `by: "human"` asks the
+same closed questions Jev would, so the graph stays complete and `validate`
+still proves every answer is wired. The shape that earns it: **Jev handles the
+common case, a person handles the uncertain or consequential one.**
+
+```ts
+nodes: {
+  classify: {
+    decide: { action: choice("What should happen to this refund request?", { approve: …, reject: …, investigate: … }) },
+    reads: ["request", "history"],
+    gate: { on: "action", min: 0.8, to: "review" },   // unsure → a person
+    fallback: "review",                                // decider down → a person
+  },
+  review: {
+    decide: { action: choice("What should happen to this refund request?", { approve: …, reject: …, investigate: … }) },
+    reads: ["request", "history", "action"],          // the person sees what Jev proposed
+    by: "human",
+    comment: "review_note",
+  },
+  …
+},
+edges: [
+  // Money over a threshold always goes to a person, whatever Jev said — arithmetic, in code.
+  { from: "classify", to: "review",  when: (s) => { const amount = Number(s.amount); return amount > 500; } },
+  { from: "classify", to: "pay",     on: "action=approve" },
+  { from: "classify", to: "refuse",  on: "action=reject" },
+  { from: "classify", to: "dig",     on: "action=investigate" },
+  // The person's answer is routed exactly like Jev's.
+  { from: "review", to: "pay",    on: "action=approve" },
+  { from: "review", to: "refuse", on: "action=reject" },
+  { from: "review", to: "dig",    on: "action=investigate" },
+],
+```
+
+Rules:
+
+- **Ask the person the same question Jev was asked.** Then both answers land on
+  the same key, the downstream edges are shared, and `run.json` shows who
+  decided. Put Jev's proposal in the person's `reads` so they see it.
+- **Three roads to a person, each for a different reason:** a `gate` (Jev is
+  unsure), a `when:` (the stakes are high whatever Jev thinks), and a `fallback`
+  (Jev could not answer at all).
+- **Short runs wait, long ones pause.** A `human` handler in the run options
+  waits for a terminal, a chat button, a form. Without one the run pauses and
+  returns `paused`; store it and call `runner.resume(paused, answer)` when the
+  answer arrives — minutes or days later, in another process. Under `supervise`,
+  paused ticks are parked (`onPaused`) and the loop keeps going.
+- **Never inside a fork.** A run can pause on one lane only; ask after the join.
+- **Dry-run it like any decision.** The dry run answers for the person from the
+  same `--answer` script (`--answer review.action=reject`), and `--explore` walks
+  every answer they could give.

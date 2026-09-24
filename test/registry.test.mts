@@ -166,7 +166,7 @@ console.log("ok · 4 the specified API errors; the unofficial one degrades to no
     { id: "sees/things", vision: true, draws: false, tools: true },
     { id: "makes/pictures", vision: true, draws: true, tools: false },
   ];
-  const keys = { TYPESAFE_API_KEY: "k", OPENROUTER_API_KEY: "k" };
+  const keys = { OPENROUTER_API_KEY: "k" };
 
   const blind = await preflight(
     { name: "x", nodes: { look: { model: "text/only", sees: ["frame"], writes: ["scene"] } } },
@@ -223,14 +223,12 @@ console.log("ok · 5 preflight catches a text model asked to see, and a non-draw
       mcpServers: { fs: {} },
       skills: [{ name: "pascal", path: "/p", description: "d", compatibility: "Requires the Pascal CLI" }],
     },
-    { catalog: cards, env: { TYPESAFE_API_KEY: "k" } },
+    { catalog: cards, env: {} },
   );
 
-  assert.deepEqual(flight.env, [
-    { name: "TYPESAFE_API_KEY", why: "1 decide node", set: true },
-    { name: "OPENROUTER_API_KEY", why: "1 model node", set: false },
-  ]);
-  assert.ok(flight.problems.some((p) => /OPENROUTER_API_KEY is not set — needed by 1 model node/.test(p)));
+  // One key, named once: the decider reaches Jev through the same service the model node calls.
+  assert.deepEqual(flight.env, [{ name: "OPENROUTER_API_KEY", why: "1 decide node and 1 model node", set: false }]);
+  assert.ok(flight.problems.some((p) => /OPENROUTER_API_KEY is not set — needed by 1 decide node and 1 model node/.test(p)));
   assert.ok(flight.notes.some((n) => /starts MCP server "fs" as a local process/.test(n)));
   assert.ok(flight.notes.some((n) => /skill "pascal" requires: Requires the Pascal CLI/.test(n)));
 

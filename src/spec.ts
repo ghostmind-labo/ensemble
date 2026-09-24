@@ -1,7 +1,7 @@
 /**
  * The vocabulary — everything you write down, and nothing that runs.
  *
- * A runner is data: three kinds of node, one kind of edge, and a map of
+ * A runner is data: five kinds of node, one kind of edge, and a map of
  * handlers. Keeping it data is what lets `validate` prove things about it and
  * `graph` serialise it without executing a line, which in turn is what makes
  * the emitted picture complete rather than a recording of one lucky path.
@@ -68,6 +68,28 @@ export interface DecideNode extends Joinable {
    * `on` must name a choice or score question — a noul reports no confidence.
    */
   gate?: { on: string; min: number; to: string };
+  /**
+   * Who answers. Omitted, the decider does. `"human"` asks a PERSON the same
+   * closed questions, and the run waits — for the `human` handler in RunOptions
+   * if there is one, or by pausing and handing back a snapshot to resume later.
+   * Nothing else about the node changes: the options are declared, the edges
+   * are proven exhaustive, and the answer lands on state like any other. That
+   * is the point — a person in the loop is typed, wired and recorded exactly
+   * like the classifier, not a hole in the graph.
+   */
+  by?: "human";
+  /**
+   * Human only: a state key for the person's optional free-text note — "fix the
+   * tone" — so the next node can read it. Declared, so it has an origin.
+   */
+  comment?: string;
+  /**
+   * Where to go when the decider cannot answer at all: the service is down,
+   * rate-limited past its retries, or timed out. Without it, the run fails.
+   * With it, an outage becomes a route — usually to a person or a hold — and
+   * the step records why. Low confidence is `gate`'s job; this is for NO answer.
+   */
+  fallback?: string;
   label?: string;
 }
 
@@ -273,10 +295,15 @@ export const externalKeys = (spec: RunnerSpec): string[] => [
   ...new Set(["goal", ...(spec.inputs ?? []), ...(spec.memory ?? [])]),
 ];
 
-/** The state keys a node writes. A decide node writes one per question. */
+/** The state keys a node writes. A decide node writes one per question, plus a person's note. */
 export function writesOf(node: NodeSpec): string[] {
-  return isDecide(node) ? Object.keys(node.decide) : (node.writes ?? []);
+  return isDecide(node)
+    ? [...Object.keys(node.decide), ...(node.comment ? [node.comment] : [])]
+    : (node.writes ?? []);
 }
+
+/** Does a person answer this node? */
+export const isHuman = (node: NodeSpec): boolean => isDecide(node) && node.by === "human";
 
 /** The state keys a node reads — declared, plus the ones its kind reads by its own rules. */
 export function readsOf(node: NodeSpec): string[] {
@@ -328,25 +355,58 @@ export const edgeId = (index: number): string => `e${index}`;
 export const forksFrom = (spec: RunnerSpec, node: string): boolean =>
   (spec.edges ?? []).some((edge) => edge.from === node && edge.fork);
 
-/**
- * The nodes a lane can visit, starting after a forking edge and stopping at
- * the first join. This is the set that concurrency is reasoned about: two
- * lanes of one fork are concurrent, so their sets must not share a node or a
- * state key. Nested forks are simply inside the set.
- */
-export function laneNodes(spec: RunnerSpec, start: string): Set<string> {
+/** Every node reachable from `start`, following edges, gates and fallbacks. */
+function reachable(spec: RunnerSpec, start: string, stopAt: ReadonlySet<string> = new Set()): Set<string> {
   const seen = new Set<string>();
   const queue = [start];
   while (queue.length) {
     const at = queue.shift()!;
     const node = spec.nodes[at];
     if (!node || seen.has(at)) continue;
-    if (node.join) continue; // the join belongs to no single lane
+    if (stopAt.has(at)) continue;
     seen.add(at);
     for (const edge of spec.edges ?? []) if (edge.from === at) queue.push(edge.to);
     if (isDecide(node) && node.gate) queue.push(node.gate.to);
+    if (isDecide(node) && node.fallback) queue.push(node.fallback);
   }
   return seen;
+}
+
+/**
+ * The nodes each lane of one fork can visit, up to the join where that fork's
+ * lanes meet again. This is the set concurrency is reasoned about: two lanes of
+ * one fork run at the same time, so their sets must not share a node or a state
+ * key.
+ *
+ * The subtle part is where a lane ENDS, and getting it wrong costs the proof.
+ * Stopping at the first join a lane meets is wrong, because a nested fork inside
+ * the lane has a join of its own that the lane passes straight through — stop
+ * there and every node beyond it escapes the check entirely. Walking past every
+ * join is wrong the other way: the lanes would appear to collide on the shared
+ * work that legitimately follows the merge.
+ *
+ * So a join ends a lane only when it is where THIS fork's lanes meet, which is
+ * exactly a join that more than one of them can reach. Everything else is
+ * inside a lane, nested forks and their joins included.
+ */
+export function lanesOf(spec: RunnerSpec, from: string): Array<{ id: string; to: string; nodes: Set<string> }> {
+  const edges = spec.edges ?? [];
+  const forks = edges.map((edge, index) => ({ edge, index })).filter(({ edge }) => edge.from === from && edge.fork);
+
+  // Pass one, joins ignored: which joins can more than one sibling lane reach?
+  const wide = forks.map(({ edge }) => reachable(spec, edge.to));
+  const merges = new Set<string>();
+  for (const name of new Set(wide.flatMap((set) => [...set]))) {
+    if (!spec.nodes[name]?.join) continue;
+    if (wide.filter((set) => set.has(name)).length > 1) merges.add(name);
+  }
+
+  // Pass two: walk each lane again, stopping only where they meet.
+  return forks.map(({ edge, index }) => ({
+    id: edgeId(index),
+    to: edge.to,
+    nodes: reachable(spec, edge.to, merges),
+  }));
 }
 
 /**

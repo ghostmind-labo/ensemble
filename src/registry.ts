@@ -323,8 +323,13 @@ export async function preflight(
   const decides = nodes.filter(([, node]) => node && typeof node === "object" && "decide" in node);
   const mcps = nodes.filter(([, node]) => node && typeof node === "object" && "mcp" in node);
 
-  if (decides.length) need("TYPESAFE_API_KEY", `${decides.length} decide node${decides.length === 1 ? "" : "s"}`);
-  if (models.length) need("OPENROUTER_API_KEY", `${models.length} model node${models.length === 1 ? "" : "s"}`);
+  // One key for both: the decider reaches Jev through OpenRouter, the same
+  // service every model node calls, so there is exactly one credential to name.
+  const callers = [
+    decides.length ? `${decides.length} decide node${decides.length === 1 ? "" : "s"}` : "",
+    models.length ? `${models.length} model node${models.length === 1 ? "" : "s"}` : "",
+  ].filter(Boolean);
+  if (callers.length) need("OPENROUTER_API_KEY", callers.join(" and "));
 
   for (const [name, raw] of mcps) {
     const node = raw as { mcp: { server: string } };

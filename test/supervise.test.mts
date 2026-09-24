@@ -314,4 +314,62 @@ console.log("ok · 9 a live lock refuses a second supervisor; a stale one is tak
 }
 console.log("ok · 10 the watcher reads supervisor-written facts; the tick's own words need opting in");
 
-console.log("10 cases");
+// ── 11 · a tick interrupted mid-run is handed back, not silently repeated ──
+{
+  const dir = temp();
+  try {
+    const { appendFileSync } = await import("node:fs");
+    const run = (maxTicks: number, seen: Array<unknown>) =>
+      supervise(adder(), {
+        memory: { total: 0 },
+        next: ({ tick, interrupted }) => (seen.push({ tick, interrupted }), { goal: "add", n: tick }),
+        journal: dir,
+        maxTicks,
+      });
+
+    await run(2, []);                               // two clean ticks, checkpointed
+
+    // The process dies during tick 3: one step made it to the journal, the run
+    // line and the checkpoint never did.
+    const step = { n: 1, node: "add", kind: "work", lane: "main", ms: 3, cost: 0, took: null, writes: { total: 6 } };
+    appendFileSync(join(dir, "journal.jsonl"), `${JSON.stringify({ at: "…", type: "step", tick: 3, step })}\n`);
+    appendFileSync(join(dir, "journal.jsonl"), `{"at":"…","type":"st`);   // torn by the crash
+
+    const seen: Array<{ tick: number; interrupted?: { tick: number; steps: unknown[]; finished: boolean } }> = [];
+    await run(4, seen);
+    assert.equal(seen[0]!.tick, 3, "it is asked for the same tick again…");
+    assert.deepEqual(seen[0]!.interrupted, { tick: 3, steps: [step], finished: false }, "…and told what that tick already did");
+    assert.equal(seen[1]!.interrupted, undefined, "once, and only once");
+
+    const lines = readFileSync(join(dir, "journal.jsonl"), "utf8").trim().split("\n")
+      .flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } });
+    assert.deepEqual(lines.filter((l) => l.type === "interrupted").map((l) => [l.tick, l.steps, l.finished]), [[3, 1, false]]);
+
+    // The run finished but the checkpoint after it was lost: every effect happened.
+    const runLine = { at: "…", type: "run", tick: 5, run: {} };
+    appendFileSync(join(dir, "journal.jsonl"), `${JSON.stringify({ at: "…", type: "step", tick: 5, step })}\n${JSON.stringify(runLine)}\n`);
+    const again: typeof seen = [];
+    await run(5, again);
+    assert.equal(again[0]!.interrupted!.finished, true, "only the memory update was lost, and it says so");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+console.log("ok · 11 an interrupted tick is handed to next() with the steps it already took");
+
+// ── 12 · the cost of a finished task includes the attempts that failed ────
+{
+  const outcome = await supervise(adder(0.01, (n) => n === 2 || n === 3), {
+    next: ({ tick }) => (tick <= 4 ? { goal: "add", n: tick } : undefined),
+    maxStreak: 5,
+  });
+  assert.equal(outcome.vitals.failed, 2);
+  assert.equal(outcome.vitals.cost, 0.04, "four ticks were paid for — the failed ones too");
+  assert.equal(outcome.vitals.costPerCompleted, 0.02, "$0.04 spent for two finished tasks");
+
+  const none = await supervise(adder(0.01, () => true), { next: ({ tick }) => (tick <= 2 ? { goal: "a", n: 1 } : undefined) });
+  assert.equal(none.vitals.costPerCompleted, null, "nothing finished, so there is no honest number");
+}
+console.log("ok · 12 costPerCompleted charges failed attempts to the tasks that finished");
+
+console.log("12 cases");

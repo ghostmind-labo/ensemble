@@ -12,7 +12,7 @@
       "name": "ensemble",
       "source": "./plugin",
       "description": "Build, prove and tune @ghostmind-dev/ensemble runners: calibrated Jev decisions wired to your own code. Skills for writing the graph, designing the questions, and reading the runs.",
-      "version": "0.29.0",
+      "version": "0.30.0",
       "author": {
         "name": "ghostmind"
       },

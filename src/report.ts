@@ -30,15 +30,23 @@ const BADGE: Record<RunStep["kind"], string> = { decide: "?", work: "⚙", code:
 
 /** What a finished step said, in one line. */
 export function summarise(step: RunStep, color = false): string {
+  const badge = step.meta?.["by"] === "human" ? "👤" : BADGE[step.kind];
   // A lane tag only when there is more than one lane to tell apart.
   const name = step.lane && step.lane !== "main" ? `${step.node} ${dim(`[${step.lane}]`, color)}` : step.node;
-  const head = `${BADGE[step.kind]} ${name.padEnd(16 + (name.length - step.node.length))} ${dim(`${String(step.ms).padStart(6)}ms ${money(step.cost).padStart(10)}`, color)}`;
+  const head = `${badge} ${name.padEnd(16 + (name.length - step.node.length))} ${dim(`${String(step.ms).padStart(6)}ms ${money(step.cost).padStart(10)}`, color)}`;
   if (step.error) return `${head}  ✗ ${step.error}`;
 
   if (step.answers) {
     const said = Object.entries(step.answers)
       .map(([key, answer]) => {
-        const value = typeof answer.value === "number" ? answer.value.toFixed(2) : answer.value;
+        // A person said yes or no, or picked a level — show that, not a probability.
+        const human = step.meta?.["by"] === "human";
+        const value =
+          human && answer.type === "noul"
+            ? answer.value === 1 ? "yes" : "no"
+            : typeof answer.value === "number" && !human
+              ? answer.value.toFixed(2)
+              : answer.value;
         const shown = `${key}=${bold(String(value), color)}`;
         return answer.confidence === undefined ? shown : `${shown}${dim(` ${answer.confidence.toFixed(2)}`, color)}`;
       })
@@ -96,6 +104,13 @@ export function reporter(options: ReporterOptions = {}): ((event: RunEvent) => v
   const handle = (event: RunEvent): void => {
     switch (event.type) {
       case "node:start":
+        // A person is about to be asked something. A spinner would paint over
+        // the question, so say it once and stay still.
+        if (event.asks === "human") {
+          stop();
+          stream.write(`  👤 ${event.node} ${dim(`— ${event.waiting}`, color)}\n`);
+          return;
+        }
         spin(`${event.node} ${dim(`— ${event.waiting}`, color)}`);
         return;
       case "node:end":
@@ -105,7 +120,7 @@ export function reporter(options: ReporterOptions = {}): ((event: RunEvent) => v
       case "run:end": {
         stop();
         const { status, cost } = event.run.run;
-        const mark = status === "completed" ? "✓" : "✗";
+        const mark = status === "completed" ? "✓" : status === "paused" ? "⏸" : "✗";
         stream.write(`  ${mark} ${status} · ${money(cost.total)} · ${event.run.steps.length} steps\n`);
         return;
       }

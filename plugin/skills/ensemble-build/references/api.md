@@ -16,6 +16,7 @@ guessing.
 8. Other exports
 9. calibrate: scoring decisions against labelled cases
 10. supervise: a runner that lives for days
+11. A person in the loop: `by: "human"`, pause and resume
 
 ---
 
@@ -32,17 +33,17 @@ export default runner({
   edges?: Edge[],
   entry: "nodeName",              // required; where the run starts
   result?: "stateKey",            // returned as `result`; defaults to the last step's value
-  jev?: { model?, baseUrl?, retries?, timeoutMs?, apiKey?, fetch? },
-  openrouter?: { apiKey?, baseUrl?, retries?, timeoutMs?, app?, fetch? },
+  openrouter?: { apiKey?, baseUrl?, retries?, timeoutMs?, app?, fetch? }, // ONE key for everything: Jev decides through it too
+  jev?: { model?, baseUrl?, retries?, timeoutMs?, apiKey?, fetch? },      // rarely needed; apiKey, baseUrl and fetch default to openrouter's
   skills?: Skill[],               // from loadSkills(); needed by model nodes that inline skills
   mcpServers?: { name: { command, args?, env?, cwd?, timeoutMs? } },
 });
 ```
 
 `runner()` doesn't validate when it is built, so a broken runner can still be
-inspected. It returns a callable with `.spec`, `.validate(): string[]` and
-`.graph(): GraphDoc`. Calling it runs it, and it refuses to start if validation
-fails.
+inspected. It returns a callable with `.spec`, `.validate(): string[]`,
+`.graph(): GraphDoc` and `.resume(paused, answer, options?)` (§11). Calling it
+runs it, and it refuses to start if validation fails.
 
 The CLI loads a file's **default export**, so always `export default runner({...})`.
 
@@ -84,6 +85,9 @@ classify: {
   decide: { team: choice(...), urgent: noul(...), severity: score(...) },
   reads: ["goal", "customer_plan"],   // REQUIRED, non-empty: the only keys sent
   gate?: { on: "team", min: 0.7, to: "escalate" },
+  fallback?: "escalate",              // where to go if the decider cannot answer AT ALL
+  by?: "human",                       // a person answers instead of Jev — see §11
+  comment?: "reviewer_note",          // human only: the state key for their free-text note
   label?: "Classify the ticket",
 }
 ```
@@ -93,6 +97,13 @@ classify: {
   independently.
 - `gate` works only on a `choice` or a `score`. Below `min` confidence the run
   goes to `to` whatever the edges say, and the step records `took: "gate"`.
+- `fallback` is for **no answer**: the service is down, rate-limited past its
+  retries, timed out, or answered outside the question (`DeciderAnswerError` —
+  an answer that does not fit is no answer). Without it the run fails; with it
+  the run goes there, and the step records `took: "fallback"` and the `error`.
+  Low confidence is the gate's job, not this one. Put a person or a hold behind
+  it. A malformed *human* answer is the exception: that is a bug, so it never
+  takes the fallback (§11).
 - `reads` must never include an image key. Validation refuses it.
 
 ### work: a handler the user wrote
@@ -241,7 +252,9 @@ work: {
 ```
 
 `state` is read-only. Return values follow the writes rules above. A throw fails
-the run with `RunFailed`, which carries the partial run record.
+the run with `RunFailed`, which carries the partial run record. **Report the cost
+before anything that can throw**: money spent on a step that then fails still
+counts toward `run.cost.total` and the `budget`.
 
 ### Every step's record
 
@@ -249,7 +262,7 @@ Each entry in `run.json`'s `steps[]` carries: `n`, `node`, `kind`, `lane`
 (`"main"`, the forking edge id that started the lane, or the join node's name),
 `started`/`ended` (ISO) and `ms`, `cost`, `asked` (the state the node was given,
 per its declared reads), `writes`, `answers` (decide: full distributions),
-`gate`, `handler`, `meta`, `error`, `took` (the edge id, `"gate"`, or null) and
+`gate`, `handler`, `meta`, `error`, `took` (the edge id, `"gate"`, `"fallback"`, or null) and
 `forked` (the edge ids a fork step fired). `asked` is what an audit or a replay
 needs; a work handler sees the whole state, but only what it declared is kept.
 
@@ -263,8 +276,9 @@ const { result, state, run } = await myRunner(
     maxSteps?: 50,        // default 50
     stepTimeout?: 30_000, // ms; fail any step that runs longer, and abort its signal. Off by default
     signal?: AbortSignal,
-    decider?: Decider,    // stub or replace Jev: (state, questions) => Promise<Decision>
+    decider?: Decider,    // stub or replace Jev: (state, questions, { signal }?) => Promise<Decision>
     caller?: Caller,      // stub or replace OpenRouter
+    human?: Human,        // answers by: "human" nodes; without it they PAUSE — see §11
     onEvent?: (e) => {},  // "node:start" | "node:end" | "run:end"
   },
 );
@@ -281,19 +295,30 @@ console.log(result);
 ```
 
 Throws `RunnerError` (`.problems`) if the spec does not validate, and `RunFailed`
-(`.run`) if a node throws.
+(`.run`) if a node throws. `RunFailed.cause` is what actually went wrong, so a
+host app can tell its own bug from an upstream one: `DeciderAnswerError` when the
+decider answered outside the question it was asked (an option that was never
+declared, a missing value, the wrong answer type), `HumanAnswerError` when a
+person's answer doesn't fit. A `DeciderAnswerError` takes the decide node's
+`fallback` when one is declared; a `HumanAnswerError` never does.
 
 A stub decider returns
-`{ model, answers: { key: { type:"choice", choice, confidence, probabilities } | { type:"noul", noul } | { type:"score", score, confidence, probabilities, legend } }, usage: { input_tokens, output_tokens }, cost }`.
+`{ model, answers: { key: { type:"choice", choice, confidence, probabilities } | { type:"noul", noul } | { type:"score", score, confidence, probabilities, legend } }, usage: { input_tokens, output_tokens }, cost }`
+and must answer exactly the questions it was handed, with declared option names —
+anything else is a `DeciderAnswerError`. Its third argument is `DecideOptions`
+(`{ signal?: AbortSignal }`): pass the signal to your `fetch` so a cancelled
+run — the caller hung up, the budget ran out, the step timed out — stops the
+work in flight instead of paying for an answer nobody reads. It is optional, so
+a two-argument decider is still a valid `Decider`.
 
 ## 8. Other exports
 
 | Export | Use |
 |---|---|
-| `catalog()` | Live OpenRouter models as `{ id, vision, draws, tools, promptUsd, completionUsd, imageUsd, contextLength }`. Cached 10 min, network |
+| `catalog(config?, signal?)` | Live OpenRouter models as `{ id, name, vision, draws, tools, promptUsd, completionUsd, imageUsd, contextLength }`. Cached 10 min per source (baseUrl + injected `fetch`), network |
 | `shortlist(models, { vision?, draws?, tools?, maxPromptUsdPerM?, maxCompletionUsdPerM?, minContext?, idIncludes?, limit? })` | Filter in code, cheapest first |
 | `modelOptions(models)` | A shortlist as `choice` criteria (only for a *fixed* shortlist) |
-| `loadSkills({ project?, dirs?, plugins? })` | Agent Skills from disk. Sync, local, safe at module scope |
+| `loadSkills({ project?, home?, dirs?, plugins? })` | Agent Skills from disk. Sync, local, safe at module scope |
 | `skillOptions(skills, { max?, chars?, none? })` | Skills as `choice` criteria, with a `none` option by default |
 | `toolOptions(tools, …)` | MCP tools as `choice` criteria |
 | `searchServers(q)`, `missingEnv(entry)`, `toServerSpec(entry)` | The official MCP registry |
@@ -306,8 +331,9 @@ A stub decider returns
 | `supervise(runner, opts)` | Run a runner as a long-lived loop. See §10 |
 
 CLI (through `package.json` scripts, never global):
-`ensemble validate | graph | run | calibrate <file> <cases> | check | skills [q] [--remote] | servers [q]`.
-Run options: `--input k=v`, `--budget`, `--max-steps`, `--json`, `-o`.
+`ensemble validate | graph | run | resume <file> <paused.json> | calibrate <file> <cases> | check | skills [q] [--remote] | servers [q] | version`.
+Run options: `--input k=v`, `--budget`, `--max-steps`, `--json`, `-o`; `resume`
+adds `--answer k=value` (repeatable, one per question), `--comment` and `--by`.
 
 ## 9. calibrate(runner, cases, options?)
 
@@ -356,7 +382,7 @@ and an optional watcher runner that judges drift.
 
 ```ts
 const outcome = await supervise(worker, {                // worker declares memory: ["notes"]
-  next: async ({ tick, memory, last, signal }) => ({ goal: await queue.pop() }), // undefined ends it
+  next: async ({ tick, memory, last, interrupted, signal }) => ({ goal: await queue.pop() }), // undefined ends it
   memory: { notes: "" },                     // starting values; ignored once a checkpoint exists
   budget: { total: 20, perDay: 5, perRun: 0.05 }, // total stops; perDay RESTS until spend ages out; perRun caps each tick
   maxTicks: 10_000,
@@ -383,8 +409,22 @@ memory untouched. Keep it small: a tally or the last few results, not a
 transcript. Jev gets worse on padded state.
 
 **Vitals** are numbers over the last `window` ticks: `tick, ticks, failed,
-failureRate, gateRate, confidence, sameness, streak, cost, spent, spentToday,
-msPerTick`. `sameness` is the share of ticks that took the most common path.
+waiting, failureRate, gateRate, confidence, sameness, streak, cost, spent,
+spentToday, msPerTick, costPerCompleted`. `waiting` counts the ticks that paused
+for a person and have not been resumed; they are not failures. `sameness` is the share of ticks that took the most
+common path. `costPerCompleted` is the window's spend divided by the ticks that
+completed — what a finished task really costs, with its failed attempts charged
+to it (`null` when nothing completed). Watch that, not the price per call.
+
+**Restarting after a crash.** If the process stopped in the middle of a tick,
+the first `next()` after the restart receives
+`interrupted: { tick, steps, finished }`: the tick that was running (the same
+number `next()` is now being asked for), every step that finished before the
+stop as the journal recorded it, and `finished: true` when the run completed but
+its checkpoint was lost. A `work` step in that list may already have sent the
+email or written the row. **Check before repeating it** — `next()` is the only
+place that knows what "already done" means for your system. It is handed over
+once, and journalled as an `interrupted` line.
 
 **The watcher** is an ordinary runner that declares
 `inputs: ["goal", "vitals", "recent"]` and has a `result` of `"continue"`,
@@ -405,9 +445,88 @@ conscience.
 **The journal** is `journal.jsonl`, appended as things happen. It holds `step`
 lines as each node finishes (with `lane` and `asked`), a `run` line per tick with
 the whole run.json, `watched` lines with the watcher's run, and the supervisor's
-own events. `checkpoint.json` holds tick, spend, memory and the window, and is
+own events, including `interrupted` after a restart that found an unfinished
+tick. `checkpoint.json` holds tick, spend, memory and the window, and is
 replaced atomically after every tick. `pulse.json` is rewritten on every node
 event: if its `at` goes stale, the process is stuck or dead. `lock` holds the
 pid of the one supervisor allowed on this journal; a second one is refused
 while the first is alive, and a stale lock is taken over. Run lines hold the
 whole state, so keep images as URLs, not data: URLs.
+
+## 11. A person in the loop
+
+**A person is just another decider.** A `decide` node with `by: "human"` asks a
+person the same closed questions — choice, noul, score — so their answer is
+typed, their options are wired, and `validate` proves every answer has an edge,
+exactly as for Jev. No new node kind, and `graph.json` marks where the people
+are (`decide.by: "human"`, `model: "human"`, `cost: "free"`).
+
+```ts
+approve: {
+  decide: {
+    ok:   noul("Should this refund be issued as drafted?"),
+    tier: choice("Which approval tier applies?", { standard: …, senior: … }),
+  },
+  reads: ["goal", "draft", "amount"],   // what the person is SHOWN
+  by: "human",
+  comment: "reason",                    // optional: where their free-text note lands
+},
+edges: [
+  { from: "approve", to: "pay",    on: "ok" },     // a yes lands as 1, so on: works unchanged
+  { from: "approve", to: "refuse" },
+],
+```
+
+**Answers.** One value per question: an option name for a choice; yes/no for a
+noul (`true`/`false` or `"yes"`/`"no"`), which lands on state as **1 or 0**; a
+0-based level for a score. A person's answer carries no confidence, so a `gate`
+on a human node is refused. An answer that doesn't fit the questions fails the
+run with `HumanAnswerError` naming the fix — and never takes the `fallback`,
+because it's a bug, not an outage.
+
+**Short runs — wait for them.** Pass a `human` handler and the run waits for it:
+
+```ts
+const { result } = await approvals(inputs, {
+  human: async ({ node, questions, asked, comment, signal }) => {
+    const reply = await slack.askWithButtons(questions, asked, { signal });  // your UI
+    return { answers: reply.answers, by: reply.user, comment: reply.note };
+  },
+});
+```
+
+A person's wait is **not** subject to `stepTimeout` — that exists for machines
+that hang. Return `undefined` to pause instead.
+
+**Long waits — pause, and resume later.** With no handler (or one that returns
+`undefined`) the run stops cleanly: `run.json` has `status: "paused"` and a
+`pending` block (`{ node, questions, asked, comment? }`, the questions in
+graph.json's readable form), and the outcome carries `paused` — a plain-JSON
+snapshot. Store it anywhere. Later, in any process:
+
+```ts
+const { result, run } = await approvals.resume(paused, { answers: { ok: "no", tier: "standard" }, comment: "over the limit", by: "dana" });
+```
+
+The resumed run is **one continuous record** — same id, the earlier steps, the
+person's answer, what followed — and it can pause again at a later human node.
+Loop budgets are carried through the pause. `resume` refuses with `ResumeError`
+if the graph changed since (its node, edges and loop budgets might mean
+something else now) or if it's the wrong runner.
+
+Rules `validate` enforces: no `gate` on a human node; `comment` only on one,
+naming an identifier that isn't also a question key; and **no human node inside
+a fork lane** — a run can only pause on one lane, so ask after the join.
+
+**Under `supervise`**, a tick that pauses doesn't block the loop and doesn't
+count as a failure: it's counted in `vitals.waiting`, saved under
+`paused/<tick>.json` in the journal, and handed to `onPaused(paused, tick)` — or
+raised as an alert if there's no `onPaused`, so it's never silent.
+
+**From the CLI**, `ensemble run` asks at the terminal when there is one. With no
+terminal (a script, CI) it pauses, writes `paused.json` next to `run.json`,
+prints the exact resume command, and exits **3**:
+
+```sh
+npx ensemble resume runners/refund.mts .ensemble/runs/<id>/paused.json --answer ok=no --answer tier=standard --comment "duplicate" --by dana
+```

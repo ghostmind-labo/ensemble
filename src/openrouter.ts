@@ -93,7 +93,19 @@ export class OpenRouterError extends Error {
 }
 
 const RETRYABLE = new Set([408, 429, 500, 502, 503, 504]);
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+/** A backoff the caller can cut short: waiting out 8s after a cancellation is pure latency. */
+const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
+  new Promise((resolve) => {
+    if (signal?.aborted) return resolve();
+    const timer = setTimeout(done, ms);
+    function done() {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    }
+    signal?.addEventListener("abort", done, { once: true });
+  });
+
 const backoffMs = (attempt: number, header: string | null): number => {
   const advertised = header ? Number(header) * 1000 : NaN;
   return Number.isFinite(advertised) ? advertised : Math.min(2 ** attempt * 400, 8000);
@@ -122,16 +134,44 @@ const card = (raw: RawModel): ModelCard => ({
   imageUsd: Number(raw.pricing?.image_output ?? raw.pricing?.image ?? 0),
 });
 
-let cached: { at: number; models: ModelCard[] } | undefined;
+/**
+ * Cached per SOURCE, not globally.
+ *
+ * One process can hold several callers — a host app serving two tenants, a test
+ * replacing `fetch`, a proxy on another `baseUrl` — and a single slot would hand
+ * the first one's catalogue to all of them. So the key is what actually decides
+ * the answer: where it came from, and who fetched it.
+ */
+const cached = new Map<string, { at: number; models: ModelCard[] }>();
 const CATALOG_TTL_MS = 10 * 60_000;
 
-/** Every model OpenRouter serves, as capability data. Cached in-process for ten minutes. */
-export async function catalog(config: CallerConfig = {}): Promise<ModelCard[]> {
-  if (cached && Date.now() - cached.at < CATALOG_TTL_MS) return cached.models;
+// A custom `fetch` is part of the identity of the source, but a function is not
+// a string. Give each one a stable tag, held weakly so tagging a short-lived
+// client does not keep the client itself alive.
+const tags = new WeakMap<object, string>();
+let nextTag = 0;
+const tagOf = (fn: object): string => {
+  let tag = tags.get(fn);
+  if (!tag) tags.set(fn, (tag = `f${++nextTag}`));
+  return tag;
+};
+
+/** Every model OpenRouter serves, as capability data. Cached in-process for ten minutes, per source. */
+export async function catalog(config: CallerConfig = {}, signal?: AbortSignal): Promise<ModelCard[]> {
   const doFetch = config.fetch ?? globalThis.fetch;
   const baseUrl = (config.baseUrl ?? OPENROUTER_URL).replace(/\/+$/, "");
+  const key = config.fetch ? `${baseUrl}\u0000${tagOf(config.fetch)}` : baseUrl;
 
-  const response = await doFetch(`${baseUrl}/models`, { signal: AbortSignal.timeout(config.timeoutMs ?? 30_000) });
+  const hit = cached.get(key);
+  if (hit && Date.now() - hit.at < CATALOG_TTL_MS) return hit.models;
+  // Stale entries are dropped as we go, so the map holds one catalogue per
+  // source actually used in the last ten minutes and not one per client ever built.
+  for (const [at, entry] of cached) if (Date.now() - entry.at >= CATALOG_TTL_MS) cached.delete(at);
+
+  const timeout = AbortSignal.timeout(config.timeoutMs ?? 30_000);
+  const response = await doFetch(`${baseUrl}/models`, {
+    signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+  });
   if (!response.ok) {
     throw new OpenRouterError(`could not read the model catalogue (HTTP ${response.status})`, {
       status: response.status,
@@ -139,13 +179,13 @@ export async function catalog(config: CallerConfig = {}): Promise<ModelCard[]> {
   }
   const payload = (await response.json()) as { data?: RawModel[] };
   const models = (payload.data ?? []).map(card);
-  cached = { at: Date.now(), models };
+  cached.set(key, { at: Date.now(), models });
   return models;
 }
 
 /** Drop the cache — for tests, and for a long-lived process that wants fresh prices. */
 export const forgetCatalog = (): void => {
-  cached = undefined;
+  cached.clear();
 };
 
 export interface ModelFilter {
@@ -257,6 +297,7 @@ export function openrouter(config: CallerConfig = {}): Caller {
 
     let lastError: unknown;
     for (let attempt = 0; attempt <= retries; attempt++) {
+      request.signal?.throwIfAborted();
       const signal = request.signal
         ? AbortSignal.any([request.signal, AbortSignal.timeout(timeoutMs)])
         : AbortSignal.timeout(timeoutMs);
@@ -267,7 +308,7 @@ export function openrouter(config: CallerConfig = {}): Caller {
       } catch (cause) {
         lastError = new OpenRouterError(`could not reach ${baseUrl}: ${(cause as Error).message}`, { cause });
         if (request.signal?.aborted || attempt === retries) throw lastError;
-        await sleep(backoffMs(attempt, null));
+        await sleep(backoffMs(attempt, null), request.signal);
         continue;
       }
 
@@ -311,7 +352,7 @@ export function openrouter(config: CallerConfig = {}): Caller {
         { status: response.status, body: detail.slice(0, 500) },
       );
       if (!RETRYABLE.has(response.status) || attempt === retries) throw lastError;
-      await sleep(backoffMs(attempt, response.headers.get("retry-after")));
+      await sleep(backoffMs(attempt, response.headers.get("retry-after")), request.signal);
     }
 
     throw lastError as Error;

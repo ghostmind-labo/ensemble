@@ -57,6 +57,7 @@ anything, because the rules below fall out of it:
 | **One tool call** | an `mcp` node | A single named call, so the graph says what it can reach |
 | **Several things at once** | `fork: true` edges meeting at a `join: "all"` node | Lanes run concurrently; `validate` proves they never touch the same key |
 | **What survives between ticks** | `memory: [...]` on the runner, written by a node | Declared, so the graph says what the system remembers |
+| **A person's judgement** | a `decide` node with `by: "human"` | The same closed questions, so it's wired and proven like Jev's. The run waits for a `human` handler, or pauses and resumes later |
 
 The library doesn't ship an agent loop, a prompt library or parallel groups, but
 nothing stops a handler from containing one. An agent that picks its own tools
@@ -76,9 +77,11 @@ in `graph.json` and `run.json`. Use a handler where they aren't known.
    must print `function`. If it doesn't, run `npm view @ghostmind-dev/ensemble version`.
    If the registry is below 0.26, install from a local checkout
    (`npm run build` there, then `npm install /path/to/ensemble`) and tell the user.
-3. **Keys, only for live runs.** `TYPESAFE_API_KEY` for decide nodes and
-   `OPENROUTER_API_KEY` for model nodes. Validating, emitting the graph and
-   dry-running need neither, so a missing key never blocks the build.
+3. **One key, only for live runs.** `OPENROUTER_API_KEY` covers everything:
+   Jev is served on OpenRouter's System One route, so decide nodes and model
+   nodes share one account and one bill. There is no second key to ask for.
+   Validating, emitting the graph and dry-running need none, so a missing key
+   never blocks the build.
 
 Put runners where the project keeps them. If there is no convention, use
 `runners/<name>.mts`.
@@ -114,8 +117,11 @@ design:
   `code` node. That is free, deterministic, and untrusted input can't steer it.
   Use a model only when the wording has to adapt to open-ended content.
 - **The unsure path.** What should happen when the classifier is not confident?
-  Almost always there should be a gate to a safe exit: a human, a hold, a
-  cheaper default.
+  Almost always there should be a gate to a safe exit: a hold, a cheaper
+  default, or a person — and a person is best as a `by: "human"` decide node
+  asking the same question, so their answer is routed like Jev's instead of
+  ending the run. Add `fallback:` to the same place for when the decider is
+  down.
 
 When the use case is vague, pick sensible defaults and write them into the file
 header as assumptions, rather than stopping to ask. Stop and ask only when a choice
@@ -315,7 +321,8 @@ becoming a framework:
   Pattern 12.
 - **Fan out by asking, not by branching.** Five independent yes/no checks are
   five `noul`s in one node, then ordered edges or a `code` node that combines
-  them. There are no parallel node groups.
+  them. A fixed set of lanes is `fork: true` + `join: "all"` (pattern 13); a
+  variable number of them is a handler's job, never the graph's.
 
 `references/patterns.md` has worked code for each of these.
 

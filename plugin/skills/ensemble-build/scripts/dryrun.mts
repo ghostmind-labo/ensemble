@@ -11,6 +11,9 @@
  * This swaps every paid seam for a stub:
  *   · decide nodes → scripted answers (default: first option, noul 0.1, score mid,
  *                    confidence 0.9 — so a gate passes unless you say otherwise)
+ *   · by: "human"  → the same scripted answers, given as a person would (an
+ *                    option, yes/no, a level), so a dry run never pauses and
+ *                    --explore walks every answer a person could give
  *   · model nodes  → "[dry <model>] <first 400 chars of the prompt>" (and a
  *                    1×1 image when the node draws)
  *   · mcp nodes    → a placeholder text, no server is started
@@ -192,6 +195,19 @@ const decider = (forced: Map<string, string>) => async (_state: unknown, questio
   return { model: "dry-run", answers, usage: { input_tokens: 0, output_tokens: 0 }, cost: 0 };
 };
 
+// A person answers from the same script, in a person's shape: an option name,
+// yes/no, a whole level. Same --answer syntax: --answer approve.ok=0.9 is a yes.
+const human = (forced: Map<string, string>) => async (request: { node: string; comment?: string }) => {
+  const node = runner.spec.nodes[request.node]!;
+  const answers = Object.fromEntries(
+    Object.entries(node.decide ?? {}).map(([key, q]) => {
+      const a = answerFor(request.node, key, q, forced) as { type: string; choice?: string; noul?: number; score?: number };
+      return [key, a.type === "choice" ? a.choice! : a.type === "noul" ? a.noul! >= 0.5 : Math.round(a.score!)];
+    }),
+  );
+  return { answers, by: "dry-run", ...(request.comment ? { comment: "[dry note]" } : {}) };
+};
+
 const caller = async (request: { model: string; prompt: string }) => ({
   model: request.model,
   // Echo the prompt (up to 400 chars) so a dry run shows what the model would
@@ -204,7 +220,7 @@ const caller = async (request: { model: string; prompt: string }) => ({
 
 async function once(forced: Map<string, string>, label: string) {
   try {
-    const { result, run } = await runner({ ...inputs }, { decider: decider(forced), caller, maxSteps: 50 });
+    const { result, run } = await runner({ ...inputs }, { decider: decider(forced), human: human(forced), caller, maxSteps: 50 });
     return { label, run, result, error: undefined as string | undefined };
   } catch (error) {
     const partial = (error as { run?: RunDoc }).run;

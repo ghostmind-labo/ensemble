@@ -3,8 +3,9 @@
  *
  * Small on purpose. The engine walks one node at a time per lane, asks the decider when
  * it reaches a decide node, calls YOUR handler when it reaches a work node, and
- * writes down what happened. It never calls a model itself, holds a prompt, or
- * decides anything a node did not ask.
+ * writes down what happened. It holds no prompt of its own and decides nothing a
+ * node did not ask: where a model node names one, the instruction is the node's
+ * and the call goes out through the one seam in `openrouter.ts`.
  *
  * What it will not do is as important as what it does. It refuses to start a
  * run that does not validate, because a graph with an unhandled branch fails
@@ -24,22 +25,23 @@ import {
   parseBranch,
   readsOf,
   writesOf,
+  type DecideNode,
   type Edge,
   type NodeSpec,
   type RunnerSpec,
   type State,
 } from "./spec.ts";
-import { confidenceOf, valueOf, type Answer } from "./questions.ts";
-import { jev, type Decider } from "./jev.ts";
+import { confidenceOf, misfit, valueOf, type Answer } from "./questions.ts";
+import { jev, jevConfigFor, type Decider } from "./jev.ts";
 import { openrouter, type Caller } from "./openrouter.ts";
 import { pool } from "./mcp.ts";
 import { findSkill, renderSkills } from "./skills.ts";
 import { validate } from "./validate.ts";
-import { toGraph } from "./graph.ts";
+import { toGraph, type GraphQuestion } from "./graph.ts";
 
 export const RUN_SCHEMA = "https://ghostmind.dev/ensemble/run-v1.json";
 
-export type RunStatus = "completed" | "failed" | "maxSteps" | "budget" | "cancelled";
+export type RunStatus = "completed" | "failed" | "maxSteps" | "budget" | "cancelled" | "paused";
 
 export interface StepAnswer {
   type: "choice" | "score" | "noul";
@@ -68,7 +70,10 @@ export interface RunStep {
   meta?: Record<string, unknown>;
   writes?: Record<string, unknown>;
   error?: string;
-  /** The edge id taken, "gate" when the confidence gate fired, or null at the exit. */
+  /**
+   * The edge id taken, "gate" when the confidence gate fired, "fallback" when the
+   * decider could not answer at all, or null at the exit.
+   */
   took: string | null;
   /** The forking edges that fired from here, each starting a lane. `took` is then null. */
   forked?: string[];
@@ -90,7 +95,76 @@ export interface RunDoc {
   };
   steps: RunStep[];
   state: State;
+  /** Only when `status` is "paused": what the run is waiting for a person to answer. */
+  pending?: Pending;
 }
+
+/**
+ * What a paused run is waiting for — the half a person or a UI reads. The
+ * questions are in graph.json's readable form, so the same renderer that draws
+ * the graph can draw the question.
+ */
+export interface Pending {
+  node: string;
+  questions: GraphQuestion[];
+  /** What the person should be shown: the node's declared reads, as they were. */
+  asked: State;
+  /** Present when the node takes a free-text note, and names where it will land. */
+  comment?: string;
+}
+
+/**
+ * Everything needed to continue a paused run later, in another process. Plain
+ * JSON — store it in a file, a row, a queue. `resume` refuses it if the graph
+ * has changed since, because the node, the edges and the loop budgets it
+ * refers to might no longer mean the same thing.
+ */
+export interface Paused {
+  version: 1;
+  runner: string;
+  /** The graph hash it paused on. */
+  graph: string;
+  run: { id: string; started: string };
+  /** The node waiting for a person, and the lane it is on. */
+  node: string;
+  lane: string;
+  state: State;
+  steps: RunStep[];
+  /** Loop budgets already spent, by edge index — a pause must not reset them. */
+  taken: Array<[number, number]>;
+  total: number;
+  pending: Pending;
+}
+
+/** What a `human` handler is asked. */
+export interface HumanRequest {
+  run: string;
+  node: string;
+  questions: GraphQuestion[];
+  asked: State;
+  /** Present when the node takes a free-text note: offer a box for it. */
+  comment?: string;
+  signal: AbortSignal;
+}
+
+/**
+ * A person's answer. One value per question: an option name for a choice,
+ * yes/no for a noul (`true`/`false`, or "yes"/"no"), a 0-based level for a score.
+ */
+export interface HumanAnswer {
+  answers: Record<string, string | number | boolean>;
+  /** Who answered, for the record. */
+  by?: string;
+  /** A free-text note, written to the node's `comment` key when it declares one. */
+  comment?: string;
+}
+
+/**
+ * Ask a person, and wait. Return the answer, or `undefined` to pause the run and
+ * be resumed later. A terminal prompt, a chat message with buttons, a form —
+ * anything that can turn the questions into an answer.
+ */
+export type Human = (request: HumanRequest) => HumanAnswer | undefined | Promise<HumanAnswer | undefined>;
 
 /**
  * What a run says as it happens.
@@ -100,9 +174,29 @@ export interface RunDoc {
  * is already in the step. Keeping the vocabulary this small is what lets a
  * terminal reporter and any future renderer consume the same stream without
  * either becoming the other's constraint.
+ *
+ * One asymmetry to know about: a node that PAUSES for a person emits
+ * `node:start` and no `node:end`, because it did not run — its step is removed
+ * from the record and the same node will start again on resume. `run:end`
+ * always follows, with `status: "paused"`, so anything holding per-node state
+ * should clear it there rather than wait for an end that is not coming.
  */
 export type RunEvent =
-  | { type: "node:start"; n: number; node: string; kind: RunStep["kind"]; lane: string; waiting: string }
+  | {
+      type: "node:start";
+      n: number;
+      node: string;
+      kind: RunStep["kind"];
+      lane: string;
+      /** For a person to read. Prose, so never branch on it — that is what `asks` is for. */
+      waiting: string;
+      /**
+       * True when this step is about to ask a PERSON and wait. A view needs it
+       * structurally: a spinner would paint over the question, and the wait is
+       * unbounded. Derived from the node, not from parsing `waiting`.
+       */
+      asks?: "human";
+    }
   | { type: "node:end"; step: RunStep }
   | { type: "run:end"; run: RunDoc };
 
@@ -122,6 +216,12 @@ export interface RunOptions {
   decider?: Decider;
   /** Swap the generative caller — a stub, a cache, another vendor. */
   caller?: Caller;
+  /**
+   * Answers `by: "human"` nodes. Without it, a run that reaches one PAUSES and
+   * hands back a snapshot; with it, the run waits for this. A person's wait is
+   * not subject to `stepTimeout`, which exists for machines that hang.
+   */
+  human?: Human;
   /** Live progress. Fires before a node runs and again when it finishes. */
   onEvent?: (event: RunEvent) => void;
 }
@@ -130,6 +230,40 @@ export interface RunOutcome {
   result: unknown;
   state: State;
   run: RunDoc;
+  /** Present when the run is waiting for a person. Pass it to `resume` with their answer. */
+  paused?: Paused;
+}
+
+/** A paused run cannot be continued as given. Nothing ran. */
+export class ResumeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ResumeError";
+  }
+}
+
+/** A person's answer does not fit the questions. Deliberately NOT a reason to fall back: it is a bug to fix. */
+export class HumanAnswerError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "HumanAnswerError";
+  }
+}
+
+/**
+ * The decider answered outside the question it was asked.
+ *
+ * A separate class because a host app must be able to tell this apart from its
+ * own handler throwing: this one says the classifier — or whatever was mounted
+ * on the `Decider` seam — returned something the graph cannot route, which is an
+ * upstream fault, not a bug in the workflow. It IS a reason to take `fallback`:
+ * an answer that does not fit is no answer.
+ */
+export class DeciderAnswerError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DeciderAnswerError";
+  }
 }
 
 /** The runner does not validate — refuse to run it. */
@@ -166,6 +300,85 @@ function toStepAnswer(answer: Answer): StepAnswer {
   return base;
 }
 
+/**
+ * Check a person's answer against the closed questions and turn it into state.
+ * A yes lands as 1 and a no as 0 — a person's certainty — so `on: "ok>=0.6"`
+ * means the same thing whoever answered.
+ */
+function fromHuman(
+  name: string,
+  node: DecideNode,
+  answer: HumanAnswer,
+): { written: Record<string, unknown>; recorded: Record<string, StepAnswer> } {
+  const written: Record<string, unknown> = {};
+  const recorded: Record<string, StepAnswer> = {};
+  const keys = Object.keys(node.decide);
+  for (const [key, question] of Object.entries(node.decide)) {
+    const raw = answer?.answers?.[key];
+    if (raw === undefined) {
+      throw new HumanAnswerError(`node "${name}" asked a person "${key}" and got no answer — answer every question: ${keys.join(", ")}`);
+    }
+    if (question.type === "choice") {
+      const options = Object.keys(question.criteria);
+      if (typeof raw !== "string" || !options.includes(raw)) {
+        throw new HumanAnswerError(`node "${name}": "${key}" is one of ${options.join(", ")}, not ${JSON.stringify(raw)}`);
+      }
+      written[key] = raw;
+    } else if (question.type === "noul") {
+      const said = typeof raw === "string" ? raw.trim().toLowerCase() : raw;
+      const yes = said === true || said === 1 || said === "true" || said === "yes" || said === "y" || said === "1";
+      const no = said === false || said === 0 || said === "false" || said === "no" || said === "n" || said === "0";
+      if (!yes && !no) throw new HumanAnswerError(`node "${name}": "${key}" is yes or no, not ${JSON.stringify(raw)}`);
+      written[key] = yes ? 1 : 0;
+    } else {
+      const level = typeof raw === "number" ? raw : Number(raw);
+      const top = question.criteria.length - 1;
+      if (!Number.isInteger(level) || level < 0 || level > top) {
+        throw new HumanAnswerError(`node "${name}": "${key}" is a level from 0 to ${top}, not ${JSON.stringify(raw)}`);
+      }
+      written[key] = level;
+    }
+    recorded[key] = { type: question.type, value: written[key] as string | number };
+  }
+  // Always written when declared, even empty. Every other write key in the
+  // system is unconditional, `graph.json` promises this one has a producer, and
+  // validate lets a node downstream read it — so leaving it undefined when the
+  // person skipped the box turns an empty note into a crash in someone's code.
+  if (node.comment) {
+    written[node.comment] = typeof answer.comment === "string" ? answer.comment.trim() : "";
+  }
+  return { written, recorded };
+}
+
+/**
+ * A deep copy that is, provably, the plain JSON the snapshot claims to be.
+ *
+ * Named keys in the error because the fix is always in one state value, and
+ * "Do not know how to serialize a BigInt" on its own does not say which.
+ */
+function plainJson<T>(value: T, node: string): T {
+  try {
+    return JSON.parse(JSON.stringify(value)) as T;
+  } catch (cause) {
+    const state = (value as { state?: State }).state ?? {};
+    const culprits = Object.keys(state).filter((key) => {
+      try {
+        JSON.stringify(state[key]);
+        return false;
+      } catch {
+        return true;
+      }
+    });
+    throw new TypeError(
+      `the run paused at "${node}" but its state cannot be stored as JSON` +
+        `${culprits.length ? ` — ${culprits.map((key) => `"${key}"`).join(", ")} ${culprits.length === 1 ? "holds" : "hold"} something JSON cannot carry` : ""}` +
+        ` (${(cause as Error).message}). A paused run is handed out as plain JSON to be kept in a file, ` +
+        `a row or a queue, so write plain values: a date as an ISO string, a Map as an object`,
+      { cause },
+    );
+  }
+}
+
 /** Image state may hold one url or several; a model node wants them flat either way. */
 const asUrls = (value: unknown): string[] =>
   typeof value === "string" ? [value] : Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
@@ -192,22 +405,43 @@ export async function execute(
   spec: RunnerSpec,
   inputs: State = {},
   options: RunOptions = {},
+  /** @internal — how `resume` re-enters. Use `resume()`. */
+  from?: { paused: Paused; answer: HumanAnswer },
 ): Promise<RunOutcome> {
   const problems = validate(spec);
   if (problems.length) throw new RunnerError(spec.name, problems);
 
   const maxSteps = options.maxSteps ?? 50;
-  const decider = options.decider ?? jev(spec.jev);
+  const decider = options.decider ?? jev(jevConfigFor(spec.openrouter, spec.jev));
   const caller = options.caller ?? openrouter(spec.openrouter);
   const servers = pool(spec.mcpServers ?? {});
   const edges = spec.edges ?? [];
-  const startedAt = new Date();
-  const graphHash = toGraph(spec).runner.hash;
+  const graphDoc = toGraph(spec);
+  const graphHash = graphDoc.runner.hash;
 
-  const state: State = { goal: "", ...inputs };
+  if (from) {
+    const { paused } = from;
+    if (paused?.version !== 1) throw new ResumeError(`this is not a paused ensemble run — expected version 1, got ${JSON.stringify(paused?.version)}`);
+    if (paused.runner !== spec.name) {
+      throw new ResumeError(`this run paused in "${paused.runner}", not "${spec.name}" — resume it with the runner that paused it`);
+    }
+    if (paused.graph !== graphHash) {
+      throw new ResumeError(
+        `the graph changed since this run paused (${paused.graph} → ${graphHash}), so its node, edges and loop budgets ` +
+          `may no longer mean the same thing — resume with the graph that paused it, or start a new run`,
+      );
+    }
+  }
+
+  const startedAt = from ? new Date(from.paused.run.started) : new Date();
+  const runId = `${stamp(startedAt)}-${spec.name}`;
+  const state: State = from ? { ...from.paused.state } : { goal: "", ...inputs };
   const goal = String(state["goal"] ?? "");
-  const steps: RunStep[] = [];
-  const taken = new Map<number, number>();
+  const steps: RunStep[] = from ? [...from.paused.steps] : [];
+  const taken = new Map<number, number>(from?.paused.taken ?? []);
+  // A resumed run consumes its answer at the node that paused, once.
+  const presets = new Map<string, HumanAnswer>(from ? [[from.paused.node, from.answer]] : []);
+  let pausedAt: { node: string; lane: string; pending: Pending } | undefined;
 
   // One controller for the whole run: budget, cancellation, a failure on any
   // lane and the caller's own signal all land on it, and every handler is
@@ -218,7 +452,7 @@ export async function execute(
   else options.signal?.addEventListener("abort", relay, { once: true });
 
   let status: RunStatus = "completed";
-  let total = 0;
+  let total = from?.paused.total ?? 0;
   let lastValue: unknown;
   let failure: { message: string; cause: unknown } | undefined;
   // The first reason to stop wins; later lanes noticing the abort must not overwrite it.
@@ -231,7 +465,7 @@ export async function execute(
     $schema: RUN_SCHEMA,
     version: 1,
     run: {
-      id: `${stamp(startedAt)}-${spec.name}`,
+      id: runId,
       runner: spec.name,
       graph: graphHash,
       goal,
@@ -242,6 +476,7 @@ export async function execute(
     },
     steps,
     state,
+    ...(pausedAt ? { pending: pausedAt.pending } : {}),
   });
 
   /** Run one node on one lane. Returns where the lane goes next, or what it spawned. */
@@ -278,13 +513,16 @@ export async function execute(
       kind: step.kind,
       lane,
       waiting: isDecide(node)
-        ? `asking the decider · ${Object.keys(node.decide).length} question${Object.keys(node.decide).length === 1 ? "" : "s"}`
+        ? `${node.by === "human" ? (presets.has(name) ? "resuming with a person's answer" : "waiting for a person") : "asking the decider"} · ${Object.keys(node.decide).length} question${Object.keys(node.decide).length === 1 ? "" : "s"}`
         : isWork(node)
           ? `running work "${node.work}"`
           : isModel(node)
             ? `calling ${typeof node.model === "string" ? node.model : String(state[node.model.from] ?? "?")}` +
               (node.sees?.length ? ` · looking at ${node.sees.join(", ")}` : "")
             : "computing",
+      // A person is only actually WAITED on when there is no answer in hand
+      // already: a resume walks through the same node with one.
+      ...(isDecide(node) && node.by === "human" && !presets.has(name) ? { asks: "human" as const } : {}),
     });
 
     let gated: string | undefined;
@@ -322,16 +560,75 @@ export async function execute(
       const wanted = readsOf(node);
       if (wanted.length) step.asked = pick(state, wanted);
 
-      if (isDecide(node)) {
-        const decision = await bounded(decider(pick(state, node.reads), node.decide));
+      if (isDecide(node) && node.by === "human") {
+        const questions = graphDoc.nodes.find((n) => n.id === name)!.decide!.questions;
+        const asked = pick(state, node.reads);
+        let answer = presets.get(name);
+        presets.delete(name);
+        // A person is not a hung machine: no stepTimeout here, only cancellation.
+        answer ??=
+          (await options.human?.({
+            run: runId,
+            node: name,
+            questions,
+            asked,
+            ...(node.comment ? { comment: node.comment } : {}),
+            signal: controller.signal,
+          })) ?? undefined;
+        if (!answer) {
+          // Nobody to ask right now. Stop cleanly, and leave everything needed
+          // to pick this up again.
+          //
+          // But only if this lane is the whole run. A pause stops everything,
+          // and `resume` restarts one lane, so pausing beside a live sibling
+          // would abandon it silently — a node in the graph would simply never
+          // run and the record would call it a clean pause. `validate` rejects
+          // the shapes it can prove; this is the net under the ones it cannot.
+          if (running.size > 1 || parked.size > 0) {
+            const others = running.size - 1 + parked.size;
+            step.error =
+              `node "${name}" asks a person, but ${others} other lane${others === 1 ? "" : "s"} ` +
+              `${others === 1 ? "is" : "are"} still running — a run pauses as a whole and resumes on one lane, ` +
+              `so the ${others === 1 ? "other" : "others"} would be dropped. Move the question after the join`;
+            close();
+            if (!failure) failure = { message: `node "${name}" failed: ${step.error}`, cause: undefined };
+            halt("failed");
+            options.onEvent?.({ type: "node:end", step });
+            return {};
+          }
+          pausedAt = { node: name, lane, pending: { node: name, questions, asked, ...(node.comment ? { comment: node.comment } : {}) } };
+          steps.splice(steps.indexOf(step), 1);
+          halt("paused");
+          return {};
+        }
+        // Recorded before the answer is checked, so a REJECTED answer is still
+        // filed as a person's: a reader should see who was asked, not a step
+        // that looks like the classifier tripped.
+        step.meta = { by: "human", ...(answer.by ? { who: answer.by } : {}) };
+        const { written, recorded } = fromHuman(name, node, answer);
+        step.answers = recorded;
+        step.writes = written;
+        Object.assign(state, written);
+        lastValue = written;
+      } else if (isDecide(node)) {
+        const decision = await bounded(decider(pick(state, node.reads), node.decide, { signal }));
         step.cost = decision.cost;
         step.meta = { model: decision.model, usage: decision.usage };
         step.answers = {};
         const written: Record<string, unknown> = {};
-        for (const key of Object.keys(node.decide)) {
+        for (const [key, question] of Object.entries(node.decide)) {
           const answer = decision.answers[key];
           if (!answer) {
-            throw new Error(`node "${name}" asked "${key}" but the decider returned no answer for it`);
+            throw new DeciderAnswerError(`node "${name}" asked "${key}" but the decider returned no answer for it`);
+          }
+          // An answer outside the declared set would match no edge and leave the
+          // run to exit quietly, reporting success. Refuse it at the fault.
+          const wrong = misfit(question, answer);
+          if (wrong) {
+            throw new DeciderAnswerError(
+              `node "${name}" asked "${key}" and the decider said something the graph cannot route: ${wrong}. ` +
+                `The run would have fallen through to the exit having done nothing`,
+            );
           }
           step.answers[key] = toStepAnswer(answer);
           written[key] = valueOf(answer);
@@ -448,6 +745,27 @@ export async function execute(
     } catch (cause) {
       step.error = cause instanceof Error ? cause.message : String(cause);
       close();
+      // Money spent before the throw was still spent. A handler that reported
+      // a cost and then failed must count toward the total and the budget, or
+      // a run that keeps failing looks free.
+      total += step.cost;
+      // No answer at all — an outage, a timeout — becomes a route when the node
+      // declares one. A malformed human answer does not: that is a bug.
+      if (isDecide(node) && node.fallback && !(cause instanceof HumanAnswerError) && !controller.signal.aborted) {
+        step.took = "fallback";
+        options.onEvent?.({ type: "node:end", step });
+        return { next: node.fallback };
+      }
+      // The run was already stopping — the caller hung up, the budget ran out, a
+      // sibling lane failed — and this step was cut off rather than broken. Say
+      // why the RUN stopped and do not invent a failure on top of it. (A step
+      // timeout aborts its own signal, not this one, so it still reads as the
+      // failure it is.)
+      if (controller.signal.aborted) {
+        halt("cancelled");
+        options.onEvent?.({ type: "node:end", step });
+        return {};
+      }
       if (!failure) failure = { message: `node "${name}" failed: ${step.error}`, cause };
       halt("failed");
       options.onEvent?.({ type: "node:end", step });
@@ -521,7 +839,8 @@ export async function execute(
   };
 
   try {
-    start_(spec.entry, "main");
+    if (from) start_(from.paused.node, from.paused.lane, true);
+    else start_(spec.entry, "main");
     while (true) {
       if (running.size) {
         await Promise.race(running);
@@ -540,15 +859,69 @@ export async function execute(
     servers.closeAll();
   }
 
+  // A pause is a resting place, and nothing rests if something also broke: the
+  // snapshot would promise a continuation the failed lane has already made
+  // impossible. So a failure wins, and the record says failed rather than
+  // handing back a `pending` nobody can act on.
+  if (failure && pausedAt) {
+    status = "failed";
+    pausedAt = undefined;
+  }
+
   const run = finish();
   options.onEvent?.({ type: "run:end", run });
   if (failure) throw new RunFailed(failure.message, run, failure.cause);
+
+  if (pausedAt) {
+    return {
+      result: undefined,
+      state,
+      run,
+      // Round-tripped through JSON here, at the pause, and not left to whoever
+      // stores it. Otherwise a run resumed in this process and the same run
+      // resumed from a file compute different things — a Date is an object on
+      // one path and a string on the other — and a value that cannot be
+      // serialised at all pauses happily and explodes later, in the caller's
+      // writeFileSync, where nothing knows what to say about it.
+      paused: plainJson<Paused>(
+        {
+          version: 1,
+          runner: spec.name,
+          graph: graphHash,
+          run: { id: runId, started: startedAt.toISOString() },
+          node: pausedAt.node,
+          lane: pausedAt.lane,
+          state,
+          steps,
+          taken: [...taken],
+          total,
+          pending: pausedAt.pending,
+        },
+        pausedAt.node,
+      ),
+    };
+  }
 
   return {
     result: spec.result ? state[spec.result] : lastValue,
     state,
     run,
   };
+}
+
+/**
+ * Continue a paused run with a person's answer. The answer is checked against
+ * the node's closed questions, the run carries on from that node's edges, and
+ * the finished run.json is one continuous record — same id, same steps, the
+ * person's answer in the middle of it. It can pause again at a later node.
+ */
+export function resume(
+  spec: RunnerSpec,
+  paused: Paused,
+  answer: HumanAnswer,
+  options: RunOptions = {},
+): Promise<RunOutcome> {
+  return execute(spec, {}, options, { paused, answer });
 }
 
 /** Declaration order, first match wins. A loop budget is spent on the edge, by index. */

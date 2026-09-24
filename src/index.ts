@@ -1,10 +1,11 @@
 /**
  * The public surface.
  *
- * Nine names do the work: `runner` to define one, `choice` / `score` / `noul`
- * to ask, and the rest to prove, emit or run it. Everything else exported here
- * is a type, or a seam someone will eventually need — `jev` to configure the
- * decider, `Decider` to replace it.
+ * A handful of names do the work: `runner` to define one, `choice` / `score` /
+ * `noul` to ask, and `validate` / `toGraph` / `execute` / `resume` /
+ * `calibrate` / `supervise` to prove, emit, run or keep it alive. Everything
+ * else exported here is a type, or a seam someone will eventually need — `jev`
+ * to configure the decider, `Decider` to replace it.
  */
 export { runner, isRunner } from "./runner.ts";
 export type { Runner } from "./runner.ts";
@@ -35,20 +36,34 @@ export type {
   ScoreQuestion,
 } from "./questions.ts";
 
-export { jev, JevError, DEFAULT_BASE_URL, DEFAULT_MODEL, USD_PER_INPUT_TOKEN } from "./jev.ts";
-export type { Decider, Decision, JevConfig } from "./jev.ts";
+export { jev, jevConfigFor, JevError, DEFAULT_BASE_URL, DEFAULT_MODEL, USD_PER_INPUT_TOKEN } from "./jev.ts";
+export type { DecideOptions, Decider, Decision, JevConfig } from "./jev.ts";
 
 export { catalog, forgetCatalog, modelOptions, openrouter, OpenRouterError, shortlist, OPENROUTER_URL } from "./openrouter.ts";
 export type { Caller, CallerConfig, ModelCard, ModelFilter, ModelReply, ModelRequest } from "./openrouter.ts";
 
-export { execute, RunFailed, RunnerError, RUN_SCHEMA } from "./execute.ts";
-export type { RunDoc, RunEvent, RunOptions, RunOutcome, RunStatus, RunStep, StepAnswer } from "./execute.ts";
+export { execute, resume, DeciderAnswerError, HumanAnswerError, ResumeError, RunFailed, RunnerError, RUN_SCHEMA } from "./execute.ts";
+export type {
+  Human,
+  HumanAnswer,
+  HumanRequest,
+  Paused,
+  Pending,
+  RunDoc,
+  RunEvent,
+  RunOptions,
+  RunOutcome,
+  RunStatus,
+  RunStep,
+  StepAnswer,
+} from "./execute.ts";
 
 export { calibrate, CalibrationError } from "./calibrate.ts";
 export type { Calibration, CalibrateOptions, Case, CaseSet, GatePrice, Miss, QuestionReport } from "./calibrate.ts";
 
 export { supervise, vitalsOf, recentText } from "./supervise.ts";
 export type {
+  Interrupted,
   Stimulus,
   SuperviseEvent,
   SuperviseOptions,
@@ -87,7 +102,7 @@ export type { McpResult, McpServerSpec, McpSession, McpTool } from "./mcp.ts";
 export { reporter, summarise, money } from "./report.ts";
 export type { ReporterOptions } from "./report.ts";
 
-export { branchHolds, imageKeys, isMcp, isModel, parseBranch, probeReads, producers, readsOf, writesOf } from "./spec.ts";
+export { branchHolds, imageKeys, isHuman, isMcp, isModel, parseBranch, probeReads, producers, readsOf, writesOf } from "./spec.ts";
 export type {
   Branch,
   CodeNode,
