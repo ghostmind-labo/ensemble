@@ -73,6 +73,21 @@ const REGISTRY = {
         remotes: [{ type: "streamable-http", url: "https://hosted.example/mcp" }],
       },
     },
+    {
+      server: {
+        name: "ai.keyed/remote",
+        description: "A hosted server that wants a key in a header.",
+        version: "1.0.0",
+        remotes: [
+          { type: "sse", url: "https://keyed.example/sse" },
+          {
+            type: "streamable-http",
+            url: "https://keyed.example/mcp",
+            headers: [{ name: "X-API-Key", description: "From the dashboard.", isRequired: true, isSecret: true }],
+          },
+        ],
+      },
+    },
   ],
 };
 
@@ -85,8 +100,9 @@ const REGISTRY = {
     "io.github.acme/files",
     "com.scanner/github",
     "ai.hosted/remote-only",
+    "ai.keyed/remote",
   ]);
-  assert.equal(servers[0]!.version, "1.2.0", "four entries, three servers — the older 1.0.0 is dropped");
+  assert.equal(servers[0]!.version, "1.2.0", "five entries, four servers — the older 1.0.0 is dropped");
   assert.match(fetch.calls[0]!, /\/v0\/servers\?search=files&limit=50$/);
 }
 console.log("ok · 1 the registry is read and collapsed to one entry per server");
@@ -112,15 +128,29 @@ console.log("ok · 2 required-vs-optional is honoured, so 'what must I set' has 
   const remote = servers.find((s) => s.name === "ai.hosted/remote-only")!;
 
   assert.deepEqual(toServerSpec(files), { command: "npx", args: ["-y", "@acme/files@1.2.0"] });
-  assert.equal(toServerSpec(remote), undefined, "this client speaks stdio, so a remote server is not runnable");
-
-  // and the description says so, rather than claiming it is ready
-  assert.match(describeServer(remote), /remote only; this client speaks stdio/);
+  assert.deepEqual(
+    toServerSpec(remote),
+    { url: "https://hosted.example/mcp", transport: "streamable-http" },
+    "a remote-only server becomes a url; OAuth, if it wants it, is negotiated on the 401",
+  );
+  assert.match(describeServer(remote, {}), /https:\/\/hosted\.example\/mcp \(streamable-http\)  ✓ ready \(remote/);
   assert.match(describeServer(files, {}), /✓ ready/);
   assert.match(describeServer(servers.find((s) => s.name === "com.scanner/github")!, {}), /⚠ needs APIFY_TOKEN/);
 
   assert.equal(isRunnable(files, {}), true);
-  assert.equal(isRunnable(remote, {}), false);
+  assert.equal(isRunnable(remote, {}), true);
+
+  // A declared header becomes ${ENV}, never a value, and is a requirement like any variable.
+  const keyed = servers.find((s) => s.name === "ai.keyed/remote")!;
+  assert.deepEqual(toServerSpec(keyed), {
+    url: "https://keyed.example/mcp",
+    transport: "streamable-http",
+    headers: { "X-API-Key": "${X_API_KEY}" },
+  }, "Streamable HTTP is preferred over legacy SSE");
+  assert.deepEqual(missingEnv(keyed, {}).map((v) => v.name), ["X_API_KEY"]);
+  assert.equal(isRunnable(keyed, {}), false);
+  assert.equal(isRunnable(keyed, { X_API_KEY: "k" }), true);
+  assert.match(describeServer(keyed, {}), /⚠ needs X_API_KEY/);
   assert.equal(isRunnable(servers.find((s) => s.name === "com.scanner/github")!, {}), false);
 
   const pypi: RegistryServer = {
@@ -132,7 +162,7 @@ console.log("ok · 2 required-vs-optional is honoured, so 'what must I set' has 
   };
   assert.deepEqual(toServerSpec(pypi), { command: "uvx", args: ["thing==2.0"] });
 }
-console.log("ok · 3 npm and pypi become commands; remote-only says so instead of pretending");
+console.log("ok · 3 npm and pypi become commands; a remote becomes a url with its headers as ${ENV}");
 
 // ── 4 · a registry failure is an error; a skills-index failure is silence ───
 {

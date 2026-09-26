@@ -22,7 +22,8 @@
  * fetching those automatically from a public index is not something a library
  * should do quietly.
  */
-import type { McpServerSpec } from "./mcp.ts";
+import { isRemote, type McpServerSpec, type RemoteServerSpec } from "./mcp.ts";
+import { authList, authMode, loginStatus, safeUrl, secretNames, type SecretResolver } from "./mcp-auth.ts";
 
 export const MCP_REGISTRY_URL = "https://registry.modelcontextprotocol.io";
 export const SKILLS_INDEX_URL = "https://skills.sh";
@@ -45,8 +46,11 @@ export interface RegistryPackage {
 }
 
 export interface RegistryRemote {
+  /** `streamable-http` or `sse`. */
   type: string;
   url: string;
+  /** Headers the server expects, each marked required or secret like an environment variable. */
+  headers?: Array<{ name: string; description?: string; isRequired: boolean; isSecret: boolean; value?: string }>;
 }
 
 export interface RegistryServer {
@@ -96,11 +100,36 @@ const server = (raw: Record<string, unknown>): RegistryServer => ({
     ...(pkg["transport"] ? { transport: pkg["transport"] as { type: string } } : {}),
     environmentVariables: ((pkg["environmentVariables"] as Array<Record<string, unknown>>) ?? []).map(envVar),
   })),
-  remotes: ((raw["remotes"] as RegistryRemote[]) ?? []).map((remote) => ({
-    type: String(remote.type ?? ""),
-    url: String(remote.url ?? ""),
+  remotes: ((raw["remotes"] as Array<Record<string, unknown>>) ?? []).map((remote) => ({
+    type: String(remote["type"] ?? ""),
+    url: String(remote["url"] ?? ""),
+    ...(Array.isArray(remote["headers"]) && remote["headers"].length
+      ? {
+          headers: (remote["headers"] as Array<Record<string, unknown>>).map((h) => ({
+            name: String(h["name"] ?? ""),
+            ...(h["description"] ? { description: String(h["description"]) } : {}),
+            isRequired: h["isRequired"] === true,
+            isSecret: h["isSecret"] === true,
+            ...(typeof h["value"] === "string" ? { value: h["value"] } : {}),
+          })),
+        }
+      : {}),
   })),
 });
+
+/** The environment variable a remote header is filled from: `X-API-Key` → `X_API_KEY`. */
+const headerEnv = (name: string): string => name.toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_|_$/g, "");
+
+const REMOTE_TYPES: Record<string, RemoteServerSpec["transport"]> = { "streamable-http": "streamable-http", sse: "sse" };
+
+const stdioPackage = (entry: RegistryServer, prefer = "npm"): RegistryPackage | undefined => {
+  const usable = entry.packages.filter((pkg) => (pkg.transport?.type ?? "stdio") === "stdio");
+  return usable.find((candidate) => candidate.registryType === prefer && KNOWN.has(candidate.registryType)) ??
+    usable.find((candidate) => KNOWN.has(candidate.registryType));
+};
+const KNOWN = new Set(["npm", "pypi", "oci"]);
+const remoteOf = (entry: RegistryServer): RegistryRemote | undefined =>
+  entry.remotes.find((remote) => remote.type === "streamable-http") ?? entry.remotes.find((remote) => remote.type in REMOTE_TYPES);
 
 /**
  * Search the official MCP registry.
@@ -139,10 +168,28 @@ export async function searchServers(
   return [...latest.values()];
 }
 
-/** Every variable a server declares, required ones first. */
+/**
+ * Every variable a server declares, required ones first — for the way this
+ * client would reach it: a package's environment when it runs locally, the
+ * headers a remote declares when it is reached over the network.
+ */
 export function requirements(entry: RegistryServer): EnvVarSpec[] {
   const all = new Map<string, EnvVarSpec>();
-  for (const pkg of entry.packages) for (const variable of pkg.environmentVariables) all.set(variable.name, variable);
+  if (stdioPackage(entry) || !remoteOf(entry)) {
+    for (const pkg of entry.packages) for (const variable of pkg.environmentVariables) all.set(variable.name, variable);
+  } else {
+    for (const h of remoteOf(entry)!.headers ?? []) {
+      const names = h.value ? [...h.value.matchAll(/\{([A-Za-z_][A-Za-z0-9_]*)\}/g)].map((m) => m[1]!) : [headerEnv(h.name)];
+      for (const name of names) {
+        all.set(name, {
+          name,
+          ...(h.description ? { description: h.description } : {}),
+          isRequired: h.isRequired,
+          isSecret: h.isSecret,
+        });
+      }
+    }
+  }
   return [...all.values()].sort((a, b) => Number(b.isRequired) - Number(a.isRequired) || a.name.localeCompare(b.name));
 }
 
@@ -162,14 +209,27 @@ export function missingEnv(
 /**
  * Turn a registry entry into something `mcpServers` accepts.
  *
- * Only stdio packages can become a local command; a remote-only server is
- * reachable over HTTP, which this client does not speak, so it returns
- * undefined rather than inventing something that would fail at run time.
+ * A stdio package becomes a local command, and is preferred when there is one:
+ * it runs on your machine, under your control. Otherwise a declared remote
+ * becomes a url, its headers filled from `${ENV}` so no secret is written
+ * down. No auth is set: a server that wants OAuth says so with a 401, and the
+ * client answers it. Undefined only when there is truly nothing to reach.
  */
 export function toServerSpec(entry: RegistryServer, prefer = "npm"): McpServerSpec | undefined {
-  const usable = entry.packages.filter((pkg) => (pkg.transport?.type ?? "stdio") === "stdio");
-  const pkg = usable.find((candidate) => candidate.registryType === prefer) ?? usable[0];
-  if (!pkg) return undefined;
+  const pkg = stdioPackage(entry, prefer);
+  if (!pkg) {
+    const remote = remoteOf(entry);
+    if (!remote) return undefined;
+    const headers: Record<string, string> = {};
+    for (const h of remote.headers ?? []) {
+      headers[h.name] = h.value ? h.value.replace(/\{([A-Za-z_][A-Za-z0-9_]*)\}/g, "${$1}") : `\${${headerEnv(h.name)}}`;
+    }
+    return {
+      url: remote.url,
+      transport: REMOTE_TYPES[remote.type]!,
+      ...(Object.keys(headers).length ? { headers } : {}),
+    };
+  }
 
   const pinned = pkg.version ? `${pkg.identifier}@${pkg.version}` : pkg.identifier;
   switch (pkg.registryType) {
@@ -187,24 +247,25 @@ export function toServerSpec(entry: RegistryServer, prefer = "npm"): McpServerSp
 /**
  * One entry, for a terminal or a report.
  *
- * "Ready" means *this client could start it now*, which is narrower than the
- * registry's own notion: a remote-only server is perfectly real but speaks
- * HTTP, and the mcp node runs local stdio processes. Saying ready would be a
- * lie that only surfaces at run time.
+ * "Ready" means *this client could reach it now*: a command it can start, or a
+ * url it can speak to, with every required variable set. A hosted server may
+ * still ask for a login when first reached — that is said, not hidden.
  */
 export function describeServer(entry: RegistryServer, env?: Record<string, string | undefined>): string {
   const missing = missingEnv(entry, env);
   const spec = toServerSpec(entry);
-  const how = spec
-    ? `${spec.command} ${(spec.args ?? []).join(" ")}`
-    : (entry.remotes[0]?.url ?? "no runnable package");
+  const how = !spec
+    ? (entry.remotes[0]?.url ?? "no runnable package")
+    : isRemote(spec)
+      ? `${spec.url} (${spec.transport})`
+      : `${spec.command} ${(spec.args ?? []).join(" ")}`;
   const status = !spec
-    ? entry.remotes.length
-      ? "  — remote only; this client speaks stdio"
-      : "  — no stdio package"
+    ? "  — no package or remote this client can use"
     : missing.length
       ? `  ⚠ needs ${missing.map((v) => v.name).join(", ")}`
-      : "  ✓ ready";
+      : isRemote(spec)
+        ? "  ✓ ready (remote; it may ask for a login: ensemble mcp login)"
+        : "  ✓ ready";
   return `${entry.name}@${entry.version}\n  ${entry.description}\n  ${how}${status}`;
 }
 
@@ -302,11 +363,15 @@ export async function preflight(
     name: string;
     nodes: Record<string, unknown>;
     skills?: Array<{ name: string; path: string; description: string; compatibility?: string }>;
-    mcpServers?: Record<string, unknown>;
+    mcpServers?: Record<string, McpServerSpec>;
   },
   config: DiscoveryConfig & {
     catalog?: () => Promise<Array<{ id: string; vision: boolean; draws: boolean; tools: boolean }>>;
     env?: Record<string, string | undefined>;
+    /** Checks `${NAME}`s in remote MCP servers — by name, never printing a value. Default: `env`. */
+    secretResolver?: SecretResolver;
+    /** Where OAuth logins are looked for. Default: the file store. */
+    tokenStore?: import("./mcp-auth.ts").TokenStore;
   } = {},
 ): Promise<Preflight> {
   const problems: string[] = [];
@@ -331,10 +396,33 @@ export async function preflight(
   ].filter(Boolean);
   if (callers.length) need("OPENROUTER_API_KEY", callers.join(" and "));
 
+  const secrets: Array<{ name: string; server: string }> = [];
+  const checked = new Set<string>();
   for (const [name, raw] of mcps) {
     const node = raw as { mcp: { server: string } };
-    if (!(spec.mcpServers ?? {})[node.mcp.server]) continue;
-    notes.push(`node "${name}" starts MCP server "${node.mcp.server}" as a local process`);
+    const server = (spec.mcpServers ?? {})[node.mcp.server];
+    if (!server) continue;
+    if (!isRemote(server)) {
+      notes.push(`node "${name}" starts MCP server "${node.mcp.server}" as a local process`);
+      continue;
+    }
+    notes.push(
+      `node "${name}" reaches MCP server "${node.mcp.server}" at ${safeUrl(server.url)} ` +
+        `(${server.transport ?? "auto"}, auth: ${authMode(server)})`,
+    );
+    if (checked.has(node.mcp.server)) continue;
+    checked.add(node.mcp.server);
+    for (const secret of secretNames(server)) secrets.push({ name: secret, server: node.mcp.server });
+    const oauth = authList(server).find((auth) => auth.type === "oauth");
+    const person = oauth && (oauth.grant ?? "authorization_code") !== "client_credentials" && oauth.grant !== "refresh_token";
+    if (person) {
+      const status = await loginStatus(node.mcp.server, server, config.tokenStore ? { tokenStore: config.tokenStore } : {}).catch(() => undefined);
+      if (status && !status.loggedIn) {
+        problems.push(
+          `MCP server "${node.mcp.server}" needs a login — run: npx ensemble mcp login ${node.mcp.server} --url ${safeUrl(server.url)}`,
+        );
+      }
+    }
   }
 
   if (models.length) {
@@ -379,6 +467,14 @@ export async function preflight(
 
   for (const skill of spec.skills ?? []) {
     if (skill.compatibility) notes.push(`skill "${skill.name}" requires: ${skill.compatibility}`);
+  }
+
+  // A secret is reported by NAME, set or not, so a run never starts only to find one missing.
+  for (const { name, server } of secrets) {
+    const set = config.secretResolver ? Boolean(await config.secretResolver(name)) : Boolean(env[name]);
+    const existing = needs.find((entry) => entry.name === name);
+    if (existing) existing.why = `${existing.why} and MCP server "${server}"`;
+    else needs.push({ name, why: `MCP server "${server}"`, set });
   }
 
   for (const entry of needs) {

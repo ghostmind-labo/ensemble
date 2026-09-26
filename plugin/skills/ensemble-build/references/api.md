@@ -36,7 +36,8 @@ export default runner({
   openrouter?: { apiKey?, baseUrl?, retries?, timeoutMs?, app?, fetch? }, // ONE key for everything: Jev decides through it too
   jev?: { model?, baseUrl?, retries?, timeoutMs?, apiKey?, fetch? },      // rarely needed; apiKey, baseUrl and fetch default to openrouter's
   skills?: Skill[],               // from loadSkills(); needed by model nodes that inline skills
-  mcpServers?: { name: { command, args?, env?, cwd?, timeoutMs? } },
+  mcpServers?: { name: { command, args?, env?, cwd?, timeoutMs? }       // local process
+                     | { url, transport?, headers?, auth?, listen?, timeoutMs? } },  // hosted server
 });
 ```
 
@@ -165,6 +166,34 @@ read: {
 The server must be declared in `mcpServers`. Servers start lazily, only when a
 branch reaches them, and stop when the run ends. A tool of `"none"` or empty
 (from state) fails the node, so wire the `none` answer to another branch.
+
+#### Remote servers
+
+`{ url }` reaches a hosted server. `transport` is `"auto"` (default: Streamable
+HTTP, falling back to legacy SSE on 400/404/405; `ws://`/`wss://` is WebSocket),
+`"streamable-http"`, `"sse"` or `"websocket"`. `headers` values and every auth
+field may be `"${NAME}"`, resolved at connect time by `RunOptions.secretResolver`
+(default `process.env`). `auth` is one of, or an array combining:
+
+| `auth` | Fields |
+|---|---|
+| `{ type: "none" }` | Nothing — and no OAuth even on a 401 |
+| `{ type: "headers" }` | Only `headers` |
+| `{ type: "bearer" }` | `token` |
+| `{ type: "api_key" }` | `in: "header" \| "query"`, `name`, `value` |
+| `{ type: "basic" }` | `username`, `password` |
+| `{ type: "mtls" }` | `cert`, `key`, `ca?`, `passphrase?` (PEM or path; needs https/wss) |
+| `{ type: "custom" }` | `provider: async ({ url, server, challenge?, signal }) => headers` — re-asked after a 401 |
+| `{ type: "oauth" }` | `grant?` (`authorization_code` default, `device_code`, `client_credentials`, `refresh_token`), `clientId?` (omit → dynamic registration), `clientSecret?`, `tokenEndpointAuth?`, `privateKey?`, `keyId?`, `scopes?`, `audience?`, `resource?`, `redirectPort?`, `tokenStore?` (a directory), `refreshToken?` |
+
+No `auth` at all: a 401 with a Bearer challenge is treated as OAuth. People log
+in once with `npx ensemble mcp login <server> [runner file] [--url] [--device]`;
+machines (`client_credentials`, `refresh_token`) grant themselves. A run never
+opens a browser: it fails with the login command. `RunOptions.tokenStore` swaps
+the default store (0600 files under `~/.ensemble/mcp-tokens/`, or
+`ENSEMBLE_MCP_TOKENS`) — pass one per user in a hosted app.
+`npx ensemble mcp status [file]` shows each server's auth and login, never a
+secret. `runner.warnings()` / `validate` flag literal secrets.
 
 ## 4. Edges
 
@@ -321,7 +350,9 @@ a two-argument decider is still a valid `Decider`.
 | `loadSkills({ project?, home?, dirs?, plugins? })` | Agent Skills from disk. Sync, local, safe at module scope |
 | `skillOptions(skills, { max?, chars?, none? })` | Skills as `choice` criteria, with a `none` option by default |
 | `toolOptions(tools, …)` | MCP tools as `choice` criteria |
-| `searchServers(q)`, `missingEnv(entry)`, `toServerSpec(entry)` | The official MCP registry |
+| `searchServers(q)`, `missingEnv(entry)`, `toServerSpec(entry)` | The official MCP registry — a remote-only entry becomes `{ url, transport, headers }` |
+| `login`, `logout`, `loginStatus`, `fileTokenStore` | Remote MCP OAuth from code, e.g. per user |
+| `warnings(spec)` | Literal secrets and credentials without TLS — not problems, but fix them |
 | `preflight(spec)` | What `ensemble check` runs |
 | `validate(spec)`, `toGraph(spec)`, `execute(spec, inputs, opts)` | The functions behind the runner methods |
 | `jev(config)`, `openrouter(config)` | The default decider and caller, configurable |

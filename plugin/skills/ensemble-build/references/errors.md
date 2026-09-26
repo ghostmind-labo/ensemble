@@ -26,6 +26,13 @@ not just the symptom.
 | `names skill "x", which is not in the runner's registry` / `loaded no skills` | A model node lists a skill the runner didn't load | Pass `skills: loadSkills()` to the runner, or fix the name (`ensemble skills` lists them) |
 | `uses MCP server "x", which the runner does not declare` | Missing `mcpServers.x` | Declare `{ command, args }`, found via `ensemble servers <q>` |
 | `names no tool` | Empty `mcp.tool` | A tool name, or `{ from: "key" }` |
+| `MCP server "x" needs a command (a local process) or a url` / `has both` | A server spec with neither or both | `{ command, args }` locally, `{ url }` for a hosted one |
+| `MCP server "x" … auth (oauth) uses client_credentials, so it needs clientSecret` (and similar `auth (…) needs …`) | An auth mode missing a field | Add the field it names, as `"${NAME}"` |
+| `auth (mtls) needs an https:// or wss:// url` | mTLS on plain http/ws | Use TLS |
+| `mcp "x": needs NAME, which is not set` (run time) | A `${NAME}` the secret resolver could not find | Set it, or pass `secretResolver` |
+| `mcp "x": needs a login — run: npx ensemble mcp login x --url …` (run time) | An OAuth server with no stored login | Run that command once; runs never open a browser |
+| `mcp "x": needs more access (scopes: …)` (run time) | 403 insufficient_scope on a person's login | Run the login command again; the wider scopes are remembered |
+| `⚠ … has a literal secret in …` (warning) | A token or password written inline | Write `"${NAME}"` and set NAME in the environment |
 | `edge N (a→b): "x" is not a node` | A typo in `from` or `to` | Fix the name |
 | `has both on and when` | Mixed branch forms | Meaning goes in `on`, arithmetic in `when`. Pick one |
 | `cannot parse on:` / `"!" cannot be combined` / `is not a number` | Bad `on:` syntax | Grammar: `k=opt`, `k`, `!k`, `k>=0.7` |

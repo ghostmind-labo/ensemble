@@ -35,6 +35,7 @@ import { confidenceOf, misfit, valueOf, type Answer } from "./questions.ts";
 import { jev, jevConfigFor, type Decider } from "./jev.ts";
 import { openrouter, type Caller } from "./openrouter.ts";
 import { pool } from "./mcp.ts";
+import type { SecretResolver, TokenStore } from "./mcp-auth.ts";
 import { findSkill, renderSkills } from "./skills.ts";
 import { validate } from "./validate.ts";
 import { toGraph, type GraphQuestion } from "./graph.ts";
@@ -224,6 +225,17 @@ export interface RunOptions {
   human?: Human;
   /** Live progress. Fires before a node runs and again when it finishes. */
   onEvent?: (event: RunEvent) => void;
+  /**
+   * Resolves the `${NAME}`s in remote MCP server headers and auth — Vault, a
+   * keychain, a per-user store. Default: `process.env`.
+   */
+  secretResolver?: SecretResolver;
+  /**
+   * Where remote MCP OAuth logins are read and refreshed. Default: one 0600
+   * file per server under `~/.ensemble/mcp-tokens/`. A hosted app passes one
+   * per user, so no user's tokens reach another's run.
+   */
+  tokenStore?: TokenStore;
 }
 
 export interface RunOutcome {
@@ -414,7 +426,6 @@ export async function execute(
   const maxSteps = options.maxSteps ?? 50;
   const decider = options.decider ?? jev(jevConfigFor(spec.openrouter, spec.jev));
   const caller = options.caller ?? openrouter(spec.openrouter);
-  const servers = pool(spec.mcpServers ?? {});
   const edges = spec.edges ?? [];
   const graphDoc = toGraph(spec);
   const graphHash = graphDoc.runner.hash;
@@ -450,6 +461,13 @@ export async function execute(
   const relay = () => controller.abort(options.signal?.reason);
   if (options.signal?.aborted) relay();
   else options.signal?.addEventListener("abort", relay, { once: true });
+
+  // Remote servers resolve their secrets and logins per run, so one runner can serve many users.
+  const servers = pool(spec.mcpServers ?? {}, {
+    ...(options.secretResolver ? { secretResolver: options.secretResolver } : {}),
+    ...(options.tokenStore ? { tokenStore: options.tokenStore } : {}),
+    signal: controller.signal,
+  });
 
   let status: RunStatus = "completed";
   let total = from?.paused.total ?? 0;
@@ -724,7 +742,7 @@ export async function execute(
         }
         const session = await servers.get(node.mcp.server);
         const args = typeof node.args === "function" ? node.args(state) : (node.args ?? {});
-        const outcome = await bounded(session.call(tool, args));
+        const outcome = await bounded(session.call(tool, args, { signal }));
         step.handler = `${node.mcp.server}/${tool}`;
         step.meta = { server: node.mcp.server, tool, isError: outcome.isError };
         if (outcome.isError) throw new Error(`mcp ${node.mcp.server}/${tool} failed: ${outcome.text.slice(0, 300)}`);

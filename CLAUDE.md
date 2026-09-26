@@ -25,13 +25,15 @@ back is the change to question.
 
 ## Project map
 
-Fifteen files, and each one has a single job.
+Seventeen files, and each one has a single job.
 
 - `src/questions.ts` — `choice` / `score` / `noul`, their answer types, and the API limits enforced at authoring time
 - `src/jev.ts` — the decider: one `fetch` to OpenRouter's `POST /api/v1/systemone`, plus the `Decider` seam
 - `src/openrouter.ts` — the caller: generation, vision, image output, the live model catalogue, and the `Caller` seam
 - `src/skills.ts` — the Agent Skills standard, read from disk; `skillOptions` for a choice
-- `src/mcp.ts` — a hand-rolled stdio JSON-RPC client. One tool call per node, never a loop
+- `src/mcp.ts` — the MCP session (shared by every pipe) and the stdio pipe. One tool call per node, never a loop
+- `src/mcp-remote.ts` — the remote pipes: Streamable HTTP, legacy SSE, WebSocket (hand-rolled over `node:http`, so mTLS and headers work everywhere)
+- `src/mcp-auth.ts` — secrets as `${NAME}`, every auth mode incl. OAuth 2.1, the 0600 token store, and redaction. No secret reaches run.json, graph.json, an event or an error
 - `src/registry.ts` — discovery: the official MCP registry, a skills index, and `preflight`
 - `src/spec.ts` — the vocabulary you write down: nodes, edges, handlers, the `on:` grammar, `probeReads`
 - `src/validate.ts` — the proof. Returns problems as strings, never throws
@@ -41,7 +43,7 @@ Fifteen files, and each one has a single job.
 - `src/supervise.ts` — the brainstem: a runner as a loop that lives for days. Memory, budgets, rest, journal and resume, a watcher runner
 - `src/report.ts` — the terminal reporter (one consumer of `RunEvent`, not the only possible one)
 - `src/runner.ts` — ties them into a callable; `src/index.ts` — the public surface
-- `src/cli.ts` — `validate` / `graph` / `run` / `calibrate` / `check` / `skills` / `servers`
+- `src/cli.ts` — `validate` / `graph` / `run` / `calibrate` / `check` / `skills` / `servers` / `mcp login·logout·status`
 
 `examples/` — nine runnable runners, each with a header comment saying what it
 demonstrates. `06-watch` is a watcher runner that also supervises `01-triage`
@@ -265,9 +267,9 @@ examples/<each>.mts --explore` still passes. Keep `plugin/.claude-plugin/plugin.
 
 <important if="you are committing, branching, or shipping">
 
-The v2 rewrite lives on `v2`; `main` still holds the old orchestration product
-and is reached only through a PR. Everything deleted in the rewrite — the
-viewer, `serve.ts`, the runtime zoo, autoresearch, the old plugin — is recoverable
-from `main` (the v1 plugin under `plugin/` was replaced wholesale, not revised), and autoresearch in particular is parked rather than abandoned.
+v1 is deprecated and `main` carries v2; work lands on `main` through a PR from a
+feature branch. Everything deleted in the rewrite — the viewer, `serve.ts`, the
+runtime zoo, autoresearch, the old plugin — is recoverable from git history
+before the v2 merge (the v1 plugin under `plugin/` was replaced wholesale, not revised), and autoresearch in particular is parked rather than abandoned.
 This repo's own `/.ensemble/` is gitignored.
 </important>

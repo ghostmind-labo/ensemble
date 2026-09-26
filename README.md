@@ -829,6 +829,30 @@ offline and the graph stays complete.
 a tool-calling agent can never tell you. Servers start lazily and stop with the
 run.
 
+A server is a local process or a URL — Streamable HTTP, legacy SSE or
+WebSocket, found automatically — with any auth a hosted server asks for:
+
+```ts
+mcpServers: {
+  fs:     { command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "."] },
+  potion: { url: "https://mcp.potion.run", headers: { workspace: "home" }, auth: { type: "oauth" } },
+  search: { url: "https://api.example.com/mcp", auth: { type: "bearer", token: "${SEARCH_TOKEN}" } },
+  keyed:  { url: "https://x.example/mcp", auth: { type: "api_key", in: "header", name: "X-API-Key", value: "${X_KEY}" } },
+  svc:    { url: "https://svc.example/mcp",
+            auth: { type: "oauth", grant: "client_credentials", clientId: "svc", clientSecret: "${SVC_SECRET}" } },
+  bank:   { url: "https://bank.example/mcp", auth: [{ type: "mtls", cert: "client.pem", key: "client.key" }, { type: "oauth" }] },
+}
+```
+
+Also `basic`, `custom` (a function that returns headers, for SSO or signed
+requests), device-code login and `private_key_jwt`. Secrets are written as
+`${NAME}` and resolved at connect time through `secretResolver` (default:
+`process.env`); a literal one is a `validate` warning. A person logs in once with
+`npx ensemble mcp login potion` (or `--device` on a machine with no browser),
+tokens live in a 0600 file per server under `~/.ensemble/mcp-tokens/` and refresh
+on their own, and a run that needs a login fails at once with that command —
+it never waits on a browser. A hosted app passes `tokenStore` per user.
+
 **A model node never needs tool-calling support.** The `mcp` node makes the call
 itself and puts the result on the blackboard; skills are inlined as text. So a
 small model, or a local one, still sits downstream of every tool and skill you
@@ -903,7 +927,8 @@ import {
   jev, openrouter, reporter,        // the decider, the caller, the terminal view
   catalog, shortlist, modelOptions, // the live model list, filtered in code
   loadSkills, skillOptions,         // Agent Skills from disk
-  connect, pool, toolOptions,       // MCP
+  connect, pool, toolOptions,       // MCP, local or remote
+  login, logout, fileTokenStore,    // remote MCP auth
   preflight, searchServers,         // discovery
 } from "@ghostmind-dev/ensemble";
 ```
