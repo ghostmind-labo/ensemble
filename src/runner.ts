@@ -12,7 +12,7 @@
  */
 import { execute, resume, type HumanAnswer, type Paused, type RunOptions, type RunOutcome } from "./execute.ts";
 import { toGraph, type GraphDoc } from "./graph.ts";
-import { validate } from "./validate.ts";
+import { validate, warnings } from "./validate.ts";
 import type { RunnerSpec, State } from "./spec.ts";
 
 export interface Runner {
@@ -25,6 +25,8 @@ export interface Runner {
   graph(): GraphDoc;
   /** Problems, as plain strings. Empty means sound. Free and offline. */
   validate(): string[];
+  /** Things that work but should not be committed — a literal secret, credentials without TLS. */
+  warnings(): string[];
 }
 
 export function runner(spec: RunnerSpec): Runner {
@@ -37,6 +39,7 @@ export function runner(spec: RunnerSpec): Runner {
       resume(spec, paused, answer, options),
     graph: (): GraphDoc => toGraph(spec),
     validate: (): string[] => validate(spec),
+    warnings: (): string[] => warnings(spec),
   });
 }
 

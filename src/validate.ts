@@ -35,6 +35,8 @@ import {
   type RunnerSpec,
 } from "./spec.ts";
 import { optionsOf } from "./questions.ts";
+import { literalSecrets, safeUrl, authList } from "./mcp-auth.ts";
+import type { McpServerSpec, RemoteServerSpec } from "./mcp.ts";
 
 const IDENT = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 const list = (xs: string[]): string => xs.map((x) => `"${x}"`).join(", ");
@@ -519,6 +521,9 @@ export function validate(spec: RunnerSpec): string[] {
     problems.push(`result: "${spec.result}" is never written. ${known()}`);
   }
 
+  /* ── mcp servers: a command or a url, and auth that can work ── */
+  for (const [server, raw] of Object.entries(spec.mcpServers ?? {})) problems.push(...serverProblems(server, raw));
+
   /* ── reachability ── */
   if (spec.entry && names.has(spec.entry)) {
     const reached = new Set([spec.entry]);
@@ -548,3 +553,114 @@ export function validate(spec: RunnerSpec): string[] {
 /** Sanity check used by the tests: does this branch string hold against this state? */
 export const holds = (on: string, state: Record<string, unknown>): boolean =>
   branchHolds(parseBranch(on), state);
+
+const TRANSPORTS = ["auto", "streamable-http", "sse", "websocket"];
+const GRANTS = ["authorization_code", "device_code", "client_credentials", "refresh_token"];
+const CLIENT_AUTH = ["none", "client_secret_basic", "client_secret_post", "private_key_jwt"];
+
+/** One declared server: is it something the client can reach, with auth it can use? */
+function serverProblems(server: string, raw: McpServerSpec): string[] {
+  const at = `MCP server "${server}"`;
+  const hasCommand = typeof (raw as { command?: unknown }).command === "string";
+  const hasUrl = typeof (raw as { url?: unknown }).url === "string";
+  if (hasCommand && hasUrl) return [`${at} has both a command and a url — a local server is { command }, a hosted one { url }`];
+  if (!hasCommand && !hasUrl) return [`${at} needs a command (a local process) or a url (a hosted server)`];
+  if (hasCommand) return [];
+
+  const spec = raw as RemoteServerSpec;
+  const problems: string[] = [];
+  let url: URL | undefined;
+  try {
+    url = new URL(spec.url);
+  } catch {
+    problems.push(`${at} has url "${spec.url}", which is not a url — e.g. https://mcp.example.com/mcp`);
+  }
+  if (url && !["http:", "https:", "ws:", "wss:"].includes(url.protocol)) {
+    problems.push(`${at} uses ${url.protocol}// — a remote server is http(s):// or ws(s)://`);
+  }
+  if (spec.transport !== undefined && !TRANSPORTS.includes(spec.transport)) {
+    problems.push(`${at} has transport "${spec.transport}" — use one of ${list(TRANSPORTS)}, or leave it out for auto`);
+  }
+  const ws = url && /^wss?:$/.test(url.protocol);
+  if (ws && spec.transport && spec.transport !== "websocket" && spec.transport !== "auto") {
+    problems.push(`${at} is a ${url!.protocol}// url but says transport "${spec.transport}" — use transport: "websocket"`);
+  }
+
+  const auths = authList(spec);
+  if (auths.filter((auth) => auth?.type === "oauth").length > 1) problems.push(`${at} lists oauth twice — combine it into one`);
+  for (const auth of auths) {
+    const mode = `${at} auth (${auth?.type})`;
+    switch (auth?.type) {
+      case "none":
+      case "headers":
+        break;
+      case "bearer":
+        if (!auth.token) problems.push(`${mode} needs token: "\${NAME}"`);
+        break;
+      case "api_key":
+        if (auth.in !== "header" && auth.in !== "query") problems.push(`${mode} needs in: "header" or in: "query"`);
+        if (!auth.name) problems.push(`${mode} needs name — the header or query parameter the key goes in`);
+        if (!auth.value) problems.push(`${mode} needs value: "\${NAME}"`);
+        break;
+      case "basic":
+        if (!auth.username || !auth.password) problems.push(`${mode} needs username and password: "\${NAME}"`);
+        break;
+      case "mtls":
+        if (!auth.cert || !auth.key) problems.push(`${mode} needs cert and key — a PEM or a path to one`);
+        if (url && !["https:", "wss:"].includes(url.protocol)) problems.push(`${mode} needs an https:// or wss:// url — a client certificate only rides on TLS`);
+        break;
+      case "custom":
+        if (typeof auth.provider !== "function") problems.push(`${mode} needs provider: async ({ url, server, challenge, signal }) => headers`);
+        break;
+      case "oauth": {
+        const grant = auth.grant ?? "authorization_code";
+        if (!GRANTS.includes(grant)) problems.push(`${mode} has grant "${grant}" — use one of ${list(GRANTS)}`);
+        if (auth.tokenEndpointAuth && !CLIENT_AUTH.includes(auth.tokenEndpointAuth)) {
+          problems.push(`${mode} has tokenEndpointAuth "${auth.tokenEndpointAuth}" — use one of ${list(CLIENT_AUTH)}`);
+        }
+        if (auth.tokenEndpointAuth === "private_key_jwt" && !auth.privateKey) problems.push(`${mode} uses private_key_jwt, so it needs privateKey — a PEM or a path`);
+        if ((auth.tokenEndpointAuth === "client_secret_basic" || auth.tokenEndpointAuth === "client_secret_post") && !auth.clientSecret) {
+          problems.push(`${mode} uses ${auth.tokenEndpointAuth}, so it needs clientSecret: "\${NAME}"`);
+        }
+        if (grant === "client_credentials" && auth.clientId && !auth.clientSecret && !auth.privateKey) {
+          problems.push(`${mode} uses client_credentials, so it needs clientSecret: "\${NAME}" or privateKey`);
+        }
+        if (grant === "refresh_token" && !auth.refreshToken) problems.push(`${mode} uses grant refresh_token, so it needs refreshToken: "\${NAME}"`);
+        if (auth.scopes !== undefined && (!Array.isArray(auth.scopes) || auth.scopes.some((scope) => typeof scope !== "string"))) {
+          problems.push(`${mode} has scopes that are not a list of strings`);
+        }
+        break;
+      }
+      default:
+        problems.push(
+          `${at} has auth type "${(auth as { type?: unknown })?.type}" — use none, headers, bearer, api_key, basic, oauth, mtls or custom`,
+        );
+    }
+  }
+  return problems;
+}
+
+/**
+ * Things that work but should not be committed. Not problems — a runner with
+ * a warning still runs — but each names its fix.
+ */
+export function warnings(spec: RunnerSpec): string[] {
+  const found: string[] = [];
+  for (const [server, raw] of Object.entries(spec.mcpServers ?? {})) {
+    if (typeof (raw as { url?: unknown }).url !== "string") continue;
+    const remote = raw as RemoteServerSpec;
+    found.push(...literalSecrets(server, remote));
+    let url: URL | undefined;
+    try {
+      url = new URL(remote.url);
+    } catch {
+      continue;
+    }
+    const local = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+    const credentials = authList(remote).some((auth) => !["none", "headers"].includes(auth.type)) || Object.keys(remote.headers ?? {}).length > 0;
+    if (!local && credentials && (url.protocol === "http:" || url.protocol === "ws:")) {
+      found.push(`MCP server "${server}" sends credentials to ${safeUrl(url)} without TLS — use https:// or wss://`);
+    }
+  }
+  return found;
+}

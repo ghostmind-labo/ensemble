@@ -77,7 +77,7 @@ export type {
 export { toGraph, GRAPH_SCHEMA } from "./graph.ts";
 export type { GraphDoc, GraphEdge, GraphNode, GraphQuestion } from "./graph.ts";
 
-export { validate } from "./validate.ts";
+export { validate, warnings } from "./validate.ts";
 
 export { findSkill, loadSkills, parseSkill, renderSkills, skillOptions, validateSkill } from "./skills.ts";
 export type { Skill, SkillOptionsConfig, SkillScope, SkillSources } from "./skills.ts";
@@ -96,8 +96,10 @@ export {
 } from "./registry.ts";
 export type { DiscoveryConfig, EnvVarSpec, Preflight, RegistryPackage, RegistryServer, SkillListing } from "./registry.ts";
 
-export { connect, McpError, pool, toolOptions } from "./mcp.ts";
-export type { McpResult, McpServerSpec, McpSession, McpTool } from "./mcp.ts";
+export { connect, isRemote, McpError, pool, toolOptions } from "./mcp.ts";
+export type { ConnectOptions, McpResult, McpServerSpec, McpSession, McpTool, RemoteServerSpec, StdioServerSpec } from "./mcp.ts";
+export { envSecrets, fileTokenStore, login, loginStatus, logout } from "./mcp-auth.ts";
+export type { McpAuth, McpAuthContext, OAuthConfig, SecretResolver, StoredLogin, TokenEndpointAuth, TokenStore } from "./mcp-auth.ts";
 
 export { reporter, summarise, money } from "./report.ts";
 export type { ReporterOptions } from "./report.ts";

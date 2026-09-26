@@ -22,6 +22,8 @@ import { calibrate, CalibrationError, type Calibration, type Case, type Question
 import { money, reporter } from "./report.ts";
 import { loadSkills, validateSkill } from "./skills.ts";
 import { describeServer, isRunnable, missingEnv, preflight, searchServers, searchSkills } from "./registry.ts";
+import { isRemote, type RemoteServerSpec } from "./mcp.ts";
+import { authMode, fileTokenStore, login, loginStatus, logout, safeUrl } from "./mcp-auth.ts";
 
 const version = (): string => {
   try {
@@ -58,6 +60,13 @@ Usage
   ensemble skills [query]           Skills visible here — and what to fix.
   ensemble servers [query]          MCP servers in the official registry, and
                                     which environment variables each still needs.
+  ensemble mcp login <server> [file] Log in to a remote MCP server (OAuth): a
+                                    browser, or --device for a code to type
+                                    elsewhere. The server comes from the runner
+                                    file, --url, or an earlier login.
+  ensemble mcp logout <server> [file] Revoke and forget its tokens.
+  ensemble mcp status [file]        Remote servers, how each authenticates, and
+                                    whether it is logged in. Never a secret.
   ensemble version
 
 Options
@@ -69,6 +78,9 @@ Options
       --remote       skills: search the public index instead of this machine
       --budget <usd> run, calibrate: stop once it costs more than this
       --max-steps <n> run: cap node executions (default 50)
+      --url <url>    mcp: the server's url, when no runner file names it
+      --header k=v   mcp: a header the server needs even to log in (repeatable)
+      --device       mcp login: the device flow, for a machine with no browser
 
 The file must default-export a runner(). Scenes are .mts, loaded by Node's own
 type stripping — Node 22.18 or newer.
@@ -76,12 +88,109 @@ type stripping — Node 22.18 or newer.
   OPENROUTER_API_KEY the one key: Jev decides and models write through it.
                      Required by 'run' and 'calibrate'; 'validate' and 'graph'
                      never call out.
+  ENSEMBLE_MCP_TOKENS where remote MCP logins are kept (default
+                     ~/.ensemble/mcp-tokens, one 0600 file per server).
 `;
 
 const die = (message: string): never => {
   process.stderr.write(`ensemble: ${message}\n`);
   process.exit(1);
 };
+
+const warn = (found: string[]): void => {
+  for (const warning of found) process.stderr.write(`  ⚠ ${warning}\n`);
+};
+
+const RUNNER_FILE = /\.(m?ts|m?js)$/;
+
+/**
+ * `ensemble mcp login|logout|status` — the one place a person meets OAuth.
+ *
+ * A run never opens a browser: it fails with the command to run here. So the
+ * server's spec is found the way a person would name it — in the runner file,
+ * by --url, or remembered from an earlier login.
+ */
+async function mcp(
+  sub: string | undefined,
+  args: string[],
+  values: { url?: string; header?: string[]; device?: boolean },
+): Promise<void> {
+  const file = args.find((arg) => RUNNER_FILE.test(arg));
+  const server = args.find((arg) => !RUNNER_FILE.test(arg));
+  const store = fileTokenStore();
+
+  const specFor = async (name: string): Promise<RemoteServerSpec> => {
+    if (file) {
+      const runner = await load(file);
+      const spec = runner.spec.mcpServers?.[name];
+      if (!spec) die(`${file} declares no MCP server "${name}". Declared: ${Object.keys(runner.spec.mcpServers ?? {}).join(", ") || "none"}`);
+      if (!isRemote(spec!)) die(`MCP server "${name}" is a local process — there is nothing to log in to`);
+      return spec as RemoteServerSpec;
+    }
+    const headers: Record<string, string> = {};
+    for (const pair of values.header ?? []) {
+      const at = pair.indexOf("=");
+      if (at < 1) die(`--header wants key=value, got "${pair}"`);
+      headers[pair.slice(0, at)] = pair.slice(at + 1);
+    }
+    const url = values.url ?? (await store.load(name))?.resource;
+    if (!url) die(`no url for "${name}" — pass the runner file that declares it, or --url https://…`);
+    return { url: url!, ...(Object.keys(headers).length ? { headers } : {}) };
+  };
+
+  switch (sub) {
+    case "login": {
+      if (!server) die("which server? — ensemble mcp login <server> [file] [--url <url>] [--device]");
+      const spec = await specFor(server!);
+      process.stderr.write(`logging in to "${server}" at ${safeUrl(spec.url)} (${authMode(spec)})\n`);
+      await login(server!, spec, { interactive: true, device: values.device ?? false });
+      const status = await loginStatus(server!, spec);
+      process.stderr.write(
+        `✓ logged in to "${server}"${status.expiresAt ? ` — token valid until ${new Date(status.expiresAt).toISOString()}` : ""}` +
+          `${status.refreshable ? ", refreshes on its own" : ""}\n`,
+      );
+      return;
+    }
+    case "logout": {
+      if (!server) die("which server? — ensemble mcp logout <server> [file] [--url <url>]");
+      const spec = await specFor(server!);
+      const { revoked } = await logout(server!, spec);
+      process.stderr.write(`✓ logged out of "${server}"${revoked ? " — tokens revoked at the server" : ""}\n`);
+      return;
+    }
+    case "status": {
+      const rows = new Map<string, RemoteServerSpec>();
+      if (file) {
+        const runner = await load(file);
+        for (const [name, spec] of Object.entries(runner.spec.mcpServers ?? {})) if (isRemote(spec)) rows.set(name, spec);
+      }
+      for (const name of (await store.list?.()) ?? []) {
+        if (rows.has(name)) continue;
+        const stored = await store.load(name);
+        if (stored) rows.set(name, { url: stored.resource, auth: { type: "oauth" } });
+      }
+      if (!rows.size) {
+        process.stderr.write(`no remote MCP servers${file ? ` in ${file}` : ""} and no logins stored\n`);
+        return;
+      }
+      for (const [name, spec] of rows) {
+        const status = await loginStatus(name, spec).catch(() => undefined);
+        const oauth = authMode(spec).startsWith("oauth") || authMode(spec).startsWith("none");
+        const state = !status
+          ? "unknown"
+          : !oauth
+            ? "credentials from the spec"
+            : status.loggedIn
+              ? `logged in${status.expiresAt ? `, expires ${new Date(status.expiresAt).toISOString()}` : ""}${status.refreshable ? ", refreshable" : ""}`
+              : "not logged in";
+        process.stdout.write(`${name.padEnd(16)} ${safeUrl(spec.url).padEnd(36)} ${authMode(spec).padEnd(28)} ${state}\n`);
+      }
+      return;
+    }
+    default:
+      die(`unknown mcp command "${sub ?? ""}" — try: login, logout, status`);
+  }
+}
 
 async function load(path: string | undefined): Promise<Runner> {
   if (!path) die("no file given — ensemble <command> <file.mts>");
@@ -243,6 +352,9 @@ async function main(): Promise<void> {
       comment: { type: "string" },
       by: { type: "string" },
       remote: { type: "boolean", default: false },
+      url: { type: "string" },
+      header: { type: "string", multiple: true },
+      device: { type: "boolean", default: false },
     },
   });
 
@@ -266,12 +378,14 @@ async function main(): Promise<void> {
   switch (command) {
     case "validate": {
       const runner = await load(file);
+      warn(runner.warnings());
       report(runner.validate(), runner.spec.name);
       return;
     }
 
     case "check": {
       const runner = await load(file);
+      warn(runner.warnings());
       report(runner.validate(), runner.spec.name);
 
       const flight = await preflight(runner.spec);
@@ -495,8 +609,13 @@ async function main(): Promise<void> {
       return;
     }
 
+    case "mcp": {
+      await mcp(file, rest, values);
+      return;
+    }
+
     default:
-      die(`unknown command "${command}" — try: validate, graph, run, resume, calibrate, check, skills, servers, version`);
+      die(`unknown command "${command}" — try: validate, graph, run, resume, calibrate, check, skills, servers, mcp, version`);
   }
 }
 
