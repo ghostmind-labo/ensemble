@@ -61,9 +61,11 @@ anything, because the rules below fall out of it:
 
 The library doesn't ship an agent loop, a prompt library or parallel groups, but
 nothing stops a handler from containing one. An agent that picks its own tools
-until it is done can be a single `work` step, with any agent SDK. The graph
-shows it as one opaque step, and the decisions around it stay calibrated and
-provable. Prefer explicit nodes where the steps are known, because those show up
+until it is done can be a single `work` step, with any agent SDK — or with
+`@ghostmind-dev/agent`, the independent Ghostmind agent engine (dollar cap,
+go/pause/stop hooks, an event log, Jev guiding weaker models). The graph shows it
+as one opaque step, and the decisions around it stay calibrated and provable: route
+into it with a `decide` node, judge its reply with another (pattern 16). Prefer explicit nodes where the steps are known, because those show up
 in `graph.json` and `run.json`. Use a handler where they aren't known.
 
 ## Before you start: the environment
@@ -330,8 +332,9 @@ becoming a framework:
 
 - `references/api.md`: every field of the runner, node kinds, edges, handlers,
   run options and exports. Read it while writing the file.
-- `references/patterns.md`: complete worked graphs for the common shapes. Read it
-  when choosing the structure.
+- `references/patterns.md`: complete worked graphs for the common shapes,
+  including an agent inside one `work` node (16). Read it when choosing the
+  structure.
 - `references/errors.md`: each `validate` message and its fix. Read it when
   validation fails.
 - `references/discovery.md`: finding models, skills and MCP servers to wire in.

@@ -1,0 +1,51 @@
+---
+import Base from "./Base.astro";
+import { GITHUB, GROUPS, PAGES, type Page } from "../lib/docs";
+
+interface Props {
+  title: string;
+  page?: Page;
+  toc?: Array<{ id: string; text: string }>;
+}
+const { title, page, toc = [] } = Astro.props;
+const at = page ? PAGES.indexOf(page) : -1;
+const prev = at > 0 ? PAGES[at - 1] : undefined;
+const next = at >= 0 && at < PAGES.length - 1 ? PAGES[at + 1] : undefined;
+---
+<Base title={`${title} · ensemble docs`} description={page?.blurb} active="docs">
+  <div class="docs">
+    <aside class="side">
+      {GROUPS.map((group) => (
+        <>
+          <h4>{group}</h4>
+          {PAGES.filter((candidate) => candidate.group === group).map((candidate) => (
+            <a href={`/docs/${candidate.slug}`} class={candidate.slug === page?.slug ? "on" : ""}>{candidate.title}</a>
+          ))}
+        </>
+      ))}
+    </aside>
+
+    <main class="prose">
+      <slot />
+      {page && (
+        <>
+          <p class="source">
+            This page is <a href={`${GITHUB}/blob/main/${page.file}`} target="_blank" rel="noopener">{page.file}</a>,
+            rendered as it is in the repo.
+          </p>
+          <nav class="pager">
+            {prev ? <a href={`/docs/${prev.slug}`}><small>Previous</small>{prev.title}</a> : <span />}
+            {next ? <a class="next" href={`/docs/${next.slug}`}><small>Next</small>{next.title}</a> : <span />}
+          </nav>
+        </>
+      )}
+    </main>
+
+    {toc.length > 1 && (
+      <nav class="toc">
+        <p>On this page</p>
+        {toc.map((item) => <a href={`#${item.id}`}>{item.text}</a>)}
+      </nav>
+    )}
+  </div>
+</Base>

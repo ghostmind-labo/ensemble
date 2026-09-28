@@ -859,6 +859,26 @@ small model, or a local one, still sits downstream of every tool and skill you
 own. Capability constrains only what a model must do *itself* — vision is the
 real case, and `ensemble check` catches it against the live catalogue.
 
+## An agent as one step
+
+When the steps can't be known in advance — an open-ended request, tools chosen by
+what the last one returned — put a whole tool-using agent in **one `work` node**,
+and let the graph do what the agent can't do for itself:
+
+```
+triage (Jev) ──direct──▶ answer ───────────────────────▶ deliver
+     └──agent──▶ agent (work) ─▶ review (Jev) ──ok──▶ deliver
+                      ▲                 └─weak─▶ tally ─(1 retry)─┘
+```
+
+A `decide` node routes into it only when it's needed, ensemble's signal and budget
+reach its loop, `report()` puts its cost in `run.json`, and a second `decide` node
+judges the reply — the agent never grades its own work. Any agent SDK fits the
+handler; [`@ghostmind-dev/agent`](docs/agent.md) is the Ghostmind engine built for
+it (a dollar cap, go/pause/stop hooks, an event log, and Jev guiding weaker
+models), and it is an independent package — ensemble does not depend on it.
+[docs/agent.md](docs/agent.md) has the full runner.
+
 ---
 
 ## Jagged edges

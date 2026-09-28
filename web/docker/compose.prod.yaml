@@ -1,0 +1,11 @@
+services:
+  web:
+    container_name: ensemble-web
+    build:
+      context: ../..
+      dockerfile: web/docker/Dockerfile
+    restart: unless-stopped
+    ports: ["127.0.0.1:3060:3060"]
+    environment:
+      APP_ENV: prod
+      ASTRO_TELEMETRY_DISABLED: "1"
