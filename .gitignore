@@ -6,3 +6,11 @@ node_modules/
 
 # build output
 dist/
+.astro/
+.DS_Store
+
+# varlock: only the committed .env.schema / .env.dev / .env.prod exist; a .env.local
+# must never exist (varlock always loads it, whatever the environment)
+.env
+.env.local
+.env.*.local

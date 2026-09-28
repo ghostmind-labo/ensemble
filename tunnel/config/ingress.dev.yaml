@@ -1,0 +1,7 @@
+tunnel: ensemble-dev
+
+# One public app, so the hostname points straight at it (no traefik).
+ingress:
+  - hostname: ensemble.ghostmind.app
+    service: http://ensemble-web:3060
+  - service: http_status:404

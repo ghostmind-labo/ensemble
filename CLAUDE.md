@@ -54,6 +54,22 @@ MCP, a loop and both branch forms in a single graph. Keep it that way: it is wha
 the README's third demo quotes, and what proves the concepts compose. `test/` — one `*.test.mts` per suite, auto-discovered by
 `test/run.mts`.
 
+`web/` and `tunnel/` — the project's two services, laid out per the Ghostmind system
+(`.env.schema` + `.env.dev/.prod`, `app/`, `docker/`, `scripts/`, `meta.json`; routines
+`dev` → `varlock run -- bash scripts/dev.sh`, `prod`). `web/` is an Astro site: a
+landing page and the docs, which it renders **from the repo's own markdown**
+(README.md, `docs/*.md`, `plugin/skills/**`) through the page list in
+`web/app/src/lib/docs.ts` — never a copy, so a new doc page is a new entry there.
+Port 3060; the compose build context is the repo root. `tunnel/` is cloudflared
+(`ensemble.ghostmind.app` → `ensemble-web:3060`, credentials from
+`ghostmind/global/cloudflare`); prod has no domain yet. Neither is part of the npm
+package (`files` excludes them) and neither touches `src/`.
+
+`docs/agent.md` — the agent as a special component: `@ghostmind-dev/agent`
+(`/Volumes/Projects/labo/agent`) is an INDEPENDENT package, never a dependency of
+this one. It sits inside one `work` node, routed in and judged by `decide` nodes
+(`patterns.md` 16). Keep it that way: ensemble still runs no tool loop.
+
 `plugin/` + `.claude-plugin/marketplace.json` — the Claude Code plugin (marketplace
 `ghostmind-ensemble`, plugin `ensemble`). It is **not** part of the npm package
 (`files` excludes it), so the library still ships no skills. Its three skills teach
@@ -193,7 +209,8 @@ is the reason the check is useful rather than annoying.
 
 Don't. A browser viewer, an SSE server and a mermaid/markdown exporter were all
 removed from this repo in the v2 rewrite, and re-adding one is the exact
-regression to avoid. The seam is `RunEvent` (three events) and the two JSON
+regression to avoid. `web/` is a docs site and must stay one: it renders markdown,
+never a run, a graph or a live event stream. The seam is `RunEvent` (three events) and the two JSON
 documents; anything visual consumes those and lives outside this package.
 `src/report.ts` is the one shipped consumer, and it stays a single line rewritten
 in place, not a screen.

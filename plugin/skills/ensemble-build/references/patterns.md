@@ -20,6 +20,7 @@ combine two or three. Every snippet uses the v2 API. Imports come from
 13. Fan out, then decide once: fork and join
 14. Gate an action, then check it happened
 15. A person in the loop
+16. A whole agent in one step, checked by Jev
 
 ---
 
@@ -406,7 +407,7 @@ edges: [
 | "use the best/cheapest model for…" | 5 |
 | "pick the right skill / tool / doc" | 6 |
 | "several stages, each with its own decisions" | 9 |
-| "an agent that keeps choosing tools until done" | a `work` handler that runs the agent (any SDK), supervised and watched: 12 |
+| "an agent that keeps choosing tools until done" | 16 (the agent in one `work` node, routed in and checked by Jev); 12 around it when it runs for days |
 | "keep running / monitor / every N minutes / for days" | 12 |
 | "at the same time / in parallel / all three then decide" | 13 |
 | "before it runs a command / sends / pays / deletes" | 14 |
@@ -626,3 +627,61 @@ Rules:
 - **Dry-run it like any decision.** The dry run answers for the person from the
   same `--answer` script (`--answer review.action=reject`), and `--explore` walks
   every answer they could give.
+
+## 16. A whole agent in one step, checked by Jev
+
+When the steps can't be known in advance (an open-ended request, tools chosen by
+what the last one returned), put a tool-using agent in ONE `work` node and let the
+graph do what the agent can't: decide whether it's needed, bound it, price it, and
+judge what it produced. Any agent SDK works; `@ghostmind-dev/agent` is the
+Ghostmind engine built for this (a dollar cap, go/pause/stop hooks, an event log,
+Jev guiding weaker models), and it is an independent package, not part of
+ensemble.
+
+```ts
+import { runAgent, openrouter, type AgentTool } from "@ghostmind-dev/agent";
+
+work: {
+  agent: async ({ goal, signal, report }) => {
+    const result = await runAgent({
+      provider: openrouter({ model: process.env.AGENT_MODEL! }),
+      task: { goal, expectation: "One or two sentences: the answer, and what changed." },
+      toolsets: [{ name: "app", description: "What it can do.", tools }],
+      approve: async (request) => askThePerson(request.summary),
+      budget: { maxUsd: 0.05 },        // stops a runaway loop INSIDE the step
+      signal,                           // ensemble's budget and cancellation reach the loop
+    });
+    report({ cost: result.cost, meta: { status: result.status, steps: result.steps } });
+    return { reply: result.answer ?? "", agent_status: result.status };
+  },
+},
+nodes: {
+  triage: { decide: { route: choice(/* direct | agent */) }, reads: ["goal"] },
+  agent:  { work: "agent", reads: ["goal"], writes: ["reply", "agent_status"] },
+  review: { decide: { answered: noul("Does the reply fully answer what the person asked?") }, reads: ["goal", "reply"] },
+  tally:  { code: (s) => Number(s.rounds ?? 0) + 1, reads: ["rounds"], writes: ["rounds"] },
+  // …plus a direct answer and a deliver node
+},
+edges: [
+  { from: "triage", to: "answer", on: "route=direct" },
+  { from: "triage", to: "agent",  on: "route=agent" },
+  { from: "agent",  to: "review" },
+  { from: "review", to: "tally",  when: (s) => Number(s.answered) < 0.5 },
+  { from: "review", to: "deliver" },
+  { from: "tally",  to: "agent",  maxLoops: 1 },
+  { from: "tally",  to: "deliver" },
+],
+```
+
+Rules:
+
+- **Route first.** Most requests don't need an agent; a `decide` node sends them
+  down the cheap, provable path.
+- **The agent never grades itself.** A `decide` node after it judges the reply,
+  and a weak one goes round once more with the loop budget on the edge.
+- **Two budgets, two jobs.** The agent's `maxUsd` stops a runaway loop inside the
+  step; the run's `budget` (and `supervise`'s) stops a runaway graph.
+- **Report the cost.** `report({ cost })` is how the agent's spend reaches
+  `run.json`; skip it and the step looks free.
+- **Dry-run it for $0** with the agent on a scripted model (`scriptedModel()` from
+  the agent package) — handlers run for real in the dry run.

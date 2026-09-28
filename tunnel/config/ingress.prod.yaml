@@ -1,0 +1,6 @@
+# The product domain isn't chosen yet. Add its hostname here (→ http://ensemble-web:3060)
+# and set PUBLIC_URL in web/.env.prod before the first prod deploy.
+tunnel: ensemble-prod
+
+ingress:
+  - service: http_status:404

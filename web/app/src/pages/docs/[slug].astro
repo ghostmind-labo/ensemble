@@ -1,0 +1,15 @@
+---
+import Docs from "../../layouts/Docs.astro";
+import { PAGES, pageBySlug, render } from "../../lib/docs";
+
+export function getStaticPaths() {
+  return PAGES.map((page) => ({ params: { slug: page.slug } }));
+}
+
+const page = pageBySlug(Astro.params.slug!)!;
+// Read at build time in prod, and on every request in dev: edit the markdown, refresh the page.
+const { html, toc, heading } = render(page);
+---
+<Docs title={heading ?? page.title} page={page} toc={toc}>
+  <Fragment set:html={html} />
+</Docs>

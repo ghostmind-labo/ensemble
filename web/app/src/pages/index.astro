@@ -1,0 +1,51 @@
+---
+import Base from "../layouts/Base.astro";
+import { PAGES } from "../lib/docs";
+
+const featured = ["overview", "build", "agent", "api"].map((slug) => PAGES.find((page) => page.slug === slug)!);
+const ideas = [
+  { kicker: "Decide", title: "A calibrated judgement at each fork", text: "Jev answers yes/no, one-of-N or a rubric position — with a probability, in ~100 ms, for ~$0.00002." },
+  { kicker: "Prove", title: "Every branch known before the run", text: "Closed answers mean validate can prove nothing falls through and every key has an origin. Free, offline." },
+  { kicker: "Record", title: "graph.json and run.json", text: "What it knew, how sure it was, what it cost — as JSON anyone's renderer or agent can read." },
+  { kicker: "Supervise", title: "Runs that live for days", text: "Memory between ticks, hard budgets, a journal to resume from, and a watcher that notices drift." },
+];
+---
+<Base title="ensemble — one calibrated decision, wired to your code" active="home">
+  <main>
+    <section class="hero">
+      <h1>One calibrated decision,<br />wired to your code.</h1>
+      <p class="lead">
+        Not a smarter agent — a structure around one. A graph of steps, a shared state, a calibrated
+        judgement at each fork, and a record of all of it as JSON.
+      </p>
+      <div class="cta">
+        <a class="button" href="/docs/overview">Read the docs</a>
+        <a class="button ghost" href="/docs/build">Build a runner</a>
+      </div>
+      <code class="install">npm install @ghostmind-dev/ensemble</code>
+    </section>
+
+    <div class="shot"><img src="/images/hero.png" alt="ensemble — one calibrated decision, wired to your code" width="980" /></div>
+
+    <section class="cards">
+      {ideas.map((idea) => (
+        <div class="card">
+          <div class="kicker">{idea.kicker}</div>
+          <h3>{idea.title}</h3>
+          <p>{idea.text}</p>
+        </div>
+      ))}
+    </section>
+
+    <h2 class="section-title">Start here</h2>
+    <section class="cards">
+      {featured.map((page) => (
+        <a class="card" href={`/docs/${page.slug}`}>
+          <div class="kicker">{page.group}</div>
+          <h3>{page.title}</h3>
+          <p>{page.blurb}</p>
+        </a>
+      ))}
+    </section>
+  </main>
+</Base>

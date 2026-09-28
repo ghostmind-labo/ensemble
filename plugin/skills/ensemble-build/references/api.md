@@ -1,4 +1,4 @@
-# ensemble API reference (v2, ≥ 0.26)
+# ensemble API reference (v2, ≥ 0.31)
 
 Everything is imported from `@ghostmind-dev/ensemble`. When in doubt, the
 installed package's `dist/*.d.ts` is the source of truth, so read it rather than

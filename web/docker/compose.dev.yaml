@@ -1,0 +1,14 @@
+services:
+  web:
+    container_name: ensemble-web
+    build:
+      context: ../..
+      dockerfile: web/docker/Dockerfile
+    ports: ["${PORT}:${PORT}"]
+    environment:
+      APP_ENV: dev
+      ASTRO_TELEMETRY_DISABLED: "1"
+    volumes:
+      - ../app:/usr/app/app            # hot reload
+      - /usr/app/app/node_modules      # keep the image's node_modules
+      - ../..:/usr/app/repo:ro         # the docs, live: edit a README and refresh

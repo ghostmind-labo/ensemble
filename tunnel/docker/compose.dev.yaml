@@ -1,0 +1,16 @@
+services:
+  tunnel:
+    container_name: ensemble-tunnel
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      APP_ENV: dev
+      VAULT_ADDR: ${VAULT_ADDR}
+      VAULT_TOKEN: ${VAULT_TOKEN}      # dev only: your own token, on your own machine
+    volumes:
+      - tunnel-creds:/root/.cloudflared
+    restart: unless-stopped
+
+volumes:
+  tunnel-creds:

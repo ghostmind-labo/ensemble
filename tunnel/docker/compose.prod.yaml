@@ -1,0 +1,19 @@
+services:
+  tunnel:
+    container_name: ensemble-tunnel
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    environment:
+      APP_ENV: prod
+      VAULT_ADDR: http://vault.tail0e3587.ts.net:8200
+    secrets: [vault_role_id, vault_secret_id]
+    volumes:
+      - tunnel-creds:/root/.cloudflared
+
+volumes:
+  tunnel-creds:
+secrets:
+  vault_role_id:   { file: /run/ghostmind/ensemble/tunnel/role_id }
+  vault_secret_id: { file: /run/ghostmind/ensemble/tunnel/secret_id }

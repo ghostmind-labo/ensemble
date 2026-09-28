@@ -1,0 +1,32 @@
+{
+  "id": "dkirzgH1bMOk",
+  "name": "tunnel",
+  "type": "app",
+  "description": "Cloudflare tunnel (in its container): ensemble.ghostmind.app to the web app",
+  "tags": ["ensemble", "tunnel"],
+  "routines": {
+    "dev": "varlock run --include-internal -- bash scripts/dev.sh",
+    "prod": "bash scripts/prod.sh"
+  },
+  "herdr": {
+    "workspaces": [
+      {
+        "label": "ensemble",
+        "tabs": [
+          {
+            "label": "tunnel",
+            "prefix": false,
+            "layout": "compact",
+            "compact": {
+              "type": "vertical",
+              "panes": [
+                { "name": "dev", "description": "cloudflared, creates the tunnel and DNS route (run routine dev), long-running" },
+                { "name": "execution-shell", "description": "ad-hoc commands" }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
