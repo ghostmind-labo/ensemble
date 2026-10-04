@@ -25,7 +25,7 @@ back is the change to question.
 
 ## Project map
 
-Seventeen files, and each one has a single job.
+Twenty files, and each one has a single job.
 
 - `src/questions.ts` — `choice` / `score` / `noul`, their answer types, and the API limits enforced at authoring time
 - `src/jev.ts` — the decider: one `fetch` to OpenRouter's `POST /api/v1/systemone`, plus the `Decider` seam
@@ -34,6 +34,9 @@ Seventeen files, and each one has a single job.
 - `src/mcp.ts` — the MCP session (shared by every pipe) and the stdio pipe. One tool call per node, never a loop
 - `src/mcp-remote.ts` — the remote pipes: Streamable HTTP, legacy SSE, WebSocket (hand-rolled over `node:http`, so mTLS and headers work everywhere)
 - `src/mcp-auth.ts` — secrets as `${NAME}`, every auth mode incl. OAuth 2.1, the 0600 token store, and redaction. No secret reaches run.json, graph.json, an event or an error
+- `src/agent.ts` — delegation to an EXTERNAL agent as a declared node: the `agents` map, one call per execution, the `delegate` seam
+- `src/a2a.ts` — the A2A client (agent card, send, stream or poll, cancel), hand-written over `fetch`
+- `src/acp.ts` — the ACP client: one prompt turn over stdio to a local agent, permissions answered by policy, never by a person
 - `src/registry.ts` — discovery: the official MCP registry, a skills index, and `preflight`
 - `src/spec.ts` — the vocabulary you write down: nodes, edges, handlers, the `on:` grammar, `probeReads`
 - `src/validate.ts` — the proof. Returns problems as strings, never throws
@@ -45,7 +48,7 @@ Seventeen files, and each one has a single job.
 - `src/runner.ts` — ties them into a callable; `src/index.ts` — the public surface
 - `src/cli.ts` — `validate` / `graph` / `run` / `calibrate` / `check` / `skills` / `servers` / `mcp login·logout·status`
 
-`examples/` — nine runnable runners, each with a header comment saying what it
+`examples/` — ten runnable runners (`10-delegate` hands a task to an external agent over A2A, ACP or MCP, with three toy agents under `agents/` that the tests run as real processes), each with a header comment saying what it
 demonstrates. `06-watch` is a watcher runner that also supervises `01-triage`
 when executed directly; `07-senses` forks three lanes, joins them, and remembers;
 `08-studio` is four models in sequence with a budgeted loop; `09-frontdesk` is
@@ -54,21 +57,25 @@ MCP, a loop and both branch forms in a single graph. Keep it that way: it is wha
 the README's third demo quotes, and what proves the concepts compose. `test/` — one `*.test.mts` per suite, auto-discovered by
 `test/run.mts`.
 
-`web/` and `tunnel/` — the project's two services, laid out per the Ghostmind system
-(`.env.schema` + `.env.dev/.prod`, `app/`, `docker/`, `scripts/`, `meta.json`; routines
-`dev` → `varlock run -- bash scripts/dev.sh`, `prod`). `web/` is an Astro site: a
-landing page and the docs, which it renders **from the repo's own markdown**
-(README.md, `docs/*.md`, `plugin/skills/**`) through the page list in
-`web/app/src/lib/docs.ts` — never a copy, so a new doc page is a new entry there.
-Port 3060; the compose build context is the repo root. `tunnel/` is cloudflared
-(`ensemble.ghostmind.app` → `ensemble-web:3060`, credentials from
-`ghostmind/global/cloudflare`); prod has no domain yet. Neither is part of the npm
-package (`files` excludes them) and neither touches `src/`.
+**This repo is the library only**: no service, no site, no UI. The hosted product and the docs site are a separate,
+private repo: `ghostmind-app/together` (`/Volumes/Projects/ghostmind/together`), with Google sign-in, the REST API
+and MCP endpoint, the sandbox that runs user runners, the UI, and `web/`, which renders THIS repo's markdown
+(README, `docs/`, the plugin references) as the docs site — so a doc page written here is published from there,
+through the page list in its `web/app/src/lib/docs.ts`. It consumes this
+library as a git submodule (`lib/`) pinned to a commit of this repo, and its sandbox runs `src/` directly — so a
+library change reaches hosted users only when that pin is bumped and the runner redeployed. Nothing in this repo may
+depend on it, and a hosted-only feature (billing, the sandbox's allow-list, the UI) never lands here. In hosted
+ensemble `acp` and the in-process agent cannot run (no child processes, one allowed import): a feature that only
+works locally is still a feature of this library.
 
-`docs/agent.md` — the agent as a special component: `@ghostmind-dev/agent`
-(`/Volumes/Projects/labo/agent`) is an INDEPENDENT package, never a dependency of
-this one. It sits inside one `work` node, routed in and judged by `decide` nodes
-(`patterns.md` 16). Keep it that way: ensemble still runs no tool loop.
+**Agents.** An external agent is consumed in one of four ways, documented under `docs/agents*.md`:
+the `agent` node over `a2a` (a hosted agent), `acp` (a local agent launched as a command, e.g. `opencode acp`) or
+`mcp` (an agent offered as one tool), and the older in-process way (`docs/agent.md`): `@ghostmind-dev/agento`
+(`/Volumes/Projects/labo/agent`, formerly `@ghostmind-dev/agent`) inside one `work` node. agento is an INDEPENDENT
+package, never a dependency of this one. In every case ensemble makes ONE call per node execution and runs no tool
+loop of its own; a `decide` node routes in and another judges the reply (`patterns.md` 16 and 17). Agents supported
+out of the box will be open source and use OpenRouter as their only model provider (an approved catalog is planned,
+not built). In hosted ensemble `acp` and the in-process way cannot run (no child processes, one allowed import).
 
 `plugin/` + `.claude-plugin/marketplace.json` — the Claude Code plugin (marketplace
 `ghostmind-ensemble`, plugin `ensemble`). It is **not** part of the npm package
@@ -134,14 +141,14 @@ string-vs-object, and `steps[].took` joining a run to `graph.edges[].id`.
 
 <important if="you are adding a node kind, an edge form, or a question type">
 
-There are five node kinds (`decide`, `work`, `code`, `model`, `mcp`), two branch forms
+There are six node kinds (`decide`, `work`, `code`, `model`, `mcp`, `agent`), two branch forms
 (`on:` for meaning, `when:` for arithmetic), one form of parallelism (`fork` on an
 edge, `join` on a node) and three questions. Each is a closed set,
 and the closed-ness is the feature — it is what lets `validate` prove
 exhaustiveness and `graph` emit a complete document. Adding a fourth of anything
 needs a reason that survives that argument.
 
-`model` was the fourth, added after the fact, and the reason it earned its place
+`agent` was the sixth, and cleared the same bar as `model` (the graph now says which agent, over which protocol, with what permissions, which an opaque `work` handler could not). `model` was the fourth, added after the fact, and the reason it earned its place
 is the standard to beat: perception forced it (Jev is text-only, so anything that
 must LOOK needs a generative call), and putting it in a node made the emitted
 graph MORE complete than hiding it in an opaque handler would have — `graph.json`
@@ -155,7 +162,7 @@ If one is added anyway: a node kind needs an `isX` guard in `spec.ts`, a
 <important if="you are touching human-in-the-loop, pause/resume, or the decider fallback">
 
 A person is a DECIDER, not a node kind: `decide` with `by: "human"` asks the same
-closed questions, so the closed set of node kinds stays at five and validate's
+closed questions, so the closed set of node kinds stays at six and validate's
 exhaustiveness proof covers people too. Keep it that way — a "human node" kind
 would be the change to question.
 
@@ -209,7 +216,7 @@ is the reason the check is useful rather than annoying.
 
 Don't. A browser viewer, an SSE server and a mermaid/markdown exporter were all
 removed from this repo in the v2 rewrite, and re-adding one is the exact
-regression to avoid. `web/` is a docs site and must stay one: it renders markdown,
+regression to avoid. Even the docs site lives in the private repo, and it renders markdown,
 never a run, a graph or a live event stream. The seam is `RunEvent` (three events) and the two JSON
 documents; anything visual consumes those and lives outside this package.
 `src/report.ts` is the one shipped consumer, and it stays a single line rewritten

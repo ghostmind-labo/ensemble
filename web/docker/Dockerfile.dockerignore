@@ -1,9 +1,0 @@
-# The context is the repo root: let in only what the image uses.
-*
-!README.md
-!docs
-!plugin/skills
-!web
-web/app/node_modules
-web/app/dist
-web/app/.astro

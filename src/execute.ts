@@ -17,6 +17,7 @@ import {
   branchHolds,
   edgeId,
   forksFrom,
+  isAgent,
   isCode,
   isDecide,
   isMcp,
@@ -37,6 +38,7 @@ import { openrouter, type Caller } from "./openrouter.ts";
 import { pool } from "./mcp.ts";
 import type { SecretResolver, TokenStore } from "./mcp-auth.ts";
 import { findSkill, renderSkills } from "./skills.ts";
+import { AgentError, delegate as realDelegate, describeAgent, promptFromReads, type AgentReply, type Delegate } from "./agent.ts";
 import { validate } from "./validate.ts";
 import { toGraph, type GraphQuestion } from "./graph.ts";
 
@@ -56,7 +58,7 @@ export interface StepAnswer {
 export interface RunStep {
   n: number;
   node: string;
-  kind: "decide" | "work" | "code" | "model" | "mcp";
+  kind: "decide" | "work" | "code" | "model" | "mcp" | "agent";
   /** The lane this step ran on: "main", the forking edge that started it, or the join node that merged it. */
   lane: string;
   started: string;
@@ -217,6 +219,8 @@ export interface RunOptions {
   decider?: Decider;
   /** Swap the generative caller — a stub, a cache, another vendor. */
   caller?: Caller;
+  /** Swap how `agent` nodes reach their agent — a stub in a test, a recorder, a host's own policy. */
+  delegate?: Delegate;
   /**
    * Answers `by: "human"` nodes. Without it, a run that reaches one PAUSES and
    * hands back a snapshot; with it, the run waits for this. A person's wait is
@@ -395,6 +399,25 @@ function plainJson<T>(value: T, node: string): T {
 const asUrls = (value: unknown): string[] =>
   typeof value === "string" ? [value] : Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
 
+/**
+ * What a delegated step leaves in the record. A cost is copied only when the
+ * protocol reported one; otherwise the step says "unknown" in so many words,
+ * because a 0 would read as free and it was not.
+ */
+function recordReply(step: RunStep, reply: Partial<AgentReply>): void {
+  if (reply.cost !== undefined) step.cost = reply.cost;
+  step.meta = {
+    ...step.meta,
+    ...(reply.status ? { status: reply.status } : {}),
+    ...(reply.meta && Object.keys(reply.meta).length ? { served: reply.meta } : {}),
+    ...(reply.toolCalls?.length ? { toolCalls: reply.toolCalls } : {}),
+    ...(reply.permissions?.length ? { permissions: reply.permissions } : {}),
+    ...(reply.artifacts?.length ? { artifacts: reply.artifacts.map(({ id, name, files }) => ({ ...(id ? { id } : {}), ...(name ? { name } : {}), ...(files ? { files } : {}) })) } : {}),
+    ...(reply.usage ? { usage: reply.usage } : {}),
+    cost: reply.cost !== undefined ? "reported" : "unknown",
+  };
+}
+
 /** One key takes the value whole; several destructure it; none writes nothing. */
 function applyWrites(node: string, keys: string[], value: unknown): Record<string, unknown> {
   if (keys.length === 0) return {};
@@ -426,6 +449,7 @@ export async function execute(
   const maxSteps = options.maxSteps ?? 50;
   const decider = options.decider ?? jev(jevConfigFor(spec.openrouter, spec.jev));
   const caller = options.caller ?? openrouter(spec.openrouter);
+  const delegate = options.delegate ?? realDelegate;
   const edges = spec.edges ?? [];
   const graphDoc = toGraph(spec);
   const graphHash = graphDoc.runner.hash;
@@ -515,7 +539,9 @@ export async function execute(
             ? "model"
             : isMcp(node)
               ? "mcp"
-              : "code",
+              : isAgent(node)
+                ? "agent"
+                : "code",
       lane,
       started: new Date(began).toISOString(),
       ended: "",
@@ -537,7 +563,9 @@ export async function execute(
           : isModel(node)
             ? `calling ${typeof node.model === "string" ? node.model : String(state[node.model.from] ?? "?")}` +
               (node.sees?.length ? ` · looking at ${node.sees.join(", ")}` : "")
-            : "computing",
+            : isAgent(node)
+              ? `delegating to "${node.agent}" over ${spec.agents?.[node.agent]?.protocol ?? "?"}`
+              : "computing",
       // A person is only actually WAITED on when there is no answer in hand
       // already: a resume walks through the same node with one.
       ...(isDecide(node) && node.by === "human" && !presets.has(name) ? { asks: "human" as const } : {}),
@@ -754,6 +782,41 @@ export async function execute(
         step.writes = written;
         Object.assign(state, written);
         lastValue = keys.length > 1 ? { text: outcome.text, data: outcome.data } : outcome.text;
+      } else if (isAgent(node)) {
+        const agent = spec.agents![node.agent]!;
+        const prompt =
+          typeof node.prompt === "function" ? node.prompt(state) : (node.prompt ?? promptFromReads(state, readsOf(node)));
+        step.handler = node.agent;
+        // Written before the call, so a step that fails still says who was asked what.
+        step.meta = { agent: node.agent, protocol: agent.protocol, at: describeAgent(agent), prompt, cost: "unknown" };
+        const reply = await bounded(
+          delegate({
+            name: node.agent,
+            agent,
+            prompt,
+            signal,
+            ...(options.secretResolver ? { secretResolver: options.secretResolver } : {}),
+            ...(options.tokenStore ? { tokenStore: options.tokenStore } : {}),
+            mcp: (server) => servers.get(server),
+            ...(spec.mcpServers ? { mcpServers: spec.mcpServers } : {}),
+          }),
+        );
+        recordReply(step, reply);
+        const detail = {
+          status: reply.status,
+          artifacts: reply.artifacts,
+          toolCalls: reply.toolCalls,
+          permissions: reply.permissions,
+          ...(reply.data !== undefined ? { data: reply.data } : {}),
+        };
+        // Positional, like a model or an mcp node: [text] or [text, detail].
+        const keys = writesOf(node);
+        const written: Record<string, unknown> = {};
+        if (keys[0]) written[keys[0]] = reply.text;
+        if (keys[1]) written[keys[1]] = detail;
+        step.writes = written;
+        Object.assign(state, written);
+        lastValue = keys.length > 1 ? { text: reply.text, ...detail } : reply.text;
       } else if (isCode(node)) {
         const value = await bounded(node.code(state));
         lastValue = value;
@@ -762,6 +825,9 @@ export async function execute(
       }
     } catch (cause) {
       step.error = cause instanceof Error ? cause.message : String(cause);
+      // What an agent had done before it stopped is part of the record: the
+      // tools it used and anything it was refused happened either way.
+      if (cause instanceof AgentError && cause.partial) recordReply(step, cause.partial);
       close();
       // Money spent before the throw was still spent. A handler that reported
       // a cost and then failed must count toward the total and the budget, or

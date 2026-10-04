@@ -1,6 +1,23 @@
-# The agent as a component
+# In-process: an agent inside a `work` node
 
-`@ghostmind-dev/agent` is a separate, independent package: the engine an app builds
+This is one of four ways to use an agent from a graph. The other three declare an
+external agent and reach it through a standard protocol ([A2A](agents-a2a.md),
+[ACP](agents-acp.md), [MCP](agents-mcp.md)); [Agents](agents.md) compares them. Reach
+for this one when you want the agent's own API in your hands: its hooks, its event log,
+tools you write in the same file.
+
+| | In-process (`work` node) | Declared (`agent` node) |
+|---|---|---|
+| **The agent is** | A library you import and call | A separate program or service |
+| **You need installed** | The library: `npm i @ghostmind-dev/agento`, or any agent SDK | Nothing (A2A, remote MCP), or the agent's command (ACP, local MCP) |
+| **Tools, hooks, approvals** | Yours, in code: an `approve` callback can ask a person | The agent's own; an ACP permission request is answered by a declared policy |
+| **`graph.json` shows** | One `work` step, by handler name. The loop is opaque | The agent's name, protocol, address or command |
+| **Cost in `run.json`** | What your handler passes to `report({ cost })`. Skip it and the step looks free | What the protocol reports, else `"unknown"` |
+| **What can go wrong** | A cost that is never reported; a handler that ignores `signal` and outlives the run | See each protocol's page |
+| **Local library** | Yes | Yes |
+| **Hosted ensemble** | No: the sandbox imports `@ghostmind-dev/ensemble` and nothing else | A2A, and MCP on a remote server ([the table](agents.md#in-hosted-ensemble)) |
+
+`@ghostmind-dev/agento` is a separate, independent package: the engine an app builds
 its own tool-using agent from. It has its own loop, its own guards, a dollar cap,
 go/pause/stop hooks, an append-only event log, and Jev as a guide that keeps a weaker
 model on course. Ensemble does not depend on it, and it does not depend on ensemble.
@@ -18,9 +35,13 @@ Ensemble supplies what surrounds it — the route in, the budget and the stop si
 a record of what it cost, and a calibrated check of what it produced. The agent never
 marks its own work as good enough; a `decide` node after it does.
 
-> Status: `@ghostmind-dev/agent` 0.1.0 is not yet published to npm. The pattern below
-> was tested by installing its packed tarball next to `@ghostmind-dev/ensemble` in a
-> fresh project.
+`@ghostmind-dev/agento` replaces the earlier `@ghostmind-dev/agent` package name. The
+library API below (`runAgent`, `openrouter`, `eventLog`) is checked against its source.
+It needs `OPENROUTER_API_KEY` and nothing else
+([what that covers](agents-build.md#5-requirements-for-an-agent-meant-for-the-catalog)).
+The same engine is also a command, so it can be declared instead of imported: as an
+[`acp`](agents-acp.md#the-declarations-to-use) agent or an
+[`mcp`](agents-mcp.md#agento-mcp) one.
 
 ## The shape
 
@@ -41,7 +62,7 @@ triage (Jev) ──direct──▶ answer (code) ──────────�
 
 ```ts
 import { choice, noul, runner } from "@ghostmind-dev/ensemble";
-import { eventLog, openrouter, runAgent, type AgentTool } from "@ghostmind-dev/agent";
+import { eventLog, openrouter, runAgent, type AgentTool } from "@ghostmind-dev/agento";
 
 const tools: AgentTool[] = [/* your tools: reads, and writes that ask approval */];
 
@@ -107,9 +128,11 @@ export default runner({
 });
 ```
 
-`ensemble validate` proves it; the dry-runner explores every branch for $0 once the
-agent runs on a scripted model (`scriptedModel()` from the agent package), which is
-how both halves are tested offline.
+`npx ensemble validate` proves it. The dry run
+(`node plugin/skills/ensemble-build/scripts/dryrun.mts runner.mts --explore`) runs
+`work` handlers for real, so it explores every branch for $0 once the agent is on a
+scripted model (`scriptedModel()`, exported by `@ghostmind-dev/agento`), or with
+`--stub-work`, which replaces the handler. That is how both halves are tested offline.
 
 ## When to reach for it
 
@@ -122,4 +145,14 @@ how both halves are tested offline.
   asks Jev whether the work is still on track.
 
 Keep the agent's own budget (`budget.maxUsd`) *inside* the step and ensemble's run
-budget *around* it: the first stops a runaway loop, the second a runaway graph.
+budget *around* it: the first stops a runaway loop, the second a runaway graph. Pass
+`signal` through, as the runner above does: it is how `stepTimeout`, the budget and a
+cancelled run reach the loop.
+
+## Safety
+
+The agent's tools are code you wrote, running in your process, so
+[the safety rule](agents.md#the-safety-rule) takes this form here: give the agent only
+the tools the step needs, put every write behind `approve`, and when nobody is there to
+approve, leave the write tools out of `toolsets` rather than offering and refusing
+them. The `review` node after it is what judges the result.

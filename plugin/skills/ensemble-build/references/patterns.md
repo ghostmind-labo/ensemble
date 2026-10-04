@@ -20,7 +20,8 @@ combine two or three. Every snippet uses the v2 API. Imports come from
 13. Fan out, then decide once: fork and join
 14. Gate an action, then check it happened
 15. A person in the loop
-16. A whole agent in one step, checked by Jev
+16. A whole agent in one step, checked by Jev (in-process, in a `work` node)
+17. Delegate to a declared agent: route, delegate, judge, retry once
 
 ---
 
@@ -407,7 +408,8 @@ edges: [
 | "use the best/cheapest model for…" | 5 |
 | "pick the right skill / tool / doc" | 6 |
 | "several stages, each with its own decisions" | 9 |
-| "an agent that keeps choosing tools until done" | 16 (the agent in one `work` node, routed in and checked by Jev); 12 around it when it runs for days |
+| "an agent that keeps choosing tools until done" | 17 when the agent already exists (a hosted A2A agent, an ACP coding agent, an MCP tool); 16 when you write it yourself, in one `work` node. Either way routed in and checked by Jev; 12 around it when it runs for days |
+| "hand this to our research agent / to opencode / to another team's agent" | 17 |
 | "keep running / monitor / every N minutes / for days" | 12 |
 | "at the same time / in parallel / all three then decide" | 13 |
 | "before it runs a command / sends / pays / deletes" | 14 |
@@ -633,13 +635,20 @@ Rules:
 When the steps can't be known in advance (an open-ended request, tools chosen by
 what the last one returned), put a tool-using agent in ONE `work` node and let the
 graph do what the agent can't: decide whether it's needed, bound it, price it, and
-judge what it produced. Any agent SDK works; `@ghostmind-dev/agent` is the
+judge what it produced. Any agent SDK works; `@ghostmind-dev/agento` is the
 Ghostmind engine built for this (a dollar cap, go/pause/stop hooks, an event log,
 Jev guiding weaker models), and it is an independent package, not part of
-ensemble.
+ensemble. It needs `OPENROUTER_API_KEY` and nothing else. (`agento` replaces
+`@ghostmind-dev/agent`. The same engine is also a command, `agento acp` and
+`agento mcp`, which is declared as in pattern 17.)
+
+This is one of two ways to put an agent in a graph. Choose it when the agent is
+yours to write: your own tools, hooks and approvals, in the same process. When
+the agent already exists as its own thing, declare it instead (pattern 17) and
+the graph names it.
 
 ```ts
-import { runAgent, openrouter, type AgentTool } from "@ghostmind-dev/agent";
+import { runAgent, openrouter, type AgentTool } from "@ghostmind-dev/agento";
 
 work: {
   agent: async ({ goal, signal, report }) => {
@@ -683,5 +692,164 @@ Rules:
   step; the run's `budget` (and `supervise`'s) stops a runaway graph.
 - **Report the cost.** `report({ cost })` is how the agent's spend reaches
   `run.json`; skip it and the step looks free.
-- **Dry-run it for $0** with the agent on a scripted model (`scriptedModel()` from
-  the agent package) — handlers run for real in the dry run.
+- **Give it only the tools the step needs.** The tools are your code, in your
+  process. Put every write behind `approve`; when nobody is there to approve,
+  leave the write tools out of `toolsets`.
+- **Dry-run it for $0** with the agent on a scripted model (`scriptedModel()`,
+  exported by `@ghostmind-dev/agento`), or with `--stub-work`. Handlers run for
+  real in the dry run.
+
+## 17. Delegate to a declared agent: route, delegate, judge, retry once
+
+When the agent already exists (a hosted agent with an A2A card, a coding agent
+that speaks ACP, an agent a server offers as one MCP tool), declare it in
+`agents` and hand it one step with an `agent` node. The shape around it is the
+same as 16: a decide node routes in, **a decide node judges the reply**, and a
+weak reply goes round once more on an edge with its own budget.
+
+```ts
+import { choice, noul, runner } from "@ghostmind-dev/ensemble";
+
+export default runner({
+  name: "delegate",
+  inputs: ["goal"],
+
+  agents: {
+    // A hosted agent, by url. The secret is a NAME here and a value only at call time.
+    researcher: { protocol: "a2a", url: "https://agent.example.com", auth: { type: "bearer", token: "${RESEARCH_TOKEN}" } },
+  },
+
+  nodes: {
+    // Before: is an agent needed at all?
+    triage: {
+      decide: {
+        route: choice("How should this request be handled?", {
+          direct:   { what: "A greeting, thanks, or small talk that needs no lookup", not_for: "Anything asking for facts or findings" },
+          research: { what: "Needs facts, sources or findings gathered", not_for: "Small talk" },
+        }),
+      },
+      reads: ["goal"],
+    },
+    answer: { code: (s) => `Happy to help. You said: ${String(s.goal)}`, reads: ["goal"], writes: ["reply"] },
+
+    // One message, one reply. The loop is the agent's.
+    research: {
+      agent: "researcher",
+      prompt: (s) =>
+        `${String(s.goal)}\n\nAnswer in a short paragraph, and say what you could not confirm.` +
+        (s.rounds ? `\n\nA first answer was judged incomplete. Be specific this time.` : ""),
+      reads: ["goal", "rounds"],
+      writes: ["reply", "delegation"],   // [text, { status, artifacts, toolCalls, permissions, data? }]
+    },
+
+    // After: the agent does not get to say whether it did the job.
+    review:  { decide: { answered: noul("Does the reply fully answer what the person asked?") }, reads: ["goal", "reply"] },
+    tally:   { code: (s) => Number(s.rounds ?? 0) + 1, reads: ["rounds"], writes: ["rounds"] },
+    deliver: { code: (s) => String(s.reply), reads: ["reply"], writes: ["final"] },
+  },
+
+  edges: [
+    { from: "triage",   to: "answer",   on: "route=direct" },
+    { from: "triage",   to: "research", on: "route=research" },
+    { from: "answer",   to: "deliver" },
+    { from: "research", to: "review" },
+    { from: "review",   to: "tally",    on: "!answered" },
+    { from: "review",   to: "deliver",  on: "answered" },
+    { from: "tally",    to: "research", maxLoops: 1 },     // one retry, bounded on the edge
+    { from: "tally",    to: "deliver" },
+  ],
+
+  entry: "triage",
+  result: "final",
+});
+```
+
+`rounds` is read on the first pass before anything has written it; that
+validates because `tally` writes it, and it is `undefined` until then.
+`examples/10-delegate/delegate.mts` in the library's repo is this graph.
+
+**The same node, another way in.** Only the declaration changes. These are the
+ones tested with this client (`api.md` §3, "Tested declarations", has what each
+did):
+
+```ts
+agents: {
+  // opencode, a local command. As it ships it writes files and runs commands WITHOUT asking,
+  // so its own configuration is set to ask, and the runner's policy (default "reject") answers.
+  researcher: {
+    protocol: "acp",
+    command: "opencode",
+    args: ["acp"],
+    env: { OPENCODE_CONFIG_CONTENT: '{"permission":{"edit":"ask","bash":"ask","webfetch":"ask"}}' },
+    cwd: "/a/directory/you/are/willing/to/expose",
+  },
+},
+```
+
+```ts
+agents: {
+  // agento, a local command. It asks before it writes; it needs OPENROUTER_API_KEY in the environment.
+  researcher: { protocol: "acp", command: "agento", args: ["acp"], cwd: "/a/directory/you/are/willing/to/expose" },
+},
+```
+
+```ts
+// agento as one MCP tool. Read-only unless the server is started with --yes or --allow-shell <word>.
+mcpServers: { agento: { command: "agento", args: ["mcp"], timeoutMs: 300_000 } },
+agents: { researcher: { protocol: "mcp", server: "agento", tool: "run_task" } },
+```
+
+Rules:
+
+- **Route first, judge after.** As in 16: most requests need no agent, and the
+  agent never grades itself. The judging node is also the safety net: opencode,
+  once refused a permission, ended its turn without answering the rest of the
+  task, and only the node after it could notice.
+- **An `acp` agent is a process running as the user.** `permissions` (default
+  `"reject"`) answers what the agent ASKS; an agent that acts without asking is
+  not stopped by it. Every `acp` declaration therefore sets the agent's own
+  configuration to ask or deny (through `env`) and gives it a `cwd` you are
+  willing to expose: an empty or throwaway directory when it only needs to
+  think. To let it do more, name the tool kinds:
+  `permissions: { allow: ["read", "search"] }`.
+- **Bound it from outside.** Call it with `{ stepTimeout, budget }`: a step that
+  runs past `stepTimeout` is cancelled on the agent's side too (A2A
+  `CancelTask`, ACP `session/cancel`). `maxLoops` on the back-edge bounds the
+  retries. An `mcp` agent is bounded by its server's `timeoutMs`, 30 seconds by
+  default, so raise it.
+- **Cost may be unknown.** An ACP agent can report a cost, and it joins the
+  run's total. A2A and MCP report none: the step says `meta.cost: "unknown"`
+  and adds 0. Say "not reported" in the hand-over, never "free".
+- **Give an ACP agent the graph's tools by name.** `mcpServers: ["fs"]` on the
+  declaration hands it servers the runner already declares; the agent connects
+  to them itself, and `graph.json` lists them.
+- **One execution is one message.** An A2A agent that stops at
+  `input-required` fails the step with the fix in the message: put what it
+  needs in the prompt or reads, or ask a person first with a `by: "human"`
+  node (pattern 15) and pass their answer in.
+- **Check before a live run.** `npm run check -- <file>` reads the A2A card,
+  finds the ACP command on PATH, says how permission requests will be answered
+  and lists unset secrets.
+- **Dry-run it for $0.** `dryrun.mts` answers for every declared agent with a
+  stub that echoes the message, so `--explore` walks the retry loop without
+  reaching anyone. Cover the "good reply" edge with
+  `--answer triage.route=research --explore`.
+
+**16 or 17, and which protocol?** "When a step is an agent" in the skill's
+`SKILL.md` has the table of the four ways (where each runs, including hosted
+ensemble, and how each records cost). In short:
+
+| | 16: in a `work` handler | 17: an `agent` node |
+|---|---|---|
+| The agent is | A library you import and configure (`@ghostmind-dev/agento`, any SDK) | Something that already runs elsewhere or installs as a command |
+| `graph.json` shows | One opaque `work` step | The agent's name, protocol, address or command, auth mode, permission policy |
+| Tools, hooks, approvals | Yours, in code | The agent's own; ACP permission requests answered by declared policy |
+| Cost in `run.json` | What the handler `report()`s | What the protocol reports, else `"unknown"` |
+
+The two meet when the agent you wrote is served over a protocol: build it once,
+then declare it like anyone else's. In the library's repository the guide is
+[Build your own agent and consume it](../../../../docs/agents-build.md); the
+protocol pages are [the overview](../../../../docs/agents.md),
+[A2A](../../../../docs/agents-a2a.md), [ACP](../../../../docs/agents-acp.md),
+[MCP](../../../../docs/agents-mcp.md) and
+[the in-process agent](../../../../docs/agent.md).

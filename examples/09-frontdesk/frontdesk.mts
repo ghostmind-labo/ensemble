@@ -18,7 +18,7 @@
  *
  * What is in here, and where to look:
  *
- *   · all five node kinds — decide, work, code, model, mcp
+ *   · five of the six node kinds — decide, work, code, model, mcp (agent is 10-delegate)
  *   · all three questions — choice, score, noul — asked in ONE call
  *   · a confidence gate, and a safety edge that outranks it by being declared first
  *   · fork / join: three lanes that cannot race, because `validate` proves they

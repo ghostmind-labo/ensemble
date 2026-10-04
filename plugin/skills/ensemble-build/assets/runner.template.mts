@@ -18,6 +18,9 @@ export default runner({
   // Every key that arrives from outside the run. `goal` is always one.
   inputs: ["goal"],
 
+  // An external agent an `agent` node may name (a2a: a url, acp: a command, mcp: a tool):
+  // agents: { helper: { protocol: "a2a", url: "https://…", auth: { type: "bearer", token: "${HELPER_TOKEN}" } } },
+
   // The caller's code, by name. Each handler gets { goal, state, signal, report }.
   // Return the BARE value for a one-key write — { x: 1 } for writes: ["x"] nests.
   work: {

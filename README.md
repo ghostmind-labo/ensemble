@@ -299,7 +299,7 @@ flowchart TB
 
 | Concept | In this graph |
 |---|---|
-| all five node kinds | `decide` (triage, review) · `work` (alarm, park, hand_off, send) · `code` (start, pick_tool, recall, pick_skill, choose_writer, tally, remember) · `model` (look, answer, critique, card) · `mcp` (read_log) |
+| five of the six node kinds (the sixth, `agent`, is [`10-delegate`](examples/10-delegate/delegate.mts)) | `decide` (triage, review) · `work` (alarm, park, hand_off, send) · `code` (start, pick_tool, recall, pick_skill, choose_writer, tally, remember) · `model` (look, answer, critique, card) · `mcp` (read_log) |
 | all three questions, one call | `area` choice · `hazard` noul · `urgency` score — asked together at `triage` |
 | a confidence gate | `gate: { on: "area", min: 0.65, to: "hand_off" }` |
 | a fallback when the decider is down | `fallback: "hand_off"` on `triage` — an outage becomes a route, not a crash |
@@ -610,7 +610,7 @@ choice("What kind of picture?", {
 
 ---
 
-## The five node kinds
+## The six node kinds
 
 A node is exactly one of these, told apart by which key it has. There is no
 `runtime:` string.
@@ -634,6 +634,9 @@ look: { model: "google/gemini-2.5-flash", prompt: (s) => `…${s.goal}`,
 // mcp — ONE tool call. Not a loop.
 read: { mcp: { server: "fs", tool: "read_text_file" },
         args: (s) => ({ path: s.path }), writes: ["file_text"] }
+
+// agent — ONE message to an external agent (A2A, ACP or MCP). Its loop, not ours.
+ask: { agent: "researcher", reads: ["goal"], writes: ["reply"] }
 ```
 
 `reads` on a decide node is **required and load-bearing**: accuracy is documented
@@ -859,25 +862,60 @@ small model, or a local one, still sits downstream of every tool and skill you
 own. Capability constrains only what a model must do *itself* — vision is the
 real case, and `ensemble check` catches it against the live catalogue.
 
-## An agent as one step
+## Agents, as one step
 
 When the steps can't be known in advance — an open-ended request, tools chosen by
-what the last one returned — put a whole tool-using agent in **one `work` node**,
-and let the graph do what the agent can't do for itself:
+what the last one returned — hand **one step** to an agent, and let the graph do what
+the agent can't do for itself:
 
 ```
-triage (Jev) ──direct──▶ answer ───────────────────────▶ deliver
-     └──agent──▶ agent (work) ─▶ review (Jev) ──ok──▶ deliver
-                      ▲                 └─weak─▶ tally ─(1 retry)─┘
+triage (Jev) ──direct──▶ answer ─────────────────────────▶ deliver
+     └──research──▶ research (agent) ─▶ review (Jev) ──ok──▶ deliver
+                        ▲                   └─weak─▶ tally ─(1 retry)─┘
 ```
 
-A `decide` node routes into it only when it's needed, ensemble's signal and budget
-reach its loop, `report()` puts its cost in `run.json`, and a second `decide` node
-judges the reply — the agent never grades its own work. Any agent SDK fits the
-handler; [`@ghostmind-dev/agent`](docs/agent.md) is the Ghostmind engine built for
-it (a dollar cap, go/pause/stop hooks, an event log, and Jev guiding weaker
-models), and it is an independent package — ensemble does not depend on it.
-[docs/agent.md](docs/agent.md) has the full runner.
+A `decide` node routes to the agent only when one is needed, `stepTimeout` and the
+budget reach it, `run.json` records what it was asked and what it did, and a second
+`decide` node judges the reply — the agent never grades its own work.
+
+An external agent is **declared** and reached through an industry standard, so
+`graph.json` names the agent and the protocol:
+
+```ts
+agents: {
+  researcher: { protocol: "a2a", url: "https://agent.example.com",            // a hosted agent
+                auth: { type: "bearer", token: "${RESEARCH_AGENT_TOKEN}" } },
+  coder:      { protocol: "acp", command: "agento", args: ["acp"],            // a local agent, launched as a command
+                cwd: "/a/directory/you/are/willing/to/expose" },
+  analyst:    { protocol: "mcp", server: "tools", tool: "ask_analyst" },      // an agent offered as an MCP tool
+},
+nodes: {
+  // agent — ONE message to a declared agent, one reply. The loop is the agent's.
+  research: { agent: "researcher", reads: ["goal"], writes: ["reply"] },
+}
+```
+
+| | Way | Local library | Hosted ensemble |
+|---|---|---|---|
+| A hosted agent, by URL | [A2A](docs/agents-a2a.md) | Yes | Yes, when it needs no credentials |
+| A local agent, launched as a command | [ACP](docs/agents-acp.md) | Yes | No |
+| An agent offered as a tool | [MCP](docs/agents-mcp.md) | Yes | On a remote server that needs no credentials |
+| An agent library in your own handler | [a `work` node](docs/agent.md) | Yes | No |
+
+One call per node execution; a cost is recorded when the protocol reports one and
+marked unknown when it does not. Ensemble does not sandbox an agent: a local one runs
+as you, and the `permissions` policy answers only what it *asks*, so read
+[the safety rule](docs/agents.md#the-safety-rule) before declaring one.
+
+[docs/agents.md](docs/agents.md) is the page to start from: the four ways compared,
+which to choose, what lands in `graph.json` and `run.json`, and what works today.
+[`examples/10-delegate`](examples/10-delegate/delegate.mts) is the runnable graph, and
+[docs/agents-build.md](docs/agents-build.md) shows how to write an agent of your own in
+each protocol, with three minimal ones in
+[`examples/10-delegate/agents`](examples/10-delegate/agents).
+[`@ghostmind-dev/agento`](docs/agent.md) is the Ghostmind agent engine (a dollar cap,
+go/pause/stop hooks, an event log, Jev guiding weaker models); it is an independent
+package and ensemble does not depend on it.
 
 ---
 
@@ -930,7 +968,27 @@ node plugin/skills/ensemble-build/scripts/dryrun.mts examples/07-senses/senses.m
 | [`06-watch`](examples/06-watch/watch.mts) | A conscience for a loop that runs for days — and it supervises `01-triage` when run directly |
 | [`07-senses`](examples/07-senses/senses.mts) | Look, listen and count at once: three forked lanes, one join, a memory key |
 | [`08-studio`](examples/08-studio/studio.mts) | The complex shape: four models in sequence, a budgeted loop, both branch forms, safety first |
-| [`09-frontdesk`](examples/09-frontdesk/frontdesk.mts) | **Everything at once**: five node kinds, three lanes, memory, a skill, MCP, a loop, both branch forms, a person in the loop, and a fallback |
+| [`09-frontdesk`](examples/09-frontdesk/frontdesk.mts) | **Everything at once**: five of the six node kinds, three lanes, memory, a skill, MCP, a loop, both branch forms, a person in the loop, and a fallback |
+| [`10-delegate`](examples/10-delegate/delegate.mts) | Hand one step to an external agent (A2A, ACP or MCP): route in, delegate, judge the reply, retry once |
+
+---
+
+## Documentation
+
+This README is the overview. The rest is markdown in this repository.
+
+| Read | For |
+|---|---|
+| [API reference](plugin/skills/ensemble-build/references/api.md) | Every field, node kind, edge, option and export |
+| [Patterns](plugin/skills/ensemble-build/references/patterns.md) | Complete worked graphs for the common shapes |
+| [Errors and fixes](plugin/skills/ensemble-build/references/errors.md) | Each `validate` message, what causes it, and the fix |
+| [Models, skills and MCP](plugin/skills/ensemble-build/references/discovery.md) | Finding models, skills and MCP servers to wire in |
+| [Build a runner](plugin/skills/ensemble-build/SKILL.md) | From a use case to a validated, dry-run runner, step by step |
+| [Design the questions](plugin/skills/ensemble-questions/SKILL.md) | Writing choice, score and noul questions Jev answers well |
+| [Read and tune runs](plugin/skills/ensemble-runs/SKILL.md) | What `run.json` says, and what to change when a decision is off |
+| [Agents](docs/agents.md) | The four ways to hand a step to an agent, and which to choose |
+| [A2A](docs/agents-a2a.md) · [ACP](docs/agents-acp.md) · [MCP](docs/agents-mcp.md) · [in-process](docs/agent.md) | Each way in detail |
+| [Build your own agent](docs/agents-build.md) | What an agent must do per protocol, with a minimal one for each |
 
 ---
 
@@ -950,11 +1008,12 @@ import {
   connect, pool, toolOptions,       // MCP, local or remote
   login, logout, fileTokenStore,    // remote MCP auth
   preflight, searchServers,         // discovery
+  agentCard, searchAgents,          // an A2A agent's card, the ACP registry
 } from "@ghostmind-dev/ensemble";
 ```
 
 Every seam is a function type, so anything can be replaced: `Decider` (Jev),
-`Human` (a person), `Caller` (OpenRouter), `Handler` (your code). That is what
+`Human` (a person), `Caller` (OpenRouter), `Delegate` (external agents), `Handler` (your code). That is what
 makes the test suite free and offline — and, with `fallback:` on a decide node,
 what keeps one young vendor from being a single point of failure.
 

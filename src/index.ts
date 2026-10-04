@@ -89,23 +89,45 @@ export {
   missingEnv,
   preflight,
   requirements,
+  searchAgents,
   searchServers,
   searchSkills,
+  toAgentSpec,
   toServerSpec,
+  ACP_REGISTRY_URL,
   MCP_REGISTRY_URL,
 } from "./registry.ts";
-export type { DiscoveryConfig, EnvVarSpec, Preflight, RegistryPackage, RegistryServer, SkillListing } from "./registry.ts";
+export type { DiscoveryConfig, EnvVarSpec, Preflight, RegistryAgent, RegistryPackage, RegistryServer, SkillListing } from "./registry.ts";
 
 export { connect, isRemote, McpError, pool, toolOptions } from "./mcp.ts";
 export type { ConnectOptions, McpResult, McpServerSpec, McpSession, McpTool, RemoteServerSpec, StdioServerSpec } from "./mcp.ts";
 export { envSecrets, fileTokenStore, login, loginStatus, logout } from "./mcp-auth.ts";
 export type { McpAuth, McpAuthContext, OAuthConfig, SecretResolver, StoredLogin, TokenEndpointAuth, TokenStore } from "./mcp-auth.ts";
 
+export { AgentError, delegate, describeAgent, promptFromReads, ACP_TOOL_KINDS, AGENT_PROTOCOLS } from "./agent.ts";
+export type {
+  A2aAgentSpec,
+  AcpAgentSpec,
+  AcpPermissions,
+  AgentArtifact,
+  AgentPermission,
+  AgentReply,
+  AgentRequest,
+  AgentSpec,
+  AgentToolCall,
+  Delegate,
+  McpAgentSpec,
+} from "./agent.ts";
+export { agentCard, chooseInterface, readCard, sendA2a, taskState, A2A_VERSION } from "./a2a.ts";
+export type { AgentCard, AgentInterface } from "./a2a.ts";
+export { clientCapabilities, decidePermission, forwardServer, promptAcp, ACP_VERSION } from "./acp.ts";
+
 export { reporter, summarise, money } from "./report.ts";
 export type { ReporterOptions } from "./report.ts";
 
-export { branchHolds, imageKeys, isHuman, isMcp, isModel, parseBranch, probeReads, producers, readsOf, writesOf } from "./spec.ts";
+export { branchHolds, imageKeys, isAgent, isHuman, isMcp, isModel, parseBranch, probeReads, producers, readsOf, writesOf } from "./spec.ts";
 export type {
+  AgentNode,
   Branch,
   CodeNode,
   DecideNode,

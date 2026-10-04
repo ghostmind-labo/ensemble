@@ -21,7 +21,9 @@ import type { GraphQuestion } from "./graph.ts";
 import { calibrate, CalibrationError, type Calibration, type Case, type QuestionReport } from "./calibrate.ts";
 import { money, reporter } from "./report.ts";
 import { loadSkills, validateSkill } from "./skills.ts";
-import { describeServer, isRunnable, missingEnv, preflight, searchServers, searchSkills } from "./registry.ts";
+import { describeServer, isRunnable, missingEnv, preflight, searchAgents, searchServers, searchSkills } from "./registry.ts";
+import { agentCard } from "./a2a.ts";
+import { describeAgent } from "./agent.ts";
 import { isRemote, type RemoteServerSpec } from "./mcp.ts";
 import { authMode, fileTokenStore, login, loginStatus, logout, safeUrl } from "./mcp-auth.ts";
 
@@ -60,6 +62,13 @@ Usage
   ensemble skills [query]           Skills visible here — and what to fix.
   ensemble servers [query]          MCP servers in the official registry, and
                                     which environment variables each still needs.
+  ensemble agents [query]           Agents in the ACP registry, and the command
+                                    that launches each as an acp agent.
+  ensemble agents card <url>        Read an A2A agent's card: who it is, how it
+                                    is reached, what it offers, what auth it
+                                    declares. JSON on stdout.
+  ensemble agents list <file>       The agents a runner declares, and how each is
+                                    reached. Never a secret.
   ensemble mcp login <server> [file] Log in to a remote MCP server (OAuth): a
                                     browser, or --device for a code to type
                                     elsewhere. The server comes from the runner
@@ -122,6 +131,11 @@ async function mcp(
   const specFor = async (name: string): Promise<RemoteServerSpec> => {
     if (file) {
       const runner = await load(file);
+      const agent = runner.spec.agents?.[name];
+      // An A2A agent is asked who you are the same ways, so its login lives in the same store.
+      if (!runner.spec.mcpServers?.[name] && agent?.protocol === "a2a") {
+        return { url: agent.url, ...(agent.headers ? { headers: agent.headers } : {}), ...(agent.auth !== undefined ? { auth: agent.auth } : {}) };
+      }
       const spec = runner.spec.mcpServers?.[name];
       if (!spec) die(`${file} declares no MCP server "${name}". Declared: ${Object.keys(runner.spec.mcpServers ?? {}).join(", ") || "none"}`);
       if (!isRemote(spec!)) die(`MCP server "${name}" is a local process — there is nothing to log in to`);
@@ -609,13 +623,72 @@ async function main(): Promise<void> {
       return;
     }
 
+    case "agents": {
+      if (file === "card") {
+        const url = rest[0];
+        if (!url) die("which agent? — ensemble agents card <url>");
+        const headers: Record<string, string> = {};
+        for (const pair of values.header ?? []) {
+          const at = pair.indexOf("=");
+          if (at < 1) die(`--header wants key=value, got "${pair}"`);
+          headers[pair.slice(0, at)] = pair.slice(at + 1);
+        }
+        const card = await agentCard("card", { protocol: "a2a", url: url!, ...(Object.keys(headers).length ? { headers } : {}) }).catch(
+          (error: Error) => die(error.message.replace(/^agent "card": /, "")) as never,
+        );
+        const { raw: _raw, ...summary } = card;
+        process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
+        process.stderr.write(
+          `"${card.name}"${card.version ? ` ${card.version}` : ""} · ${card.interfaces.map((face) => `${face.binding}${face.version ? ` ${face.version}` : ""}`).join(", ") || "no interface"}` +
+            ` · ${card.streaming ? "streams" : "no streaming"} · ${card.skills.length} skill${card.skills.length === 1 ? "" : "s"}\n` +
+            `  agents: { ${JSON.stringify(card.name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "") || "agent")}: { protocol: "a2a", url: ${JSON.stringify(url)} } }\n`,
+        );
+        return;
+      }
+      if (file === "list") {
+        const runner = await load(rest[0]);
+        const declared = Object.entries(runner.spec.agents ?? {});
+        if (!declared.length) {
+          process.stderr.write(`${rest[0]} declares no agents\n`);
+          return;
+        }
+        for (const [name, agent] of declared) {
+          const extra =
+            agent.protocol === "a2a"
+              ? `auth: ${authMode({ url: agent.url, ...(agent.auth !== undefined ? { auth: agent.auth } : {}) })}`
+              : agent.protocol === "acp"
+                ? `permissions: ${JSON.stringify(agent.permissions ?? "reject")}`
+                : "one MCP tool";
+          process.stdout.write(`${name.padEnd(16)} ${agent.protocol.padEnd(4)} ${describeAgent(agent).padEnd(40)} ${extra}\n`);
+        }
+        return;
+      }
+      const query = [file, ...rest].filter(Boolean).join(" ");
+      const found = await searchAgents(query || undefined, { limit: 60 }).catch((error: Error) => die(error.message) as never);
+      if (found.length === 0) {
+        process.stderr.write(`nothing in the ACP registry matches "${query}"\n`);
+        return;
+      }
+      for (const entry of found) {
+        process.stdout.write(
+          `${entry.id}@${entry.version}  ${entry.name}\n  ${entry.description}\n  ` +
+            (entry.launch
+              ? `{ protocol: "acp", command: ${JSON.stringify(entry.launch.command)}, args: ${JSON.stringify(entry.launch.args)} }`
+              : `distributed as ${entry.distribution.join(", ") || "nothing this client can launch"} — install it, then name its command`) +
+            `\n\n`,
+        );
+      }
+      process.stderr.write(`${found.length} agents · ${found.filter((entry) => entry.launch).length} launchable as written\n`);
+      return;
+    }
+
     case "mcp": {
       await mcp(file, rest, values);
       return;
     }
 
     default:
-      die(`unknown command "${command}" — try: validate, graph, run, resume, calibrate, check, skills, servers, mcp, version`);
+      die(`unknown command "${command}" — try: validate, graph, run, resume, calibrate, check, skills, servers, agents, mcp, version`);
   }
 }
 

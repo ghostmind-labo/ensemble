@@ -24,6 +24,7 @@ import { createHash } from "node:crypto";
 import {
   edgeId,
   externalKeys,
+  isAgent,
   isCode,
   isDecide,
   isMcp,
@@ -37,6 +38,8 @@ import {
   type RunnerSpec,
 } from "./spec.ts";
 import type { Description, Question } from "./questions.ts";
+import { describeAgent, type AcpPermissions } from "./agent.ts";
+import { authMode } from "./mcp-auth.ts";
 
 export const GRAPH_SCHEMA = "https://ghostmind.dev/ensemble/graph-v1.json";
 
@@ -57,7 +60,7 @@ export interface GraphQuestion {
 
 export interface GraphNode {
   id: string;
-  kind: "decide" | "work" | "code" | "model" | "mcp";
+  kind: "decide" | "work" | "code" | "model" | "mcp" | "agent";
   label?: string;
   reads: string[];
   writes: string[];
@@ -96,6 +99,36 @@ export interface GraphNode {
   };
   /** What a workflow can reach over MCP — visible before it runs. */
   mcp?: { server: string; tool?: string; toolFrom?: string; args?: { literal: Record<string, unknown> } | { source: string } };
+  /**
+   * Who a step is handed to, and how they are reached — visible before it runs.
+   * Never a secret: a url is shown without its query, auth as the name of its
+   * mode, an environment variable by name only.
+   */
+  agent?: {
+    /** The key in the runner's `agents`. */
+    name: string;
+    protocol: "a2a" | "acp" | "mcp";
+    /** a2a — where the agent lives. */
+    url?: string;
+    /** a2a — how the caller proves who it is, in words. */
+    auth?: string;
+    /** acp — the program launched, and its arguments as written. */
+    command?: string;
+    args?: string[];
+    /** acp — names of the environment variables handed to it. */
+    env?: string[];
+    /** acp — how permission requests are answered. Always present for acp. */
+    permissions?: AcpPermissions;
+    /** acp — client file access offered, when any is. */
+    fs?: { read?: boolean; write?: boolean };
+    /** acp — the runner's MCP servers handed to the agent, by name. */
+    mcpServers?: string[];
+    /** mcp — the server and the tool that is the agent. */
+    server?: string;
+    tool?: string;
+    /** The message: literal text, a function's source, or the node's reads sent as they are. */
+    prompt: { text: string } | { source: string } | { reads: string[] };
+  };
 }
 
 export interface GraphEdge {
@@ -224,6 +257,40 @@ export function toGraph(spec: RunnerSpec): GraphDoc {
                     : { literal: node.args },
               }
             : {}),
+        },
+      };
+    }
+    if (isAgent(node)) {
+      const agent = spec.agents?.[node.agent];
+      return {
+        // Somebody else's loop, on somebody's bill: metered, whether or not it says how much.
+        ...head("agent", "metered"),
+        agent: {
+          name: node.agent,
+          ...(agent
+            ? {
+                protocol: agent.protocol,
+                ...(agent.protocol === "a2a"
+                  ? { url: describeAgent(agent), auth: authMode({ url: agent.url, ...(agent.auth !== undefined ? { auth: agent.auth } : {}) }) }
+                  : agent.protocol === "acp"
+                    ? {
+                        command: agent.command,
+                        ...(agent.args?.length ? { args: agent.args } : {}),
+                        ...(Object.keys(agent.env ?? {}).length ? { env: Object.keys(agent.env!) } : {}),
+                        permissions: agent.permissions ?? "reject",
+                        ...(agent.fs?.read || agent.fs?.write ? { fs: agent.fs } : {}),
+                        ...(agent.mcpServers?.length ? { mcpServers: agent.mcpServers } : {}),
+                      }
+                    : { server: agent.server, tool: agent.tool }),
+              }
+            : // Not declared: `validate` says so. The document does not guess a protocol.
+              ({} as { protocol: "a2a" })),
+          prompt:
+            typeof node.prompt === "function"
+              ? { source: node.prompt.toString() }
+              : typeof node.prompt === "string"
+                ? { text: node.prompt }
+                : { reads: readsOf(node).length ? readsOf(node) : ["goal"] },
         },
       };
     }

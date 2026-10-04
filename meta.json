@@ -2,7 +2,7 @@
   "id": "JDPxx3FVr4HO",
   "name": "ensemble",
   "type": "project",
-  "description": "Typed decisions wired to your code: a graph whose forks are Jev's calibrated answers, proven offline and recorded as JSON. The npm library at the root; web/ (the site and docs) and tunnel/ as services.",
+  "description": "Typed decisions wired to your code: a graph whose forks are Jev's calibrated answers, proven offline and recorded as JSON. The npm library only; the hosted product and the docs site are the private ghostmind-app/together.",
   "tags": ["jev", "decisions", "graph", "openrouter", "mcp", "library"],
   "routines": {
     "test": "npm test",

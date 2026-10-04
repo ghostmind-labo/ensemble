@@ -1,6 +1,6 @@
 ---
 name: ensemble-build
-description: Build a working @ghostmind-dev/ensemble runner for a use case, end to end and without a human in the loop. It covers breaking the use case down, drawing the graph, writing the .mts file, validating it, dry-running every branch for $0, and a preflight check. Use this whenever someone wants to automate a decision, route or triage requests, build a classifier-driven workflow, wire Jev / TypeSafe System One into code, make a perception loop (a model looks, something decides, code acts), or asks to "set up ensemble for X". Also use it for any runner(...) .mts file, any graph of decide / work / code / model / mcp nodes, or an existing runner that needs new branches, questions or nodes, even when the word "ensemble" never appears. Also use it to make a runner run for days (supervise, memory between ticks, budgets, a watcher that monitors drift).
+description: Build a working @ghostmind-dev/ensemble runner for a use case, end to end and without a human in the loop. It covers breaking the use case down, drawing the graph, writing the .mts file, validating it, dry-running every branch for $0, and a preflight check. Use this whenever someone wants to automate a decision, route or triage requests, build a classifier-driven workflow, wire Jev / TypeSafe System One into code, make a perception loop (a model looks, something decides, code acts), or asks to "set up ensemble for X". Also use it for any runner(...) .mts file, any graph of decide / work / code / model / mcp / agent nodes, or an existing runner that needs new branches, questions or nodes, even when the word "ensemble" never appears. Also use it to make a runner run for days (supervise, memory between ticks, budgets, a watcher that monitors drift).
 ---
 
 # Building an ensemble runner
@@ -55,18 +55,81 @@ anything, because the rules below fall out of it:
 | **Perception and generation**: looking at an image, writing text, drawing | a `model` node (OpenRouter), or any SDK in a `work` handler | Jev takes text only and does not generate. The `model` node puts the model and its cost in the graph; a handler gives you any vendor-specific feature |
 | **Effects**: send, store, call an API, page a person | a `work` handler | Any library, any API. That seam belongs to the user |
 | **One tool call** | an `mcp` node | A single named call, so the graph says what it can reach |
+| **A step handed to an agent somebody else runs** | an `agent` node, naming an entry of the runner's `agents` | One message, one reply, over A2A (a hosted agent, by url), ACP (a local agent, launched as a command) or MCP (an agent offered as a tool). The graph names the agent and how it is reached; the run records what was asked, what came back and whether a cost was reported |
 | **Several things at once** | `fork: true` edges meeting at a `join: "all"` node | Lanes run concurrently; `validate` proves they never touch the same key |
 | **What survives between ticks** | `memory: [...]` on the runner, written by a node | Declared, so the graph says what the system remembers |
 | **A person's judgement** | a `decide` node with `by: "human"` | The same closed questions, so it's wired and proven like Jev's. The run waits for a `human` handler, or pauses and resumes later |
 
-The library doesn't ship an agent loop, a prompt library or parallel groups, but
-nothing stops a handler from containing one. An agent that picks its own tools
-until it is done can be a single `work` step, with any agent SDK — or with
-`@ghostmind-dev/agent`, the independent Ghostmind agent engine (dollar cap,
-go/pause/stop hooks, an event log, Jev guiding weaker models). The graph shows it
-as one opaque step, and the decisions around it stay calibrated and provable: route
-into it with a `decide` node, judge its reply with another (pattern 16). Prefer explicit nodes where the steps are known, because those show up
-in `graph.json` and `run.json`. Use a handler where they aren't known.
+There are six node kinds: `decide`, `work`, `code`, `model`, `mcp` and `agent`.
+The library ships no agent loop, prompt library or parallel groups of its own. A
+loop lives in an agent, and the graph holds what surrounds it.
+
+### When a step is an agent
+
+Pick the smallest thing that does the step:
+
+| The step is | Use | Why |
+|---|---|---|
+| A closed question: which, whether, how good | a `decide` node | Calibrated, cheap, and every answer has an edge |
+| One generative call: look at this, write that | a `model` node | One call, and the graph says which model and what it costs |
+| One known tool call | an `mcp` node | The graph says what it reaches |
+| An effect or an API call you write | a `work` handler | Any library |
+| **An open-ended sub-task whose steps depend on what the last one returned**: research, investigate a codebase, work a ticket | **an agent** | The loop is the agent's. The graph routes to it, bounds it and judges its reply |
+
+When the steps are known, write them as nodes: they show up in `graph.json` and
+`run.json`, and each decision is calibrated. Reach for an agent when they are
+not known in advance.
+
+There are four ways to put an agent in a graph. Three are **declared** in the
+runner's `agents` and used by an `agent` node (pattern 17), so `graph.json` names
+the agent and how it is reached. The fourth is **in-process**, in a `work`
+handler (pattern 16).
+
+| Way | The agent is | Runs with the local library | Runs in hosted ensemble | Cost in `run.json` |
+|---|---|---|---|---|
+| `protocol: "a2a"` | Behind a URL, with an A2A card. Nothing to install | Yes | Yes, when it is public and takes no credentials | `"unknown"` always |
+| `protocol: "acp"` | A command on this machine (`agento acp`, `opencode acp`) | Yes | Runs locally only: the hosted sandbox starts no process | `"reported"` when the agent sends a USD cost, else `"unknown"` |
+| `protocol: "mcp"` | One tool of a declared MCP server (`agento mcp`, a remote server) | Yes | Yes, on a remote (`url`) server that takes no credentials | `"unknown"` always |
+| In a `work` handler | A library you import (`@ghostmind-dev/agento`, any agent SDK), with your own tools, hooks and approvals | Yes | Runs locally only: the hosted sandbox imports the ensemble library alone | What the handler `report()`s |
+
+How to pick:
+
+1. **Where will the runner run?** For hosted ensemble, the agent is `a2a` or
+   `mcp` on a remote server, and one that takes no token (the sandbox holds no
+   secrets yet, so `${NAME}` does not resolve there). With the local library,
+   all four are open.
+2. **Where does the agent live?** Behind a URL: `a2a`. A command on this
+   machine: `acp`. Offered as an MCP tool: `mcp`. Yours to write, with its API in
+   your hands: in-process.
+3. **Which agents?** The ones supported out of the box are open source and use
+   OpenRouter as their only model provider, so the one `OPENROUTER_API_KEY`
+   covers them: `agento` (the Ghostmind agent engine, an independent package)
+   and `opencode`. An approved, version-pinned catalog is planned; today the
+   agent is installed by hand and declared. Any other agent can be declared too.
+
+### The shape, and the safety rule
+
+Every agent step has the same three parts, whatever the way in:
+
+- **A `decide` node before it** routes to the agent only when one is needed.
+  Most requests take the cheap, provable path.
+- **The agent step**, bounded from outside: `stepTimeout` on the run, the
+  agent's own limit, and `maxLoops` on the retry edge.
+- **A `decide` node after it** judges the reply. The agent never grades its own
+  work, and a refused or interrupted agent may stop short without saying so.
+
+**Ensemble does not sandbox an agent.** For an `acp` agent, the `permissions`
+policy (default `"reject"`) answers what the agent **asks**. An agent that acts
+without asking is not stopped by it: `opencode acp`, as it ships, wrote a file
+and ran a command without asking. So an `acp` declaration always carries:
+
+1. **the agent's own configuration, set to ask or deny**, passed through `env`;
+2. **a `cwd` you are willing to expose**: an empty or throwaway directory when
+   the agent only needs to think;
+3. and the `decide` node after it.
+
+The declarations proven to hold are in pattern 17 and `references/api.md` §3.
+Tell the user which directory the agent was given and what it may do there.
 
 ## Before you start: the environment
 
@@ -113,6 +176,11 @@ design:
   filter. These become `code` nodes and `when:` edges, never questions.
 - **Perception and writing.** Does anything need to *look* at an image or
   *produce* text or images? That is a `model` node, and only then.
+- **Delegation.** Is a step an open-ended sub-task (research, reading a
+  codebase) rather than one call? That is an agent: pick the way in from "When
+  a step is an agent" above, starting with where the runner will run. Give it
+  a decide node before it (is it needed?), one after it (did the reply
+  answer?), and one bounded retry.
 - **Exits.** What happens at the end of each branch? Each is a `work` handler, or
   a `model` node whose output is the result. If the output comes from a closed
   set (a rejection reason, a status message), write it from a template in a
@@ -157,8 +225,21 @@ The mistakes that validation *cannot* catch, so avoid them as you write:
 - **One write key takes the return value whole.** `writes: ["rounds"]` with
   `return { rounds: n }` stores `rounds.rounds`. Return the bare value. Several
   write keys destructure an object that must have every key.
-- **Model and mcp writes are positional.** `[text]` or `[text, images]` for a
-  model, `[text]` or `[text, data]` for mcp.
+- **Model, mcp and agent writes are positional.** `[text]` or `[text, images]`
+  for a model, `[text]` or `[text, data]` for mcp, `[text]` or `[text, detail]`
+  for an agent.
+- **An agent's cost is often unknown, and unknown is not free.** A2A and MCP
+  define no cost field, so the step records `meta.cost: "unknown"` and adds 0 to
+  the total. The run's `budget` can only count what is reported; bound such a
+  step with `stepTimeout`, the agent's own `timeoutMs` and `maxLoops` on the
+  retry edge.
+- **An `acp` agent's `permissions` answer only what it asks.** `validate`
+  passes a declaration with no `env` and no `cwd`, and the agent then runs in
+  the current directory with its own defaults. Write both (the safety rule
+  above).
+- **An agent on an MCP server inherits the server's 30-second `timeoutMs`.**
+  Raise it on the `mcpServers` entry (`timeoutMs: 300_000`), or the step fails
+  with `tools/call timed out`.
 - **Edges are tried in declaration order, and the first match wins.** Put safety
   overrides (a hazard noul, a refusal) *before* the ordinary routing. A bare edge
   (no `on`/`when`) is the catch-all, so put it last.
@@ -215,13 +296,18 @@ depends on show that edge in its `readBy`? A key with an empty `readBy` that
 you know is used means validation can't see that read. Model nodes are the ones
 marked `metered` that spend money through this library (decide nodes are
 `cheap`, code and mcp are `free`). Work nodes are always `metered` because the
-library can't see inside them, so judge them by what the handler does.
+library can't see inside them, so judge them by what the handler does. Agent
+nodes are `metered` too: somebody's loop runs, on somebody's bill. Read each
+one's `agent` block (`jq '.nodes[] | select(.kind=="agent") | .agent'`): it
+names the protocol, the address or command, the auth mode and, for ACP, how
+permission requests are answered.
 
 ### 6. Dry-run every branch (free, offline)
 
 Validation proves the shape. Running proves the wiring: nested writes, handler
 crashes, loops that never exit, results that come back `undefined`. The bundled
-script stubs Jev, OpenRouter and MCP and runs the user's handlers for real:
+script stubs Jev, OpenRouter, MCP and every declared agent, and runs the user's
+handlers for real:
 
 ```sh
 node <this-skill-dir>/scripts/dryrun.mts runners/<name>.mts "a realistic goal" --explore
@@ -239,6 +325,9 @@ node <this-skill-dir>/scripts/dryrun.mts runners/<name>.mts "a realistic goal" -
   answers become the baseline that every explored case varies from. Use it for
   edges that need two answers at once (e.g. `--answer screen.wismo=0.9
   --answer route.queue=shipping --explore`).
+- An `agent` node gets a stub reply that echoes the message it would have sent
+  (`[dry agent <name> over <protocol>] …`), so a missing key in the prompt shows
+  up. No agent is contacted and no process is launched.
 - `--stub-work` also replaces handlers, for when they have real side effects.
   **Use it whenever a handler would send, write, charge or page something.**
 - `--input k=v` seeds inputs, e.g. `--input frame=https://…`.
@@ -254,7 +343,11 @@ npm run check -- runners/<name>.mts
 
 This checks that each named model id exists and can do what its node asks
 (`sees:` needs vision, a second write key needs image output) and that the
-needed keys are set. It also lists the MCP servers it would start. A model picked
+needed keys are set. It also lists the MCP servers it would start. For each
+declared agent it reads the A2A card (name, version, binding, streaming, the
+skills it offers, the auth it declares), checks that an ACP command is on PATH
+and says how its permission requests will be answered, and names the secrets
+still unset. A model picked
 at run time (`{ from }`) can't be checked here. A missing key makes it exit
 non-zero, which is expected on a machine without keys, so report it rather than
 treating it as a broken runner. **A model that passes prints nothing.** Only problems are listed, so "✓ … can
@@ -297,7 +390,10 @@ Report back briefly with:
 - the file path, and one line on what the graph does
 - the questions asked and the gates, meaning where the classifier can say "unsure"
 - what's still a stub: which `work` handlers need the user's real code, which
-  keys and servers are needed
+  keys and servers are needed, and for each agent: where it is reached, what
+  has to be installed, which secret or login it needs, whether its cost is
+  reported or "not reported" (never "free"), and for an `acp` agent the
+  directory it was given and the configuration it runs under
 - the validate, dry-run and check results, stated plainly: "validates clean, 9/9
   dry runs, all edges taken, check needs OPENROUTER_API_KEY"
 
@@ -333,11 +429,15 @@ becoming a framework:
 - `references/api.md`: every field of the runner, node kinds, edges, handlers,
   run options and exports. Read it while writing the file.
 - `references/patterns.md`: complete worked graphs for the common shapes,
-  including an agent inside one `work` node (16). Read it when choosing the
-  structure.
-- `references/errors.md`: each `validate` message and its fix. Read it when
-  validation fails.
-- `references/discovery.md`: finding models, skills and MCP servers to wire in.
-  Read it when the use case needs a model, a skill or an external tool.
+  including an agent inside one `work` node (16) and a declared agent in an
+  `agent` node (17). Read it when choosing the structure.
+- `references/errors.md`: each `validate`, `check` and run-time message and its
+  fix, with a section for agents. Read it when validation or a step fails.
+- `references/discovery.md`: finding models, skills, MCP servers and agents to
+  wire in. Read it when the use case needs a model, a skill, an external tool
+  or an external agent.
+- In the library's repository, the long form on agents:
+  [the overview](../../../docs/agents.md) (the four ways compared, what works
+  today) and [Build your own agent](../../../docs/agents-build.md).
 - `scripts/dryrun.mts`: the $0 executor described in step 6.
 - `assets/runner.template.mts`: the starting file.

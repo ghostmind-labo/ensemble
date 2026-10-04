@@ -17,6 +17,9 @@
  *   · model nodes  → "[dry <model>] <first 400 chars of the prompt>" (and a
  *                    1×1 image when the node draws)
  *   · mcp nodes    → a placeholder text, no server is started
+ *   · agent nodes  → "[dry agent <name> over <protocol>] <first 400 chars of
+ *                    the message>", status "completed", no cost reported. No
+ *                    agent is reached: no request, no process, no MCP server
  *   · work nodes   → YOUR handlers run for real, unless --stub-work
  *
  * It only imports the runner file, and the runner brings its own copy of
@@ -63,7 +66,12 @@ interface RunDoc {
 }
 interface Runner {
   (inputs?: State, options?: Record<string, unknown>): Promise<{ result: unknown; run: RunDoc }>;
-  spec: { name: string; nodes: Record<string, AnyNode>; edges?: Array<{ from: string; to: string }> };
+  spec: {
+    name: string;
+    nodes: Record<string, AnyNode>;
+    edges?: Array<{ from: string; to: string }>;
+    agents?: Record<string, { protocol?: string }>;
+  };
   validate(): string[];
 }
 
@@ -218,9 +226,22 @@ const caller = async (request: { model: string; prompt: string }) => ({
   usage: { prompt_tokens: 0, completion_tokens: 0 },
 });
 
+// One reply per delegated step, in the shape every protocol returns. It echoes
+// the message (up to 400 chars) so a dry run shows what the agent would have
+// been asked, and reports no cost, as an A2A agent or an MCP tool would not:
+// the step records cost "unknown", which is what a live run usually shows too.
+const delegate = async (request: { name: string; agent: { protocol?: string }; prompt: string }) => ({
+  text: `[dry agent ${request.name} over ${request.agent.protocol ?? "?"}] ${request.prompt.slice(0, 400)}`,
+  status: "completed",
+  artifacts: [],
+  toolCalls: [],
+  permissions: [],
+  meta: { name: "dry-run" },
+});
+
 async function once(forced: Map<string, string>, label: string) {
   try {
-    const { result, run } = await runner({ ...inputs }, { decider: decider(forced), human: human(forced), caller, maxSteps: 50 });
+    const { result, run } = await runner({ ...inputs }, { decider: decider(forced), human: human(forced), caller, delegate, maxSteps: 50 });
     return { label, run, result, error: undefined as string | undefined };
   } catch (error) {
     const partial = (error as { run?: RunDoc }).run;

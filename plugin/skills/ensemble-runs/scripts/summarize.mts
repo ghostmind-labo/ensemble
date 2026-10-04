@@ -4,7 +4,10 @@
  *
  * One run tells you what happened once. Tuning a gate or a threshold needs the
  * shape across many: how often each edge is taken, how confident each question
- * usually is, how often a gate fires, where runs fail and what they cost. This
+ * usually is, how often a gate fires, where runs fail and what they cost. A step
+ * delegated to an external agent is listed with its agent, protocol, how it
+ * ended, the tools it said it used and what it was refused, and its cost is
+ * "not reported" when the protocol gave none: unknown, never free. This
  * reads run documents only (plain JSON), so it needs no library and no key.
  *
  * Usage
@@ -23,6 +26,8 @@ interface Step {
   node: string; kind: string; ms: number; cost: number; took: string | null; error?: string;
   answers?: Record<string, StepAnswer>;
   gate?: { on: string; passed: boolean; min: number; measured: number };
+  /** An agent step: agent, protocol, status, toolCalls, permissions, and cost "reported" | "unknown". */
+  meta?: Record<string, unknown>;
 }
 interface RunDoc {
   run: { id: string; runner: string; graph: string; goal: string; status: string; cost: { total: number } };
@@ -111,6 +116,35 @@ const gateStats = Object.entries(
     return acc;
   }, {}),
 );
+// Delegated steps, per node. A protocol that reports no cost (A2A and MCP define
+// no field for one) leaves the step at 0 with meta.cost "unknown": that money is
+// on the agent owner's bill and is NOT in the totals above, so it is counted apart.
+interface Delegated {
+  agent: string; protocol: string; calls: number; status: Record<string, number>; toolCalls: number;
+  permissions: Record<string, number>; reported: { n: number; usd: number }; notReported: number;
+}
+const list = (value: unknown): Array<Record<string, unknown>> => (Array.isArray(value) ? value : []);
+const delegated: Record<string, Delegated> = {};
+for (const { run, step } of steps) {
+  if (step.kind !== "agent") continue;
+  const meta = step.meta ?? {};
+  const d = (delegated[`${mixed ? `${run.runner}:` : ""}${step.node}`] ??= {
+    agent: String(meta["agent"] ?? "?"), protocol: String(meta["protocol"] ?? "?"), calls: 0, status: {}, toolCalls: 0,
+    permissions: {}, reported: { n: 0, usd: 0 }, notReported: 0,
+  });
+  d.calls++;
+  const ended = step.error ? "failed" : String(meta["status"] ?? "?");
+  d.status[ended] = (d.status[ended] ?? 0) + 1;
+  d.toolCalls += list(meta["toolCalls"]).length;
+  for (const p of list(meta["permissions"])) d.permissions[String(p["outcome"])] = (d.permissions[String(p["outcome"])] ?? 0) + 1;
+  if (meta["cost"] === "unknown") d.notReported++;
+  else {
+    d.reported.n++;
+    d.reported.usd += step.cost;
+  }
+}
+const unreported = Object.values(delegated).reduce((n, d) => n + d.notReported, 0);
+
 const failures = steps.filter(({ step }) => step.error).map(({ run, step }) => ({ run: run.id, node: step.node, error: step.error }));
 const slow = Object.entries(
   steps.reduce<Record<string, number[]>>((acc, { step }) => ((acc[step.node] ??= []).push(step.ms), acc), {}),
@@ -118,7 +152,7 @@ const slow = Object.entries(
 
 if (values.json) {
   process.stdout.write(
-    `${JSON.stringify({ runs: runs.length, status, graphs, edges, paths, cost: { total: costs.reduce((a, b) => a + b, 0), mean: mean(costs), max: Math.max(...costs) }, questions, gates: Object.fromEntries(gateStats), lowConfidence: lowOnes, failures, timing: slow }, null, 2)}\n`,
+    `${JSON.stringify({ runs: runs.length, status, graphs, edges, paths, cost: { total: costs.reduce((a, b) => a + b, 0), mean: mean(costs), max: Math.max(...costs), notReported: unreported }, questions, delegated, gates: Object.fromEntries(gateStats), lowConfidence: lowOnes, failures, timing: slow }, null, 2)}\n`,
   );
   process.exit(0);
 }
@@ -129,6 +163,10 @@ if (Object.keys(graphs).length > 1) {
   out.push(`  ⚠ ${Object.keys(graphs).length} graph versions mixed. Filter with --graph to compare like with like`);
 }
 out.push(`cost  total $${costs.reduce((a, b) => a + b, 0).toFixed(5)} · mean $${mean(costs).toFixed(5)} · max $${Math.max(...costs).toFixed(5)}`);
+
+if (unreported) {
+  out.push(`  + ${unreported} delegated step${unreported === 1 ? "" : "s"} with cost not reported: the agent's spend is unknown and is not in these totals`);
+}
 
 out.push("\npaths");
 for (const [path, n] of Object.entries(paths).sort((a, b) => b[1] - a[1]).slice(0, 10)) out.push(`  ${pct(n, runs.length).padStart(4)}  ${path}`);
@@ -152,6 +190,19 @@ if (gateStats.length) {
   }
 }
 
+if (Object.keys(delegated).length) {
+  out.push("\ndelegated (agent nodes)");
+  for (const [node, d] of Object.entries(delegated)) {
+    const each = (o: Record<string, number>) => Object.entries(o).map(([k, n]) => `${k} ${n}`).join(", ");
+    const cost = [
+      d.reported.n ? `$${d.reported.usd.toFixed(5)} reported over ${d.reported.n}` : "",
+      d.notReported ? `not reported ×${d.notReported}` : "",
+    ].filter(Boolean).join(", ");
+    out.push(`  ${node.padEnd(20)} ${d.agent} · ${d.protocol} · ${d.calls} call${d.calls === 1 ? "" : "s"} · ${each(d.status)}`);
+    out.push(`  ${"".padEnd(20)} tool calls ${d.toolCalls} · permissions ${each(d.permissions) || "none asked"} · cost ${cost}`);
+  }
+}
+
 if (lowOnes.length) {
   out.push(`\nleast confident (< ${low})`);
   for (const l of lowOnes.sort((a, b) => a.confidence - b.confidence).slice(0, 10)) {
@@ -161,7 +212,7 @@ if (lowOnes.length) {
 
 if (failures.length) {
   out.push("\nfailures");
-  for (const f of failures.slice(0, 10)) out.push(`  ${f.run}  ${f.node}: ${String(f.error).slice(0, 120)}`);
+  for (const f of failures.slice(0, 10)) out.push(`  ${f.run}  ${f.node}: ${String(f.error).slice(0, 240)}`);
 }
 
 out.push("\nslowest nodes");

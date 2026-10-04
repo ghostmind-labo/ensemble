@@ -1,7 +1,7 @@
 /**
  * The vocabulary — everything you write down, and nothing that runs.
  *
- * A runner is data: five kinds of node, one kind of edge, and a map of
+ * A runner is data: six kinds of node, one kind of edge, and a map of
  * handlers. Keeping it data is what lets `validate` prove things about it and
  * `graph` serialise it without executing a line, which in turn is what makes
  * the emitted picture complete rather than a recording of one lucky path.
@@ -19,6 +19,7 @@ import type { JevConfig } from "./jev.ts";
 import type { CallerConfig } from "./openrouter.ts";
 import type { McpServerSpec } from "./mcp.ts";
 import type { Skill } from "./skills.ts";
+import type { AgentSpec } from "./agent.ts";
 
 export type State = Record<string, unknown>;
 
@@ -172,13 +173,42 @@ export interface McpNode extends Joinable {
   label?: string;
 }
 
-export type NodeSpec = DecideNode | WorkNode | CodeNode | ModelNode | McpNode;
+/**
+ * One message to an agent somebody else runs, and its reply.
+ *
+ * The sixth kind, and it earned its place the way `model` did. An agent has a
+ * loop of its own, and this library still has none: what the node declares is
+ * the hand-off. Inside an opaque `work` handler the graph could only say "a
+ * step called agent"; here it says WHICH agent, over which protocol, reached
+ * where, and allowed to do what — and the run records what was asked, what
+ * came back and whether a cost was reported. The picture is more complete with
+ * the node than without it.
+ *
+ * One call per execution. The reply is judged by a decide node after it, never
+ * by the agent itself.
+ */
+export interface AgentNode extends Joinable {
+  /** A key of the runner's `agents`. */
+  agent: string;
+  /**
+   * The message. A function receives the blackboard. Omitted, the node's
+   * `reads` ARE the message: one key bare, several labelled.
+   */
+  prompt?: string | ((state: Readonly<State>) => string);
+  reads?: string[];
+  /** `[text]`, or `[text, detail]` to capture `{ status, artifacts, toolCalls, permissions, data }` too. */
+  writes?: string[];
+  label?: string;
+}
+
+export type NodeSpec = DecideNode | WorkNode | CodeNode | ModelNode | McpNode | AgentNode;
 
 export const isDecide = (node: NodeSpec): node is DecideNode => "decide" in node;
 export const isWork = (node: NodeSpec): node is WorkNode => "work" in node;
 export const isCode = (node: NodeSpec): node is CodeNode => "code" in node;
 export const isModel = (node: NodeSpec): node is ModelNode => "model" in node;
 export const isMcp = (node: NodeSpec): node is McpNode => "mcp" in node;
+export const isAgent = (node: NodeSpec): node is AgentNode => "agent" in node;
 
 /* ───────────────────────────────── edges ──────────────────────────────── */
 
@@ -286,6 +316,12 @@ export interface RunnerSpec {
   skills?: Skill[];
   /** MCP servers an `mcp` node may name. Started lazily, once per run. */
   mcpServers?: Record<string, McpServerSpec>;
+  /**
+   * External agents an `agent` node may name, each reached through one
+   * standard protocol: `a2a` (a url), `acp` (a command) or `mcp` (a tool of a
+   * declared server).
+   */
+  agents?: Record<string, AgentSpec>;
 }
 
 /* ──────────────────────────── derived facts ───────────────────────────── */
