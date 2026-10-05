@@ -1,11 +1,11 @@
 # Runners as MCP tools
 
-`serve.mts` exposes ensemble runners as [Model Context Protocol](https://modelcontextprotocol.io) tools, so anything
+`@ghostmind-dev/ensemble/mcp` exposes ensemble runners as [Model Context Protocol](https://modelcontextprotocol.io) tools, so anything
 that speaks MCP (Claude, an IDE, another agent) can call them. One runner is one tool.
 
-It is an adapter beside the library, like [`a2a/`](../a2a/README.md), and not part of the npm package: the library
-itself still serves nothing. It has no dependencies. Nothing in a runner changes; the adapter listens to each run from
-outside.
+It is a separate entry point of the package, like [the A2A one](serve-a2a.md): the core never imports it, so a project
+that only calls `runner()` loads no server code. It has no dependencies. Nothing in a runner changes; the adapter
+listens to each run from outside.
 
 The caller can only **call** the runners this process was started with. It cannot create or edit one, so no sandbox is
 involved: it is your code, on your machine or server.
@@ -13,25 +13,25 @@ involved: it is your code, on your machine or server.
 ## Over stdio (a local client)
 
 ```sh
-node mcp/serve.mts examples/01-triage/triage.mts
+npx ensemble serve mcp triage.mts
 ```
 
-In Claude Code: `claude mcp add triage -- node /path/to/mcp/serve.mts /path/to/triage.mts`. The server reads
+In Claude Code: `claude mcp add triage -- npx ensemble serve mcp /path/to/triage.mts`, run from the project that installed the package. The server reads
 `OPENROUTER_API_KEY` from its environment, like any run. Whatever a handler logs goes to stderr, because stdout carries
 protocol messages only.
 
 ## Over HTTP
 
 ```sh
-node mcp/serve.mts triage.mts refunds.mts --port 4321 --token "$MCP_TOKEN"     # POST http://127.0.0.1:4321/mcp
+npx ensemble serve mcp triage.mts refunds.mts --port 4321 --token "$MCP_TOKEN"     # POST http://127.0.0.1:4321/mcp
 ```
 
 Or inside your own server, since `mcpTools(...)` returns a plain `(req, res)` handler:
 
 ```ts
 import express from "express";
-import { mcpTools } from "./mcp/serve.mts";
-import { a2aAgent } from "./a2a/serve.mts";
+import { mcpTools } from "@ghostmind-dev/ensemble/mcp";
+import { a2aAgent } from "@ghostmind-dev/ensemble/a2a";
 import triage from "./triage.mts";
 import refunds from "./refunds.mts";
 

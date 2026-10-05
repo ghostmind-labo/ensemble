@@ -1,16 +1,16 @@
 # A runner as an A2A agent
 
-`serve.mts` exposes any ensemble runner as an [Agent2Agent](https://a2a-protocol.org) agent (protocol 1.0, JSON-RPC,
+`@ghostmind-dev/ensemble/a2a` exposes any ensemble runner as an [Agent2Agent](https://a2a-protocol.org) agent (protocol 1.0, JSON-RPC,
 streaming). Another agent sends it a goal, watches where it is, answers when it asks, and can stop it.
 
-It is an adapter beside the library, not part of the npm package: the library itself still serves no HTTP. It has no
-dependencies (`node:http`). Nothing in the runner changes and no node knows about it; the adapter listens to the run
-from outside.
+It is a separate entry point of the package: the core never imports it, so a project that only calls `runner()` loads
+no server code. It has no dependencies (`node:http`). Nothing in the runner changes and no node knows about it; the
+adapter listens to the run from outside.
 
 ## On its own port
 
 ```sh
-node a2a/serve.mts examples/01-triage/triage.mts --port 4320
+npx ensemble serve a2a triage.mts --port 4320
 ```
 
 | Option | What it does |
@@ -28,7 +28,7 @@ Starting it costs nothing. Each task is a real run of the runner, with its real 
 
 ```ts
 import express from "express";
-import { a2aAgent } from "./a2a/serve.mts";
+import { a2aAgent } from "@ghostmind-dev/ensemble/a2a";
 import triage from "./triage.mts";
 
 const app = express();
@@ -72,4 +72,4 @@ An answer that does not fit runs nothing: the task returns to `input-required` a
   a message naming the fix. A caller that can answer (another agent, your own code) is unaffected.
 - The run's `human` option is not used: every `by: "human"` node pauses for the caller.
 
-Tested offline in `test/a2a-serve.test.mts`, against the library's own A2A client.
+See also [runners as MCP tools](serve-mcp.md). Tested offline in `test/a2a-serve.test.mts`, against the library's own A2A client.

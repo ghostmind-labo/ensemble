@@ -544,7 +544,7 @@ a two-argument decider is still a valid `Decider`.
 | `supervise(runner, opts)` | Run a runner as a long-lived loop. See §10 |
 
 CLI (through `package.json` scripts, never global):
-`ensemble validate | graph | run | resume <file> <paused.json> | calibrate <file> <cases> | check | skills [q] [--remote] | servers [q] | agents [q] | agents card <url> | agents list <file> | mcp login·logout·status | version`.
+`ensemble validate | graph | run | resume <file> <paused.json> | calibrate <file> <cases> | check | skills [q] [--remote] | servers [q] | agents [q] | agents card <url> | agents list <file> | mcp login·logout·status | serve mcp <file...> | serve a2a <file> | version`.
 Run options: `--input k=v`, `--budget`, `--max-steps`, `--json`, `-o`; `resume`
 adds `--answer k=value` (repeatable, one per question), `--comment` and `--by`.
 

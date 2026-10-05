@@ -19,13 +19,14 @@ each need their own key and cost format, and OpenRouter already returns
 A vendor-exclusive feature belongs in a user's own `work` handler, which is
 exactly what that seam is for.
 
-It still holds no prompts of its own, runs no tool loop, ships no skills, serves
-no HTTP, and draws nothing. Those were removed on purpose; a change that adds one
+It still holds no prompts of its own, runs no tool loop, ships no skills, and
+draws nothing, and the core serves no HTTP: only the two opt-in serving entry
+points do (see **Serving**). Those were removed on purpose; a change that adds one
 back is the change to question.
 
 ## Project map
 
-Twenty files, and each one has a single job.
+Twenty-two files, and each one has a single job.
 
 - `src/questions.ts` — `choice` / `score` / `noul`, their answer types, and the API limits enforced at authoring time
 - `src/jev.ts` — the decider: one `fetch` to OpenRouter's `POST /api/v1/systemone`, plus the `Decider` seam
@@ -45,8 +46,10 @@ Twenty files, and each one has a single job.
 - `src/calibrate.ts` — does a decision work: accuracy, calibration gap and gate prices against labelled cases, one decide node at a time
 - `src/supervise.ts` — the brainstem: a runner as a loop that lives for days. Memory, budgets, rest, journal and resume, a watcher runner
 - `src/report.ts` — the terminal reporter (one consumer of `RunEvent`, not the only possible one)
+- `src/a2a-serve.ts` — a runner SERVED as an A2A agent: a mountable handler, or its own port. A separate entry point
+- `src/mcp-serve.ts` — runners SERVED as MCP tools, over stdio and Streamable HTTP. A separate entry point
 - `src/runner.ts` — ties them into a callable; `src/index.ts` — the public surface
-- `src/cli.ts` — `validate` / `graph` / `run` / `calibrate` / `check` / `skills` / `servers` / `mcp login·logout·status`
+- `src/cli.ts` — `validate` / `graph` / `run` / `calibrate` / `check` / `skills` / `servers` / `mcp login·logout·status` / `serve mcp·a2a`
 
 `examples/` — ten runnable runners (`10-delegate` hands a task to an external agent over A2A, ACP or MCP, with three toy agents under `agents/` that the tests run as real processes), each with a header comment saying what it
 demonstrates. `06-watch` is a watcher runner that also supervises `01-triage`
@@ -77,23 +80,19 @@ loop of its own; a `decide` node routes in and another judges the reply (`patter
 out of the box will be open source and use OpenRouter as their only model provider (an approved catalog is planned,
 not built). In hosted ensemble `acp` and the in-process way cannot run (no child processes, one allowed import).
 
-`a2a/` — the other direction: a runner SERVED as an A2A agent (`serve.mts`: `a2aAgent(runner).handler` to mount in
-any `node:http` server, `serveRunner` for its own port, and a CLI). Like the plugin it is **not** part of the npm
-package, so the library still serves no HTTP; it imports `src/` and has no dependencies. It adds no concept to the
-library: `RunEvent`s become status updates, a `by: "human"` pause becomes `input-required` (the caller answers the same
-closed questions, and only there — it cannot write state at any other moment), `CancelTask` is the run's signal, and
-the run's cost travels in `metadata.ensemble`. `test/a2a-serve.test.mts` runs it against the library's own A2A client;
-keep `a2a/README.md` in step with it.
-
-`mcp/` — the same idea for tools: runners SERVED over MCP (`serve.mts`: `mcpTools([runners]).handler` for Streamable
-HTTP, `.stdio()` for a local client, `serveTools`, and a CLI). One runner is one tool; the caller can only call, never
-create or edit, so there is no sandbox. It is stateless, as MCP revision `2026-07-28` requires: a paused run travels to
-the caller and back as a sealed token (AES-GCM under `secret`), as an elicitation form for callers that declare the
-capability and through an `answer` tool for the rest. It serves that revision AND the `initialize`-based ones, because
-this library's own client (`src/mcp.ts`) still opens with the handshake. Check
-https://modelcontextprotocol.io/specification/latest before changing it: the protocol was redesigned once already.
-`test/mcp-serve.test.mts` and `test/fixtures/refunds.mts`; keep `mcp/README.md` in step. Not to be confused with the
-hosted product's MCP endpoint, which manages runners for signed-in users.
+**Serving.** A runner is reachable four ways: called as a function, through the CLI, as an A2A agent, and as an MCP
+tool. The last two are `src/a2a-serve.ts` and `src/mcp-serve.ts`, shipped as SEPARATE entry points
+(`@ghostmind-dev/ensemble/a2a`, `/mcp`) and through `ensemble serve a2a|mcp`. The rule that makes this safe: the core
+never imports them (`src/index.ts` exports neither, and `test/*-serve.test.mts` would not catch a violation, so check
+by hand), they add no dependency, and they add no concept: `RunEvent`s become status updates or progress, a
+`by: "human"` pause becomes `input-required` or an elicitation form (the caller answers the same closed questions, and
+only there; it cannot write state at any other moment), and cancel is the run's signal. The caller of the MCP entry
+can only CALL the runners the process was started with, never create or edit one, so there is no sandbox; that is the
+difference from the hosted product's MCP endpoint, which manages runners for signed-in users. MCP serving is stateless
+(a paused run travels as a token sealed with AES-GCM under `secret`) and speaks revision `2026-07-28` AND the
+`initialize`-based ones, because this library's own client (`src/mcp.ts`) still opens with the handshake. Check
+https://modelcontextprotocol.io/specification/latest and https://a2a-protocol.org before changing either: MCP was
+redesigned once already. Pages: `docs/serve-a2a.md`, `docs/serve-mcp.md`.
 
 `plugin/` + `.claude-plugin/marketplace.json` — the Claude Code plugin (marketplace
 `ghostmind-ensemble`, plugin `ensemble`). It is **not** part of the npm package

@@ -1,4 +1,4 @@
-// Runners served as MCP tools (mcp/serve.mts), against the library's own MCP
+// Runners served as MCP tools (src/mcp-serve.ts), against the library's own MCP
 // client (which opens with `initialize`) and against the wire in the current
 // revision (2026-07-28: no handshake, metadata on every request): discovery,
 // header validation, progress, a pause answered through a form and through the
@@ -6,7 +6,7 @@
 // No decider is called: the only decide node asks a person.
 import assert from "node:assert/strict";
 import { PassThrough } from "node:stream";
-import { mcpTools, serveTools, LEGACY_VERSIONS, MODERN_VERSIONS, type ServeOptions } from "../mcp/serve.mts";
+import { mcpTools, serveTools, LEGACY_VERSIONS, MODERN_VERSIONS, type ServeOptions } from "../src/mcp-serve.ts";
 import { connect, runner } from "../src/index.ts";
 import refunds, { seen } from "./fixtures/refunds.mts";
 
@@ -39,7 +39,7 @@ const call = (url: string, name: string, args: Json, extra: Json = {}, capabilit
 
 // ── 1 · the library's own client, over stdio: a child process, the old handshake ─
 {
-  const session = await connect("refunds", { command: process.execPath, args: ["mcp/serve.mts", "test/fixtures/refunds.mts"] });
+  const session = await connect("refunds", { command: process.execPath, args: ["src/cli.ts", "serve", "mcp", "test/fixtures/refunds.mts"] });
   const tools = await session.listTools();
   assert.deepEqual(tools.map((tool) => tool.name), ["refunds", "answer"], "one tool per runner, and `answer` because it can pause");
   assert.match(tools[0]!.description, /Drafts a refund and settles it\./);

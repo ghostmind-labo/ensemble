@@ -1,12 +1,11 @@
-#!/usr/bin/env node
 /**
  * A runner, callable as an agent.
  *
- * The library consumes agents (`src/a2a.ts`) and serves nothing, on purpose. But
- * a runner is exactly what Agent2Agent describes from the outside: a goal goes
- * in, a task moves through declared states, and a result comes out. So this
- * adapter stands beside the library, not inside it (it is not in the npm
- * package), and maps one onto the other without adding a concept to either:
+ * The core consumes agents (`a2a.ts`) and serves nothing. But a runner is exactly
+ * what Agent2Agent describes from the outside: a goal goes in, a task moves
+ * through declared states, and a result comes out. So this module is a separate
+ * entry point (`@ghostmind-dev/ensemble/a2a`) that the core never imports, and
+ * it maps one onto the other without adding a concept to either:
  *
  *   a message                 → the runner's `goal` (and inputs, as a data part)
  *   the RunEvent stream       → status updates, one as each node starts and ends
@@ -22,22 +21,16 @@
  * A2A has no field for what a task cost, so the run's cost travels in the
  * task's `metadata.ensemble`, next to the run id and the steps taken.
  *
- *   node a2a/serve.mts examples/01-triage/triage.mts --port 4320
+ *   npx ensemble serve a2a triage.mts --port 4320
  *   agents: { triage: { protocol: "a2a", url: "http://localhost:4320" } }
  *
- * Options: --port (4320), --host (127.0.0.1), --token or A2A_TOKEN (require a
- * bearer token), --budget (USD cap per task), --public-url (the address callers
- * reach this at, for the card). Serving costs nothing; each task is a real run.
+ * Serving costs nothing; each task is a real run.
  */
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import { resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
-import { parseArgs } from "node:util";
 import {
   HumanAnswerError,
-  isRunner,
   ResumeError,
   RunFailed,
   type HumanAnswer,
@@ -48,7 +41,7 @@ import {
   type RunOptions,
   type Runner,
   type State,
-} from "../src/index.ts";
+} from "./index.ts";
 
 type Json = Record<string, unknown>;
 
@@ -441,31 +434,4 @@ export async function serveRunner(runner: Runner, options: ServeOptions = {}): P
         server.close(() => done());
       }),
   };
-}
-
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const { values, positionals } = parseArgs({
-    args: process.argv.slice(2),
-    allowPositionals: true,
-    options: { port: { type: "string" }, host: { type: "string" }, token: { type: "string" }, budget: { type: "string" }, "public-url": { type: "string" } },
-  });
-  const file = positionals[0];
-  if (!file) {
-    process.stderr.write("Usage: node a2a/serve.mts <runner-file> [--port 4320] [--host 127.0.0.1] [--token …] [--budget <usd>] [--public-url …]\n");
-    process.exit(2);
-  }
-  const module = (await import(pathToFileURL(resolve(file)).href)) as { default?: unknown };
-  if (!isRunner(module.default)) {
-    process.stderr.write(`${file} has no runner as its default export: export default runner({ … })\n`);
-    process.exit(2);
-  }
-  const token = values.token ?? process.env["A2A_TOKEN"];
-  const served = await serveRunner(module.default, {
-    ...(values.port ? { port: Number(values.port) } : {}),
-    ...(values.host ? { host: values.host } : {}),
-    ...(token ? { token } : {}),
-    ...(values.budget ? { budget: Number(values.budget) } : {}),
-    ...(values["public-url"] ? { publicUrl: values["public-url"] } : {}),
-  });
-  process.stderr.write(`${module.default.spec.name} is an A2A agent at ${served.url} (card: ${served.url}/.well-known/agent-card.json)\n`);
 }

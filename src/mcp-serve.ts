@@ -1,11 +1,10 @@
-#!/usr/bin/env node
 /**
  * Runners, callable as tools.
  *
- * The library is an MCP client (`src/mcp.ts`) and serves nothing, on purpose.
- * But a runner is exactly a tool seen from outside: arguments go in, a result
- * comes out. So this adapter stands beside the library, like `a2a/` (it is not
- * in the npm package), and exposes runners you already wrote to anything that
+ * The core is an MCP client (`mcp.ts`) and serves nothing. But a runner is
+ * exactly a tool seen from outside: arguments go in, a result comes out. So this
+ * module is a separate entry point (`@ghostmind-dev/ensemble/mcp`) that the core
+ * never imports, and it exposes runners you already wrote to anything that
  * speaks the Model Context Protocol. It adds no concept to either side:
  *
  *   one runner                → one tool, named after it; its inputs are the arguments
@@ -25,23 +24,15 @@
  * request) and the handshake-based ones before it, because most deployed
  * clients, including this library's own, still open with `initialize`.
  *
- *   node mcp/serve.mts examples/01-triage/triage.mts              # stdio
- *   node mcp/serve.mts triage.mts refunds.mts --port 4321         # Streamable HTTP at /mcp
- *
- * Options: --port (serve over HTTP instead of stdio), --host (127.0.0.1),
- * --token or MCP_TOKEN (require a bearer token), --budget (USD cap per call),
- * --secret or MCP_SECRET (the key paused runs are sealed with).
+ *   npx ensemble serve mcp triage.mts                        # stdio
+ *   npx ensemble serve mcp triage.mts refunds.mts --port 4321  # Streamable HTTP at /mcp
  */
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import { resolve } from "node:path";
 import { createInterface } from "node:readline";
-import { fileURLToPath, pathToFileURL } from "node:url";
-import { parseArgs } from "node:util";
 import {
   HumanAnswerError,
-  isRunner,
   ResumeError,
   RunFailed,
   type GraphQuestion,
@@ -54,7 +45,7 @@ import {
   type RunOutcome,
   type Runner,
   type State,
-} from "../src/index.ts";
+} from "./index.ts";
 
 type Json = Record<string, unknown>;
 
@@ -569,43 +560,4 @@ export async function serveTools(runners: Runner[] | Record<string, Runner>, opt
         server.close(() => done());
       }),
   };
-}
-
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const { values, positionals } = parseArgs({
-    args: process.argv.slice(2),
-    allowPositionals: true,
-    options: { port: { type: "string" }, host: { type: "string" }, token: { type: "string" }, budget: { type: "string" }, secret: { type: "string" } },
-  });
-  if (!positionals.length) {
-    process.stderr.write("Usage: node mcp/serve.mts <runner-file> [more files] [--port 4321] [--host 127.0.0.1] [--token …] [--budget <usd>] [--secret …]\n       without --port it speaks MCP over stdio\n");
-    process.exit(2);
-  }
-  // On stdio, stdout carries protocol messages only: whatever a handler logs goes to stderr.
-  if (!values.port) console.log = console.info = console.debug = (...args: unknown[]) => console.error(...args);
-  const runners: Runner[] = [];
-  for (const file of positionals) {
-    const module = (await import(pathToFileURL(resolve(file)).href)) as { default?: unknown };
-    if (!isRunner(module.default)) {
-      process.stderr.write(`${file} has no runner as its default export: export default runner({ … })\n`);
-      process.exit(2);
-    }
-    runners.push(module.default);
-  }
-  const token = values.token ?? process.env["MCP_TOKEN"];
-  const secret = values.secret ?? process.env["MCP_SECRET"];
-  const options: ServeOptions = {
-    ...(token ? { token } : {}),
-    ...(secret ? { secret } : {}),
-    ...(values.budget ? { budget: Number(values.budget) } : {}),
-    ...(values.host ? { host: values.host } : {}),
-  };
-  const names = runners.map((runner) => runner.spec.name).join(", ");
-  if (values.port) {
-    const served = await serveTools(runners, { ...options, port: Number(values.port) });
-    process.stderr.write(`${names}: MCP tools at ${served.url}\n`);
-  } else {
-    process.stderr.write(`${names}: MCP tools on stdio\n`);
-    await mcpTools(runners, options).stdio();
-  }
 }

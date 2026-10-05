@@ -12,6 +12,14 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./a2a": {
+      "types": "./dist/a2a-serve.d.ts",
+      "import": "./dist/a2a-serve.js"
+    },
+    "./mcp": {
+      "types": "./dist/mcp-serve.d.ts",
+      "import": "./dist/mcp-serve.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -32,7 +40,9 @@
     "agent-skills",
     "mcp",
     "openrouter",
-    "llm"
+    "llm",
+    "a2a",
+    "agent"
   ],
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json",

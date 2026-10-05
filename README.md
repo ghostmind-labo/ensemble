@@ -779,6 +779,8 @@ npm run check     -- <file>                 # can it run HERE?     — reads the
 npm run calibrate -- <file> cases.jsonl     # score its decisions  — ~$0.00002 a case
 npx ensemble run  <file> "goal" --budget 0.05     # asks you at a terminal; pauses (exit 3) without one
 npx ensemble resume <file> paused.json --answer ok=no --by dana
+npx ensemble serve mcp <file...>                  # runners as MCP tools: stdio, or --port for HTTP
+npx ensemble serve a2a <file> --port 4320         # one runner as an A2A agent
 ```
 
 Data goes to stdout so it can be piped; commentary goes to stderr.
@@ -919,6 +921,36 @@ package and ensemble does not depend on it.
 
 ---
 
+## Called from anywhere
+
+A runner is a function. The same runner, unchanged, is also reachable three other ways:
+
+| Way in | How |
+|---|---|
+| A function | `await triage({ goal })` |
+| The CLI | `npx ensemble run triage.mts "goal"` |
+| An MCP tool | `npx ensemble serve mcp triage.mts`, or `mcpTools([triage]).handler` in your server |
+| An A2A agent | `npx ensemble serve a2a triage.mts`, or `a2aAgent(triage).handler` in your server |
+
+```ts
+import express from "express";
+import { mcpTools } from "@ghostmind-dev/ensemble/mcp";
+import { a2aAgent } from "@ghostmind-dev/ensemble/a2a";
+import triage from "./triage.mts";
+
+const app = express();
+app.use("/mcp", mcpTools([triage], { token: process.env.MCP_TOKEN, budget: 0.05 }).handler);
+app.use("/agents/triage", a2aAgent(triage).handler);
+```
+
+Called plainly, a run is one input and one output. Served, the caller can also
+watch each node as it starts and ends, answer a `by: "human"` question, and stop
+the run. The runner does not know which way it was called, and the two serving
+entry points are never loaded unless you import them. See
+[runners as MCP tools](docs/serve-mcp.md) and [a runner as an A2A agent](docs/serve-a2a.md).
+
+---
+
 ## Jagged edges
 
 TypeSafe [publishes Jev's known failure modes](https://docs.typesafe.ai/model-jaggedness/jev-1.13).
@@ -941,8 +973,9 @@ They are design constraints, and several are enforced here:
 
 No prompts of its own, no built-in agent loop, no vendor SDKs *in the package* —
 your handlers may use any of them. Skills and MCP are here as choices and single
-calls, never a model picking its own next tool. No server, no browser viewer, no
-mermaid or markdown exporter. No variable-width fan-out (that is a handler's
+calls, never a model picking its own next tool. No server in the core (serving
+is two opt-in entry points, below), no browser viewer, no mermaid or markdown
+exporter. No variable-width fan-out (that is a handler's
 job), no replay.
 
 Those are not oversights — they were removed. Keeping them would have made this a
@@ -989,6 +1022,7 @@ This README is the overview. The rest is markdown in this repository.
 | [Agents](docs/agents.md) | The four ways to hand a step to an agent, and which to choose |
 | [A2A](docs/agents-a2a.md) · [ACP](docs/agents-acp.md) · [MCP](docs/agents-mcp.md) · [in-process](docs/agent.md) | Each way in detail |
 | [Build your own agent](docs/agents-build.md) | What an agent must do per protocol, with a minimal one for each |
+| [Serve as MCP tools](docs/serve-mcp.md) · [as an A2A agent](docs/serve-a2a.md) | Making a runner callable by Claude, an IDE or another agent |
 
 ---
 

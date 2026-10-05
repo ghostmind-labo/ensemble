@@ -1,4 +1,4 @@
-// A runner served as an A2A agent (a2a/serve.mts), against the library's own
+// A runner served as an A2A agent (src/a2a-serve.ts), against the library's own
 // A2A client and against the wire: the card, a streamed run with one update per
 // node, a pause the caller answers, an answer that does not fit, cancel, a
 // token, a budget, and the handler mounted the way a framework would mount it.
@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { a2aAgent, serveRunner, type ServeOptions } from "../a2a/serve.mts";
+import { a2aAgent, serveRunner, type ServeOptions } from "../src/a2a-serve.ts";
 import { AgentError, agentCard, choice, noul, runner, sendA2a, type A2aAgentSpec } from "../src/index.ts";
 
 type Json = Record<string, any>;

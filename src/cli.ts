@@ -23,6 +23,8 @@ import { money, reporter } from "./report.ts";
 import { loadSkills, validateSkill } from "./skills.ts";
 import { describeServer, isRunnable, missingEnv, preflight, searchAgents, searchServers, searchSkills } from "./registry.ts";
 import { agentCard } from "./a2a.ts";
+import { serveRunner } from "./a2a-serve.ts";
+import { mcpTools, serveTools } from "./mcp-serve.ts";
 import { describeAgent } from "./agent.ts";
 import { isRemote, type RemoteServerSpec } from "./mcp.ts";
 import { authMode, fileTokenStore, login, loginStatus, logout, safeUrl } from "./mcp-auth.ts";
@@ -76,6 +78,11 @@ Usage
   ensemble mcp logout <server> [file] Revoke and forget its tokens.
   ensemble mcp status [file]        Remote servers, how each authenticates, and
                                     whether it is logged in. Never a secret.
+  ensemble serve mcp <file...>      Serve runners as MCP tools: over stdio, or
+                                    with --port over HTTP at /mcp. One runner
+                                    is one tool. Free until a tool is called.
+  ensemble serve a2a <file>         Serve one runner as an A2A agent (default
+                                    port 4320). Free until a task is sent.
   ensemble version
 
 Options
@@ -90,6 +97,13 @@ Options
       --url <url>    mcp: the server's url, when no runner file names it
       --header k=v   mcp: a header the server needs even to log in (repeatable)
       --device       mcp login: the device flow, for a machine with no browser
+      --port <n>     serve: the port (mcp: HTTP instead of stdio)
+      --host <host>  serve: the interface to bind (default 127.0.0.1)
+      --token <t>    serve: require "Authorization: Bearer <t>"
+                     (or MCP_TOKEN / A2A_TOKEN)
+      --secret <s>   serve mcp: the key paused runs are sealed with (or
+                     MCP_SECRET); without it a restart forgets them
+      --public-url <url> serve a2a: the address callers reach it at
 
 The file must default-export a runner(). Scenes are .mts, loaded by Node's own
 type stripping — Node 22.18 or newer.
@@ -369,6 +383,11 @@ async function main(): Promise<void> {
       url: { type: "string" },
       header: { type: "string", multiple: true },
       device: { type: "boolean", default: false },
+      port: { type: "string" },
+      host: { type: "string" },
+      token: { type: "string" },
+      secret: { type: "string" },
+      "public-url": { type: "string" },
     },
   });
 
@@ -687,8 +706,54 @@ async function main(): Promise<void> {
       return;
     }
 
+    case "serve": {
+      const budget = num(values.budget);
+      const shared = { ...(budget !== undefined ? { budget } : {}), ...(values.host ? { host: values.host } : {}) };
+      if (file === "mcp") {
+        if (!rest.length) return die("no file given — ensemble serve mcp <file.mts> [more files]");
+        // On stdio, stdout carries protocol messages only: whatever a handler logs goes to stderr.
+        if (!values.port) console.log = console.info = console.debug = (...args: unknown[]) => console.error(...args);
+        const runners: Runner[] = [];
+        for (const path of rest) runners.push(await load(path));
+        const token = values.token ?? process.env["MCP_TOKEN"];
+        const secret = values.secret ?? process.env["MCP_SECRET"];
+        const options = { ...shared, ...(token ? { token } : {}), ...(secret ? { secret } : {}) };
+        const names = runners.map((runner) => runner.spec.name).join(", ");
+        try {
+          if (values.port) {
+            const served = await serveTools(runners, { ...options, port: num(values.port)! });
+            process.stderr.write(`${names}: MCP tools at ${served.url}\n`);
+          } else {
+            process.stderr.write(`${names}: MCP tools on stdio\n`);
+            await mcpTools(runners, options).stdio();
+          }
+        } catch (error) {
+          die((error as Error).message);
+        }
+        return;
+      }
+      if (file === "a2a") {
+        const runner = await load(rest[0]);
+        if (rest.length > 1) return die("serve a2a takes one runner: an agent is one runner. Start another on a second port, or mount several with a2aAgent() in your own server");
+        const token = values.token ?? process.env["A2A_TOKEN"];
+        try {
+          const served = await serveRunner(runner, {
+            ...shared,
+            ...(values.port ? { port: num(values.port)! } : {}),
+            ...(token ? { token } : {}),
+            ...(values["public-url"] ? { publicUrl: values["public-url"] } : {}),
+          });
+          process.stderr.write(`${runner.spec.name} is an A2A agent at ${served.url} (card: ${served.url}/.well-known/agent-card.json)\n`);
+        } catch (error) {
+          die((error as Error).message);
+        }
+        return;
+      }
+      return die(`unknown serve target "${file ?? ""}" — try: serve mcp <file...>, serve a2a <file>`);
+    }
+
     default:
-      die(`unknown command "${command}" — try: validate, graph, run, resume, calibrate, check, skills, servers, agents, mcp, version`);
+      die(`unknown command "${command}" — try: validate, graph, run, resume, calibrate, check, skills, servers, agents, mcp, serve, version`);
   }
 }
 
