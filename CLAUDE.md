@@ -20,14 +20,14 @@ A vendor-exclusive feature belongs in a user's own `work` handler, which is
 exactly what that seam is for.
 
 It still holds no prompts of its own, runs no tool loop, ships no skills,
-serves no HTTP and authenticates nobody, and draws nothing. The two connectors
+serves no HTTP beyond one read-only local page and authenticates nobody. The two connectors
 are request handlers for somebody else's server (see **Reaching a runner from
 outside**). Those were removed on purpose; a change that adds one
 back is the change to question.
 
 ## Project map
 
-Twenty-three files, and each one has a single job.
+Twenty-six files, and each one has a single job.
 
 - `src/questions.ts` — `choice` / `score` / `noul`, their answer types, and the API limits enforced at authoring time
 - `src/jev.ts` — the decider: one `fetch` to OpenRouter's `POST /api/v1/systemone`, plus the `Decider` seam
@@ -50,8 +50,9 @@ Twenty-three files, and each one has a single job.
 - `src/live.ts` — a run in progress, where another process can see it and stop it: `tracked`, `liveRuns`, `stopRun`
 - `src/a2a-serve.ts` — the A2A connector: a runner as an agent, as a handler for your server. A separate entry point
 - `src/mcp-serve.ts` — the MCP connector: runners as tools, over stdio or as a handler. A separate entry point
+- `src/view.ts` and `src/view-page.ts` — the one viewer: a read-only local page over the runs. See the viewer rule below
 - `src/runner.ts` — ties them into a callable; `src/index.ts` — the public surface
-- `src/cli.ts` — `validate` / `graph` / `run` / `calibrate` / `check` / `skills` / `servers` / `mcp login·logout·status` / `status` / `stop` / `serve mcp`
+- `src/cli.ts` — `validate` / `graph` / `run` / `calibrate` / `check` / `skills` / `servers` / `mcp login·logout·status` / `status` / `stop` / `view` / `serve mcp`
 
 `examples/` — ten runnable runners (`10-delegate` hands a task to an external agent over A2A, ACP or MCP, with three toy agents under `agents/` that the tests run as real processes), each with a header comment saying what it
 demonstrates. `06-watch` is a watcher runner that also supervises `01-triage`
@@ -122,11 +123,6 @@ locally and by MCP when hosted), `ensemble-build` (use case → validated runner
 with `scripts/dryrun.mts`, a $0 executor), `ensemble-questions` (question
 design), `ensemble-runs` (reading and tuning runs, with `scripts/summarize.mts`)
 and `ensemble-serve` (hosting the connectors in your own server).
-
-The viewer is a separate open package, `@ghostmind-dev/ensemble-view`
-(`/Volumes/Projects/labo/ensemble-view`): a read-only page over `.ensemble/runs`
-that reads `run.json` and `graph.json` and never imports a runner. Nothing here
-may depend on it, and it stays out of this repo (see the viewer rule below).
 
 The skills present ensemble as a **structure** (a graph, a shared state with a proven
 data flow, and a run record), not as a closed toolbox. They install it as a library
@@ -256,15 +252,26 @@ Error messages name the fix. Keep it that way — `inputs: ["…"]` in the messa
 is the reason the check is useful rather than annoying.
 </important>
 
-<important if="you are tempted to add live rendering, a TUI, a viewer, or a report">
+<important if="you are tempted to add live rendering, a TUI, a viewer, a dashboard, or a report">
 
-Don't. A browser viewer, an SSE server and a mermaid/markdown exporter were all
-removed from this repo in the v2 rewrite, and re-adding one is the exact
-regression to avoid. Even the docs site lives in the private repo, and it renders markdown,
-never a run, a graph or a live event stream. The seam is `RunEvent` (three events) and the two JSON
-documents; anything visual consumes those and lives outside this package.
-`src/report.ts` is the one shipped consumer, and it stays a single line rewritten
-in place, not a screen.
+There is exactly one viewer, and its limits are the point. `ensemble view` (`src/view.ts` plus the page in
+`src/view-page.ts`) was added on the owner's decision so the local loop ends with something to look at: write, check,
+run, look. It replaced a separate React package (`ensemble-view`), which was built first and retired.
+
+It stays small because of these rules. Break one and it has become the product it is not:
+
+- **One static page, no dependency, no build step.** Plain HTML, CSS and JavaScript in a string that `tsc` ships. No
+  framework, no bundler, no asset files. If it needs a library, the feature belongs in the hosted product.
+- **Read-only.** It never starts, answers, edits or deletes anything. A paused run shows the command that answers it.
+- **This machine only** by default (`127.0.0.1`): a run record holds whatever the run was given and wrote.
+- **It loads no runner.** It reads `run.json`, `graph.json` and the live files, so it runs none of the user's code.
+- **Everything from a run goes on the page as text, never as markup.** A record holds whatever a model wrote.
+
+Accounts, sharing, answering a pause from a browser, analytics and anything richer live in the private repo's UI.
+A browser viewer, an SSE server and a mermaid/markdown exporter were removed in the v2 rewrite, and growing this page
+back into one of those is the regression to avoid. The owner's expectation is that almost all querying and
+maintenance is done by an AI through the CLI's JSON and the skills, so the page serves a person's glance and nothing
+more; `src/report.ts` stays a single line rewritten in place, not a screen.
 </important>
 
 <important if="you are about to state a model id, a price, a capability, or how Jev behaves">

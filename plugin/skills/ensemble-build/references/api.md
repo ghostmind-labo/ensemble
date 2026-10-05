@@ -554,13 +554,15 @@ a two-argument decider is still a valid `Decider`.
 | `supervise(runner, opts)` | Run a runner as a long-lived loop. See §10 |
 
 CLI (through `package.json` scripts, never global):
-`ensemble validate | graph | run | resume <file> <paused.json> | calibrate <file> <cases> | check | skills [q] [--remote] | servers [q] | agents [q] | agents card <url> | agents list <file> | mcp login·logout·status | status [id] | stop <id> | serve mcp <file...> | version`.
+`ensemble validate | graph | run | resume <file> <paused.json> | calibrate <file> <cases> | check | skills [q] [--remote] | servers [q] | agents [q] | agents card <url> | agents list <file> | mcp login·logout·status | status [id] | stop <id> | view [project] | serve mcp <file...> | version`.
 `status` lists the runs live in this folder and the last ten recorded;
 `status <id>` prints one as JSON (a live one: `running`, `steps`, `state`,
 `cost`); `--json` gives the whole picture as data. `stop <id>` cancels a live
 run, which writes its record with status `cancelled`. Both see any tracked
 run, whether `ensemble run` started it or a script calling
 `tracked(runner)(inputs)`. Ctrl-C on `ensemble run` cancels the same way.
+`view [project] [--port 4400] [--host 127.0.0.1]` serves one read-only page
+over the runs and live runs of a project; it loads no runner.
 `serve mcp` speaks MCP over stdio and takes `--budget`, `--secret` and
 `--grace <seconds>`. Over HTTP, and for A2A, mount the connector in your own
 server: `mcpTools([...]).handler`, `a2aAgent(runner).handler`.

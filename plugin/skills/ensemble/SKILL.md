@@ -262,7 +262,8 @@ Answer on someone's behalf only when they asked you to decide; otherwise show th
 
 To explain why a run took a branch, read the decide step before it: its answer and confidence, then the edge it took.
 Do not re-run to find out. For patterns across many runs, and for tuning a threshold, use the `ensemble-runs` skill.
-To look at runs in a browser, `npx @ghostmind-dev/ensemble-view` from the project folder.
+To show a person, `npx ensemble view` serves one read-only page of the runs here (finished and live) at
+http://127.0.0.1:4400. You do not need it yourself: everything on that page is in `status --json` and `run.json`.
 
 ## 8. Change a runner
 

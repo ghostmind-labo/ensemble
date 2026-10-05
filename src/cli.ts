@@ -25,6 +25,7 @@ import { describeServer, isRunnable, missingEnv, preflight, searchAgents, search
 import { agentCard } from "./a2a.ts";
 import { mcpTools } from "./mcp-serve.ts";
 import { liveRuns, stopRun, tracked } from "./live.ts";
+import { view } from "./view.ts";
 import { describeAgent } from "./agent.ts";
 import { isRemote, type RemoteServerSpec } from "./mcp.ts";
 import { authMode, fileTokenStore, login, loginStatus, logout, safeUrl } from "./mcp-auth.ts";
@@ -83,6 +84,9 @@ Usage
                                     however it was started. --json for data.
   ensemble stop <id>                Cancel a live run. It stops cleanly and its
                                     record is kept.
+  ensemble view [project]           Look at the runs in a browser: the graph, the
+                                    path each run took, live runs as they go.
+                                    Read-only, this machine only, free.
   ensemble serve mcp <file...>      Offer runners as MCP tools over stdio, for an
                                     assistant on this machine: run, start, watch,
                                     answer and cancel. Free until a tool is called.
@@ -100,6 +104,8 @@ Options
       --url <url>    mcp: the server's url, when no runner file names it
       --header k=v   mcp: a header the server needs even to log in (repeatable)
       --device       mcp login: the device flow, for a machine with no browser
+      --port <n>     view: the port (default 4400)
+      --host <host>  view: the interface to bind (default 127.0.0.1)
       --secret <s>   serve mcp: the key paused runs are sealed with (or
                      MCP_SECRET); without it a restart forgets them
       --grace <s>    serve mcp: on SIGTERM or Ctrl-C, how long runs in flight
@@ -418,6 +424,8 @@ async function main(): Promise<void> {
       header: { type: "string", multiple: true },
       device: { type: "boolean", default: false },
       secret: { type: "string" },
+      port: { type: "string" },
+      host: { type: "string" },
       grace: { type: "string" },
     },
   });
@@ -775,6 +783,17 @@ async function main(): Promise<void> {
       return;
     }
 
+    case "view": {
+      try {
+        const port = num(values.port);
+        const viewing = await view({ ...(file ? { project: file } : {}), ...(port !== undefined ? { port } : {}), ...(values.host ? { host: values.host } : {}) });
+        process.stderr.write(`ensemble view: ${viewing.url}\n  reading ${viewing.dir}${existsSync(viewing.dir) ? "" : "  (not there yet: it appears after the first run)"}\n`);
+      } catch (error) {
+        die((error as NodeJS.ErrnoException).code === "EADDRINUSE" ? `port ${values.port ?? 4400} is in use — pass --port <another>` : (error as Error).message);
+      }
+      return;
+    }
+
     case "status": {
       const live = liveRuns();
       if (file) {
@@ -825,7 +844,7 @@ async function main(): Promise<void> {
     }
 
     default:
-      die(`unknown command "${command}" — try: validate, graph, run, resume, status, stop, calibrate, check, skills, servers, agents, mcp, serve, version`);
+      die(`unknown command "${command}" — try: validate, graph, run, resume, status, stop, view, calibrate, check, skills, servers, agents, mcp, serve, version`);
   }
 }
 

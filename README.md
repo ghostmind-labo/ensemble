@@ -781,6 +781,7 @@ npx ensemble run  <file> "goal" --budget 0.05     # asks you at a terminal; paus
 npx ensemble resume <file> paused.json --answer ok=no --by dana
 npx ensemble status                               # what is running here, and what has run
 npx ensemble stop <id>                            # cancel a live run; its record is kept
+npx ensemble view                                 # look at the runs in a browser, read-only
 npx ensemble serve mcp <file...>                  # runners as MCP tools over stdio, for a local assistant
 ```
 
@@ -969,6 +970,19 @@ import { tracked } from "@ghostmind-dev/ensemble";
 const { result } = await tracked(triage)({ goal });
 ```
 
+### Looking at runs
+
+```sh
+npx ensemble view          # http://127.0.0.1:4400
+```
+
+One page, built into the package: the runs here, each run's path through its graph, every step's answers with their
+confidence, and live runs as they go. It is read-only, loads no runner, and listens on this machine only. A project
+with several runners needs no setup: runs are grouped by runner, and each distinct graph counts as a version.
+
+It is deliberately small. Most reading of runs is done by an agent through the CLI's JSON (`status --json`,
+`run.json`); the page is for a person who wants to see one at a glance.
+
 ---
 
 ## Jagged edges
@@ -993,9 +1007,9 @@ They are design constraints, and several are enforced here:
 
 No prompts of its own, no built-in agent loop, no vendor SDKs *in the package* —
 your handlers may use any of them. Skills and MCP are here as choices and single
-calls, never a model picking its own next tool. No server in the core (serving
-is two opt-in entry points, below), no browser viewer, no mermaid or markdown
-exporter. No variable-width fan-out (that is a handler's
+calls, never a model picking its own next tool. No server and no sign-in (the
+two connectors below are handlers for your own server), no dashboard beyond one
+read-only local page, no mermaid or markdown exporter. No variable-width fan-out (that is a handler's
 job), no replay.
 
 Those are not oversights — they were removed. Keeping them would have made this a
