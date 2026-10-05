@@ -19,69 +19,105 @@ export const PAGE = String.raw`<!doctype html>
 <meta name="color-scheme" content="light dark">
 <title>ensemble · runs</title>
 <style>
-:root{--bg:#f6f5f1;--panel:#fff;--line:#dedbd2;--ink:#1c1b18;--soft:#6b675e;--accent:#1f5c47;--warn:#a15c00;--bad:#a8261b;--decide:#b7791f;--model:#6b4fbb;--work:#2f2e2a;--code:#6b675e;--mcp:#0b6e99;--agent:#a23b72;--took:#1f5c47;--mono:ui-monospace,SFMono-Regular,Menlo,monospace}
-@media (prefers-color-scheme:dark){:root{--bg:#141413;--panel:#1d1d1b;--line:#33322e;--ink:#ecebe6;--soft:#9b978c;--accent:#6fcfa9;--warn:#e0a44a;--bad:#f08a7e;--decide:#e0a44a;--model:#b29cf2;--work:#ecebe6;--code:#9b978c;--mcp:#6cc3e6;--agent:#e58ab8;--took:#6fcfa9}}
+:root{
+  --bg:#F7F6F3;--panel:#FFFFFF;--line:#EAEAEA;--ink:#111111;--body:#2F3437;--soft:#787774;--edge:#CFCDC7;
+  --red-bg:#FDEBEC;--red:#9F2F2D;--blue-bg:#E1F3FE;--blue:#1F6C9F;--green-bg:#EDF3EC;--green:#346538;--yellow-bg:#FBF3DB;--yellow:#956400;--plain-bg:#F1F0EC;--plain:#5F5E5B;
+  --sans:"SF Pro Display","Geist Sans","Helvetica Neue","Switzer",system-ui,sans-serif;
+  --serif:"Lyon Text","Newsreader","Instrument Serif","Iowan Old Style","Palatino Linotype",Georgia,serif;
+  --mono:"Geist Mono","SF Mono","JetBrains Mono",ui-monospace,Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#171614;--panel:#1F1E1B;--line:#33312D;--ink:#F2F1EC;--body:#DAD8D2;--soft:#9A978F;--edge:#4A4843;
+  --red-bg:#3A2422;--red:#F0A8A2;--blue-bg:#1E2F3B;--blue:#9CCBEA;--green-bg:#233024;--green:#A9CFA9;--yellow-bg:#3A3020;--yellow:#E6C77A;--plain-bg:#2A2926;--plain:#B5B2AA;
+}}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+body{margin:0;background:var(--bg);color:var(--body);font:14px/1.6 var(--sans);-webkit-font-smoothing:antialiased}
 a{color:inherit;text-decoration:none}
-header{display:flex;gap:20px;align-items:center;padding:12px 20px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:2}
-header b{font-size:15px}
-header nav a{padding:5px 10px;border-radius:6px;color:var(--soft)}
-header nav a.on{background:var(--panel);color:var(--ink);border:1px solid var(--line)}
-header .where{margin-left:auto;color:var(--soft);font:12px var(--mono);max-width:45vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-main{max-width:1080px;margin:0 auto;padding:20px 16px 60px}
-h1{font-size:22px;margin:4px 0 14px}
-h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--soft);margin:0 0 10px}
-.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:0 0 14px;overflow:hidden}
-.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:0 0 14px}
-.tile{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 14px}
-.tile small{display:block;color:var(--soft)}
-.tile b{font-size:19px;font-variant-numeric:tabular-nums}
+header{display:flex;gap:24px;align-items:center;padding:14px 28px;border-bottom:1px solid var(--line);position:sticky;top:0;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(8px);z-index:2}
+header b{font:600 17px/1 var(--serif);letter-spacing:-.02em;color:var(--ink)}
+header nav{display:flex;gap:4px}
+header nav a{padding:4px 10px;border-radius:6px;color:var(--soft);transition:color .2s}
+header nav a:hover{color:var(--ink)}
+header nav a.on{background:var(--panel);color:var(--ink);box-shadow:inset 0 0 0 1px var(--line)}
+header .where{margin-left:auto;color:var(--soft);font:11px var(--mono);max-width:45vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+main{max-width:1040px;margin:0 auto;padding:40px 24px 96px}
+h1{font:500 34px/1.1 var(--serif);letter-spacing:-.03em;color:var(--ink);margin:0 0 24px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+h2{font:500 11px/1 var(--sans);text-transform:uppercase;letter-spacing:.08em;color:var(--soft);margin:0 0 16px}
+p{margin:0 0 20px;max-width:64ch}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:24px;margin:0 0 16px;overflow:hidden}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin:0 0 16px}
+.tile{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 20px}
+.tile small{display:block;color:var(--soft);font-size:12px;margin-bottom:2px}
+.tile b{font:500 22px/1.2 var(--sans);color:var(--ink);font-variant-numeric:tabular-nums;letter-spacing:-.01em}
 table{width:100%;border-collapse:collapse}
-th{text-align:left;font-weight:500;color:var(--soft);font-size:12px;padding:4px 8px}
-td{padding:7px 8px;border-top:1px solid var(--line);vertical-align:top}
+th{text-align:left;font-weight:500;color:var(--soft);font-size:12px;padding:0 10px 8px}
+td{padding:10px;border-top:1px solid var(--line);vertical-align:top}
 tr.go{cursor:pointer}
-tr.go:hover td{background:color-mix(in srgb,var(--ink) 4%,transparent)}
+tr.go td{transition:background .2s}
+tr.go:hover td{background:color-mix(in srgb,var(--ink) 3%,transparent)}
 .num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
 .muted{color:var(--soft)}
 .mono{font-family:var(--mono);font-size:12px}
-.pill{display:inline-block;padding:1px 8px;border-radius:99px;border:1px solid currentColor;font-size:12px;white-space:nowrap}
-.pill.ok{color:var(--accent)}.pill.bad{color:var(--bad)}.pill.wait{color:var(--warn)}.pill.live{color:var(--accent)}
-.pill.live::before{content:"";display:inline-block;width:7px;height:7px;border-radius:50%;background:currentColor;margin-right:6px;animation:pulse 1.2s infinite}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:2px 9px;border-radius:9999px;font:500 10px/1.6 var(--sans);text-transform:uppercase;letter-spacing:.05em;white-space:nowrap;background:var(--plain-bg);color:var(--plain)}
+.pill.ok{background:var(--green-bg);color:var(--green)}.pill.bad{background:var(--red-bg);color:var(--red)}.pill.wait{background:var(--yellow-bg);color:var(--yellow)}.pill.live{background:var(--blue-bg);color:var(--blue)}
+.pill.live::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;animation:pulse 1.4s ease-in-out infinite}
 @keyframes pulse{50%{opacity:.25}}
-@media (prefers-reduced-motion:reduce){.pill.live::before,.node.now rect{animation:none}}
-pre{margin:0;font:12px/1.5 var(--mono);white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto}
-.kv{display:grid;grid-template-columns:minmax(90px,max-content) 1fr;gap:6px 12px;align-items:start}
-.kv > span{font:12px var(--mono);color:var(--soft);padding-top:1px}
-.step{border-top:1px solid var(--line);padding:10px 0}
+@media (prefers-reduced-motion:reduce){.pill.live::before,.node.now .box{animation:none}}
+pre{margin:0;font:12px/1.6 var(--mono);white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto;color:var(--body)}
+.kv{display:grid;grid-template-columns:minmax(90px,max-content) 1fr;gap:8px 16px;align-items:start}
+.kv > span{font:12px/1.6 var(--mono);color:var(--soft)}
+.step{border-top:1px solid var(--line);padding:16px 0}
 .step:first-of-type{border-top:0;padding-top:0}
-.step .head{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
-.step .head b{font-family:var(--mono)}
-.step .head .right{margin-left:auto;color:var(--soft);font-variant-numeric:tabular-nums;white-space:nowrap}
-.kind{font:11px var(--mono);text-transform:uppercase;letter-spacing:.04em}
-.k-decide{color:var(--decide)}.k-model{color:var(--model)}.k-work{color:var(--work)}.k-code{color:var(--code)}.k-mcp{color:var(--mcp)}.k-agent{color:var(--agent)}
-.answer{margin:8px 0 0}
+.step:last-child{padding-bottom:0}
+.step .head{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.step .head b{font:500 13px var(--mono);color:var(--ink)}
+.step .head .right{margin-left:auto;color:var(--soft);font-variant-numeric:tabular-nums;white-space:nowrap;font-size:12px}
+.kind{display:inline-block;padding:1px 7px;border-radius:9999px;font:500 9.5px/1.6 var(--sans);text-transform:uppercase;letter-spacing:.06em;background:var(--plain-bg);color:var(--plain)}
+.k-decide{background:var(--yellow-bg);color:var(--yellow)}.k-model{background:var(--blue-bg);color:var(--blue)}.k-mcp,.k-agent{background:var(--green-bg);color:var(--green)}
+.answer{margin:10px 0 0}
+.answer b{color:var(--ink)}
+.bar{display:grid;grid-template-columns:minmax(120px,38%) 1fr 44px;gap:10px;align-items:center;font-size:12px;color:var(--soft)}
 .bar > span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.bar{display:grid;grid-template-columns:minmax(120px,38%) 1fr 44px;gap:8px;align-items:center;font-size:12px;color:var(--soft)}
-.bar i{display:block;height:6px;border-radius:3px;background:var(--line);overflow:hidden}
-.bar i u{display:block;height:100%;background:var(--decide)}
-.error{color:var(--bad)}
-.graph{overflow:auto}
-svg text{font:12px var(--mono);fill:var(--ink)}
-svg .sub{font-size:10px;fill:var(--soft)}
-svg .edge{fill:none;stroke:var(--line);stroke-width:1.5}
-svg .edge.took{stroke:var(--took);stroke-width:2.5}
-svg .edge.gate{stroke-dasharray:5 4}
-svg .lab{font-size:10px;fill:var(--soft)}
-svg .lab.took{fill:var(--took)}
-.node rect{fill:var(--panel);stroke:var(--line);stroke-width:1.5}
-.node.seen rect{stroke:var(--took);stroke-width:2.5}
-.node.now rect{stroke:var(--warn);stroke-width:2.5;animation:pulse 1.2s infinite}
-.node.failed rect{stroke:var(--bad);stroke-width:2.5}
-.node{cursor:pointer}
-.node.sel rect{fill:color-mix(in srgb,var(--accent) 12%,var(--panel))}
-details summary{cursor:pointer;color:var(--soft)}
-.empty{color:var(--soft);padding:6px 0}
+.bar i{display:block;height:4px;border-radius:2px;background:var(--line);overflow:hidden}
+.bar i u{display:block;height:100%;background:var(--ink)}
+.error{color:var(--red)}
+.card.error{background:var(--red-bg);border-color:transparent}
+details summary{cursor:pointer;color:var(--soft);font-size:12px}
+.empty{color:var(--soft)}
+
+/* the graph: a canvas you can zoom, pan and rearrange */
+.canvas{position:relative;border:1px solid var(--line);border-radius:8px;overflow:hidden;background-color:var(--bg);background-image:radial-gradient(circle,var(--edge) .7px,transparent .8px);background-size:18px 18px}
+.canvas svg{display:block;width:100%;touch-action:none;cursor:grab;user-select:none}
+.canvas svg.panning{cursor:grabbing}
+.tools{position:absolute;top:10px;right:10px;display:flex;gap:4px;align-items:center}
+.tools button{font:500 12px/1 var(--mono);min-width:28px;height:26px;padding:0 8px;border:1px solid var(--line);border-radius:5px;background:var(--panel);color:var(--body);cursor:pointer;transition:transform .15s,border-color .2s}
+.tools button:hover{border-color:var(--soft)}
+.tools button:active{transform:scale(.96)}
+.tools output{font:11px var(--mono);color:var(--soft);min-width:38px;text-align:right;margin-right:4px}
+.hint{display:flex;gap:14px;flex-wrap:wrap;margin-top:12px;color:var(--soft);font-size:12px}
+kbd{font:11px var(--mono);border:1px solid var(--line);border-radius:4px;background:var(--bg);padding:0 5px;color:var(--body)}
+svg text{font:500 13px var(--sans);fill:var(--ink)}
+svg .sub{font:11px var(--mono);fill:var(--soft)}
+svg .tag{font:500 9px var(--sans);letter-spacing:.06em;text-transform:uppercase}
+svg .edge{fill:none;stroke:var(--edge);stroke-width:1.25}
+svg .edge.took{stroke:var(--ink);stroke-width:1.75}
+svg .edge.gate{stroke-dasharray:4 4}
+svg .chip{fill:var(--panel);stroke:var(--line)}
+svg .lab{font:10.5px var(--mono);fill:var(--soft)}
+svg .lab.took{fill:var(--ink)}
+.node{cursor:grab}
+.node .box{fill:var(--panel);stroke:var(--line);stroke-width:1}
+.node.seen .box{stroke:var(--ink);stroke-width:1.5}
+.node.now .box{fill:var(--yellow-bg);stroke:var(--yellow);stroke-width:1.5;animation:pulse 1.4s ease-in-out infinite}
+.node.failed .box{fill:var(--red-bg);stroke:var(--red);stroke-width:1.5}
+.node.sel .box{stroke:var(--blue);stroke-width:2}
+.node.dim{opacity:.5}
+.node:focus{outline:none}
+.node:focus-visible .box{stroke:var(--blue);stroke-width:2}
+.t-decide{fill:var(--yellow-bg)}.t-decide + text{fill:var(--yellow)}
+.t-model{fill:var(--blue-bg)}.t-model + text{fill:var(--blue)}
+.t-mcp,.t-agent{fill:var(--green-bg)}.t-mcp + text,.t-agent + text{fill:var(--green)}
+.t-work,.t-code{fill:var(--plain-bg)}.t-work + text,.t-code + text{fill:var(--plain)}
 </style>
 </head>
 <body>
@@ -204,31 +240,48 @@ function runsTable(rows, withRunner) {
   })));
 }
 
-/* ── the graph: layers from the entry, the path a run took drawn over it ── */
+/* ── the graph: laid out in layers from the entry, then yours to zoom, pan and rearrange ── */
+var NODE_W = 190, NODE_H = 60;
+/** Where you left each graph: node positions (kept in this browser, per graph hash) and the view. */
+var layouts = {}, views = {};
+function savedLayout(hash) {
+  if (layouts[hash]) return layouts[hash];
+  try { layouts[hash] = JSON.parse(localStorage.getItem("ensemble.layout." + hash) || "{}"); } catch (error) { layouts[hash] = {}; }
+  return layouts[hash];
+}
+function keepLayout(hash) {
+  try { localStorage.setItem("ensemble.layout." + hash, JSON.stringify(layouts[hash])); } catch (error) { /* a private window: it lasts until the page closes */ }
+}
+function forgetLayout(hash) {
+  layouts[hash] = {};
+  try { localStorage.removeItem("ensemble.layout." + hash); } catch (error) { /* nothing was kept */ }
+}
 function edgeLabel(edge) {
-  if (edge.gate) return "gate: " + edge.gate;
-  if (edge.on) return edge.on.option !== undefined ? edge.on.question + "=" + edge.on.option : edge.on.question + " " + edge.on.op + " " + edge.on.value;
-  if (edge.when) return "when " + String(edge.when.source).replace(/^[^=]*=>\s*/, "").slice(0, 26);
+  if (edge.gate) return edge.gate;
+  if (edge.on) return edge.on.option !== undefined ? edge.on.question + " = " + edge.on.option : edge.on.question + " " + edge.on.op + " " + edge.on.value;
+  if (edge.when) return String(edge.when.source).replace(/^[^=]*=>\s*/, "").replace(/Number\(s\[?\.?"?(\w+)"?\]?\)/g, "$1").replace(/String\((\w+)\)/g, "$1").slice(0, 30);
   return "";
 }
-function drawGraph(graph, run, selected, onSelect) {
-  var W = 176, H = 44, GX = 34, GY = 62;
+/** Every edge the graph draws: its own, plus a decide node's gate and fallback. */
+function allEdges(graph) {
   var edges = graph.edges.map(function (e) { return Object.assign({}, e); });
   graph.nodes.forEach(function (node) {
     var decide = node.decide || {};
-    if (decide.gate) edges.push({ id: "gate:" + node.id, from: node.id, to: decide.gate.to, gate: decide.gate.on + " < " + decide.gate.min });
+    if (decide.gate) edges.push({ id: "gate:" + node.id, from: node.id, to: decide.gate.to, gate: decide.gate.on + " under " + decide.gate.min });
     if (decide.fallback) edges.push({ id: "fallback:" + node.id, from: node.id, to: decide.fallback, gate: "no answer" });
   });
-  var out = {};
+  return edges;
+}
+/** The starting positions: layers by longest path from the entry, loops left out of the count. */
+function autoLayout(graph, edges) {
+  var GX = 44, GY = 68, out = {};
   graph.nodes.forEach(function (node) { out[node.id] = []; });
   edges.forEach(function (edge) { if (out[edge.from] && out[edge.to]) out[edge.from].push(edge); });
-
-  // Loops go backwards: found by walking from the entry, and left out of the layering.
-  var state = {}, order = [];
+  var state = {}, order = [], back = {};
   (function walk(id) {
     state[id] = 1;
     out[id].forEach(function (edge) {
-      if (state[edge.to] === 1) edge.back = true;
+      if (state[edge.to] === 1) back[edge.id] = true;
       else if (!state[edge.to]) walk(edge.to);
     });
     state[id] = 2;
@@ -236,20 +289,63 @@ function drawGraph(graph, run, selected, onSelect) {
   })(graph.runner.entry in out ? graph.runner.entry : graph.nodes[0].id);
   graph.nodes.forEach(function (node) { if (!state[node.id]) order.push(node.id); });
   var layer = {};
-  order.forEach(function (id) { if (layer[id] === undefined) layer[id] = 0; out[id].forEach(function (edge) { if (!edge.back) layer[edge.to] = Math.max(layer[edge.to] || 0, layer[id] + 1); }); });
-
-  var rows = [];
+  order.forEach(function (id) {
+    if (layer[id] === undefined) layer[id] = 0;
+    out[id].forEach(function (edge) { if (!back[edge.id]) layer[edge.to] = Math.max(layer[edge.to] || 0, layer[id] + 1); });
+  });
+  var rows = [], pos = {};
   order.forEach(function (id) { (rows[layer[id]] = rows[layer[id]] || []).push(id); });
   var widest = Math.max.apply(null, rows.map(function (row) { return row.length; }));
-  // Room on the right for the edges routed round the side, and their labels.
-  var width = widest * (W + GX) + GX + 190, pos = {};
   rows.forEach(function (row, depth) {
-    var left = (width - 150 - (row.length * (W + GX) - GX)) / 2;
-    row.forEach(function (id, index) { pos[id] = { x: left + index * (W + GX), y: 24 + depth * (H + GY) }; });
+    var left = ((widest - row.length) * (NODE_W + GX)) / 2;
+    row.forEach(function (id, index) { pos[id] = { x: left + index * (NODE_W + GX), y: depth * (NODE_H + GY) }; });
   });
-  var height = 24 + rows.length * (H + GY);
+  return pos;
+}
+function cubic(p, t) {
+  var u = 1 - t;
+  return {
+    x: u * u * u * p[0] + 3 * u * u * t * p[2] + 3 * u * t * t * p[4] + t * t * t * p[6],
+    y: u * u * u * p[1] + 3 * u * u * t * p[3] + 3 * u * t * t * p[5] + t * t * t * p[7],
+  };
+}
+/** A curve from one node to another, chosen by where they sit, and bent round anything in between. */
+function routeEdge(a, b, others) {
+  var W = NODE_W, H = NODE_H, p;
+  var round = function () {
+    var side = Math.max(a.x, b.x) + W + 46;
+    return [a.x + W, a.y + H / 2, side, a.y + H / 2, side, b.y + H / 2, b.x + W, b.y + H / 2];
+  };
+  if (b.y >= a.y + H + 12) {
+    var mid = (a.y + H + b.y) / 2;
+    p = [a.x + W / 2, a.y + H, a.x + W / 2, mid, b.x + W / 2, mid, b.x + W / 2, b.y];
+  } else if (b.y + H + 12 <= a.y) {
+    if (Math.abs(b.x - a.x) < W * 0.8) return round();
+    // Up and across: leave from the side that faces the target, so it does not start where another edge arrives.
+    var sx = b.x > a.x ? a.x + W : a.x, lean = b.x > a.x ? 60 : -60;
+    p = [sx, a.y + H / 2, sx + lean, a.y + H / 2, b.x + W / 2, b.y + H + 60, b.x + W / 2, b.y + H];
+  } else if (b.x >= a.x) {
+    var across = (a.x + W + b.x) / 2;
+    p = [a.x + W, a.y + H / 2, across, a.y + H / 2, across, b.y + H / 2, b.x, b.y + H / 2];
+  } else {
+    var over = (b.x + W + a.x) / 2;
+    p = [a.x, a.y + H / 2, over, a.y + H / 2, over, b.y + H / 2, b.x + W, b.y + H / 2];
+  }
+  for (var t = 0.15; t < 0.9; t += 0.07) {
+    var at = cubic(p, t);
+    for (var i = 0; i < others.length; i++) {
+      var o = others[i];
+      if (at.x > o.x - 6 && at.x < o.x + W + 6 && at.y > o.y - 6 && at.y < o.y + H + 6) return round();
+    }
+  }
+  return p;
+}
+function graphCanvas(graph, run, selected, onSelect) {
+  var hash = graph.runner.hash, edges = allEdges(graph);
+  var auto = autoLayout(graph, edges), moved = savedLayout(hash), pos = {};
+  graph.nodes.forEach(function (node) { pos[node.id] = moved[node.id] ? { x: moved[node.id].x, y: moved[node.id].y } : auto[node.id]; });
 
-  var took = {}, seen = {}, failed = null;
+  var took = {}, seen = {}, failed = null, now = {};
   ((run && run.steps) || []).forEach(function (step) {
     seen[step.node] = true;
     if (step.error) failed = step.node;
@@ -257,53 +353,160 @@ function drawGraph(graph, run, selected, onSelect) {
     else if (step.took) took[step.took] = true;
     (step.forked || []).forEach(function (id) { took[id] = true; });
   });
-  var now = {};
   ((run && run.running) || []).forEach(function (id) { now[id] = true; });
 
-  var root = svg("svg", { width: width, height: height, viewBox: "0 0 " + width + " " + height, role: "img", "aria-label": "The graph of " + graph.runner.name });
-  // One arrowhead, drawn in whatever colour the edge it ends has.
-  root.appendChild(svg("defs", {}, svg("marker", { id: "arrow", viewBox: "0 0 10 10", refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: "auto-start-reverse" }, svg("path", { d: "M0 0L10 5L0 10z", fill: "context-stroke" }))));
-  edges.forEach(function (edge) {
-    var a = pos[edge.from], b = pos[edge.to];
-    if (!a || !b) return;
-    var d, lx, ly, anchor = "middle";
-    // An edge that goes back, or skips a layer, is routed round the side so it does not cross the nodes between.
-    if (edge.back || b.y <= a.y || layer[edge.to] - layer[edge.from] > 1) {
-      var side = Math.max(a.x, b.x) + W + 28;
-      d = "M" + (a.x + W) + " " + (a.y + H / 2) + " C" + side + " " + (a.y + H / 2) + " " + side + " " + (b.y + H / 2) + " " + (b.x + W) + " " + (b.y + H / 2);
-      lx = side - 14; ly = (a.y + b.y) / 2 + H / 2; anchor = "start";
+  function bounds() {
+    var xs = graph.nodes.map(function (n) { return pos[n.id].x; }), ys = graph.nodes.map(function (n) { return pos[n.id].y; });
+    return { x: Math.min.apply(null, xs), y: Math.min.apply(null, ys), w: Math.max.apply(null, xs) + NODE_W - Math.min.apply(null, xs), h: Math.max.apply(null, ys) + NODE_H - Math.min.apply(null, ys) };
+  }
+  var first = bounds();
+  var height = Math.max(340, Math.min(640, first.h + 120));
+  var root = svg("svg", { height: height, role: "img", "aria-label": "The graph of " + graph.runner.name + ". Drag a node to move it, drag the background to pan." });
+  root.appendChild(svg("defs", {}, svg("marker", { id: "arrow", viewBox: "0 0 10 10", refX: 9, refY: 5, markerWidth: 6.5, markerHeight: 6.5, orient: "auto-start-reverse" }, svg("path", { d: "M0 0.8L10 5L0 9.2z", fill: "context-stroke" }))));
+  var world = svg("g", {});
+  root.appendChild(world);
+  var readout = el("output", {}, "100%");
+  var view = views[hash];
+
+  function place() {
+    world.setAttribute("transform", "translate(" + view.tx + "," + view.ty + ") scale(" + view.k + ")");
+    readout.textContent = Math.round(view.k * 100) + "%";
+    views[hash] = view;
+  }
+  function fit() {
+    var box = bounds(), width = root.clientWidth || 900, pad = 56;
+    var k = Math.min(1, (width - pad * 2) / (box.w + 60), (height - pad * 2) / box.h);
+    k = Math.max(0.3, k);
+    view = { k: k, tx: (width - box.w * k) / 2 - box.x * k, ty: (height - box.h * k) / 2 - box.y * k };
+    place();
+  }
+  function zoomAt(factor, x, y) {
+    var k = Math.max(0.25, Math.min(2.5, view.k * factor));
+    view = { k: k, tx: x - ((x - view.tx) * k) / view.k, ty: y - ((y - view.ty) * k) / view.k };
+    place();
+  }
+
+  function paint() {
+    var kids = [];
+    edges.forEach(function (edge) {
+      var a = pos[edge.from], b = pos[edge.to];
+      if (!a || !b) return;
+      var others = graph.nodes.filter(function (n) { return n.id !== edge.from && n.id !== edge.to; }).map(function (n) { return pos[n.id]; });
+      var p = routeEdge(a, b, others);
+      var cls = "edge" + (took[edge.id] ? " took" : "") + (edge.gate ? " gate" : "");
+      kids.push(svg("path", { d: "M" + p[0] + " " + p[1] + " C" + p[2] + " " + p[3] + " " + p[4] + " " + p[5] + " " + p[6] + " " + p[7], class: cls, "marker-end": "url(#arrow)" }));
+      var text = edgeLabel(edge);
+      if (text) {
+        // Past the middle, towards where the edge arrives, so edges that fan out keep their labels apart.
+        var at = cubic(p, 0.6), w = text.length * 6.4 + 14;
+        kids.push(svg("rect", { x: at.x - w / 2, y: at.y - 9, width: w, height: 18, rx: 4, class: "chip" }));
+        kids.push(svg("text", { x: at.x, y: at.y + 3.5, "text-anchor": "middle", class: "lab" + (took[edge.id] ? " took" : "") }, text));
+      }
+    });
+    graph.nodes.forEach(function (node) {
+      var p = pos[node.id];
+      var stateClass = now[node.id] ? " now" : failed === node.id ? " failed" : seen[node.id] ? " seen" : run ? " dim" : "";
+      var person = node.kind === "decide" && node.decide.by === "human";
+      var tag = person ? "person" : node.kind;
+      var sub = node.kind === "decide" ? node.decide.questions.map(function (q) { return q.key; }).join(", ")
+        : node.kind === "model" ? (node.model.id || "from " + node.model.from)
+        : node.kind === "work" ? node.work.handler
+        : node.kind === "mcp" ? node.mcp.server + (node.mcp.tool ? " / " + node.mcp.tool : "")
+        : node.kind === "agent" ? node.agent.name
+        : "inline";
+      var tagWidth = tag.length * 6.1 + 12;
+      kids.push(svg("g", { class: "node" + stateClass + (selected === node.id ? " sel" : ""), transform: "translate(" + p.x + "," + p.y + ")", "data-id": node.id, tabindex: 0, role: "button", "aria-label": node.id + ", " + tag }, [
+        svg("rect", { class: "box", width: NODE_W, height: NODE_H, rx: 8 }),
+        svg("rect", { class: "t-" + node.kind, x: 10, y: 9, width: tagWidth, height: 15, rx: 7.5 }),
+        svg("text", { class: "tag", x: 10 + tagWidth / 2, y: 19.6, "text-anchor": "middle" }, tag),
+        svg("text", { x: 11, y: 40 }, (node.label || node.id).slice(0, 24)),
+        svg("text", { class: "sub", x: 11, y: 53 }, String(sub).length > 25 ? String(sub).slice(0, 24) + "…" : String(sub)),
+      ]));
+    });
+    world.replaceChildren.apply(world, kids);
+  }
+
+  /* One set of pointer handlers on the canvas: the nodes are redrawn as they move, so they cannot hold the pointer themselves. */
+  var grab = null;
+  root.addEventListener("pointerdown", function (event) {
+    if (event.button !== 0) return;
+    var target = event.target.closest ? event.target.closest("[data-id]") : null;
+    grab = { id: target ? target.getAttribute("data-id") : null, x: event.clientX, y: event.clientY, far: false };
+    if (grab.id) grab.from = { x: pos[grab.id].x, y: pos[grab.id].y };
+    else { grab.from = { x: view.tx, y: view.ty }; root.classList.add("panning"); }
+    root.setPointerCapture(event.pointerId);
+  });
+  root.addEventListener("pointermove", function (event) {
+    if (!grab) return;
+    var dx = event.clientX - grab.x, dy = event.clientY - grab.y;
+    if (!grab.far && Math.abs(dx) + Math.abs(dy) < 4) return;
+    grab.far = true;
+    if (grab.id) {
+      pos[grab.id] = { x: Math.round(grab.from.x + dx / view.k), y: Math.round(grab.from.y + dy / view.k) };
+      paint();
     } else {
-      var x1 = a.x + W / 2, y1 = a.y + H, x2 = b.x + W / 2, y2 = b.y, mid = (y1 + y2) / 2;
-      d = "M" + x1 + " " + y1 + " C" + x1 + " " + mid + " " + x2 + " " + mid + " " + x2 + " " + y2;
-      // The label sits just above where the edge arrives, so edges that fan out do not write over each other.
-      lx = x2; ly = y2 - 7;
+      view = { k: view.k, tx: grab.from.x + dx, ty: grab.from.y + dy };
+      place();
     }
-    var cls = "edge" + (took[edge.id] ? " took" : "") + (edge.gate ? " gate" : "");
-    root.appendChild(svg("path", { d: d, class: cls, "marker-end": "url(#arrow)" }));
-    var text = edgeLabel(edge);
-    if (text) root.appendChild(svg("text", { x: lx, y: ly, "text-anchor": anchor, class: "lab" + (took[edge.id] ? " took" : "") }, text));
   });
-  graph.nodes.forEach(function (node) {
-    var p = pos[node.id];
-    if (!p) return;
-    var cls = "node" + (now[node.id] ? " now" : failed === node.id ? " failed" : seen[node.id] ? " seen" : "") + (selected === node.id ? " sel" : "");
-    var sub = node.kind === "decide" ? (node.decide.by === "human" ? "a person" : "decide") + " · " + node.decide.questions.length + "q"
-      : node.kind === "model" ? (node.model.id || "from " + node.model.from)
-      : node.kind === "work" ? "work · " + node.work.handler
-      : node.kind === "mcp" ? "mcp · " + node.mcp.server
-      : node.kind === "agent" ? "agent · " + node.agent.name
-      : "code";
-    var group = svg("g", { class: cls, transform: "translate(" + p.x + "," + p.y + ")", tabindex: 0, role: "button", "aria-label": node.id + ", " + node.kind }, [
-      svg("rect", { width: W, height: H, rx: node.kind === "decide" ? 22 : 8 }),
-      svg("text", { x: 12, y: 19 }, (node.label || node.id).slice(0, 22)),
-      svg("text", { x: 12, y: 34, class: "sub" }, String(sub).slice(0, 28)),
-    ]);
-    var pick = function () { onSelect(selected === node.id ? null : node.id); };
-    group.addEventListener("click", pick);
-    group.addEventListener("keydown", function (event) { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); pick(); } });
-    root.appendChild(group);
+  var release = function () {
+    if (!grab) return;
+    root.classList.remove("panning");
+    if (grab.id && grab.far) {
+      layouts[hash][grab.id] = pos[grab.id];
+      keepLayout(hash);
+    } else if (grab.id) onSelect(selected === grab.id ? null : grab.id);
+    grab = null;
+  };
+  root.addEventListener("pointerup", release);
+  root.addEventListener("pointercancel", release);
+  // A pinch, or a scroll with Ctrl or Cmd held, zooms about the pointer. A plain scroll still scrolls the page.
+  root.addEventListener("wheel", function (event) {
+    if (!event.ctrlKey && !event.metaKey) return;
+    event.preventDefault();
+    var box = root.getBoundingClientRect();
+    zoomAt(Math.exp(-event.deltaY * 0.01), event.clientX - box.left, event.clientY - box.top);
+  }, { passive: false });
+  root.addEventListener("keydown", function (event) {
+    var target = event.target.closest ? event.target.closest("[data-id]") : null;
+    if (!target) return;
+    var id = target.getAttribute("data-id"), step = event.shiftKey ? 40 : 10;
+    var by = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[event.key];
+    if (by) {
+      event.preventDefault();
+      pos[id] = { x: pos[id].x + by[0], y: pos[id].y + by[1] };
+      layouts[hash][id] = pos[id];
+      keepLayout(hash);
+      paint();
+      var again = world.querySelector('[data-id="' + id.replace(/"/g, "") + '"]');
+      if (again) again.focus();
+    } else if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      onSelect(selected === id ? null : id);
+    }
   });
-  return el("div", { class: "graph" }, root);
+
+  var centre = function (factor) { return function () { zoomAt(factor, (root.clientWidth || 900) / 2, height / 2); }; };
+  var tools = el("div", { class: "tools" }, [
+    readout,
+    el("button", { type: "button", "aria-label": "Zoom out", on: centre(1 / 1.25) }, "−"),
+    el("button", { type: "button", "aria-label": "Zoom in", on: centre(1.25) }, "+"),
+    el("button", { type: "button", on: fit }, "Fit"),
+    el("button", { type: "button", title: "Put every node back where the layout placed it", on: function () { forgetLayout(hash); pos = {}; graph.nodes.forEach(function (node) { pos[node.id] = auto[node.id]; }); paint(); fit(); } }, "Reset"),
+  ]);
+
+  paint();
+  if (view) place();
+  else { view = { k: 1, tx: 40, ty: 40 }; place(); requestAnimationFrame(fit); }
+  return el("div", {}, [
+    el("div", { class: "canvas" }, [root, tools]),
+    el("div", { class: "hint" }, [
+      el("span", {}, "Drag a node to move it"),
+      el("span", {}, "Drag the background to pan"),
+      el("span", {}, [el("kbd", {}, "Ctrl"), " or ", el("kbd", {}, "Cmd"), " + scroll, or pinch, to zoom"]),
+      el("span", {}, "Your arrangement is kept in this browser"),
+    ]),
+  ]);
 }
 function nodeDetails(graph, id) {
   var node = graph.nodes.filter(function (n) { return n.id === id; })[0];
@@ -320,8 +523,8 @@ function graphCard(graph, run, note) {
   var holder = el("div", {});
   var selected = null;
   function render() {
-    put(holder, 
-      el("div", { class: "card" }, [el("h2", {}, run ? "Path" : "Graph"), note ? el("div", { class: "muted", style: "margin-bottom:8px" }, note) : null, drawGraph(graph, run, selected, function (id) { selected = id; render(); })]),
+    put(holder,
+      el("div", { class: "card" }, [el("h2", {}, run ? "Path" : "Graph"), note ? el("p", { class: "muted" }, note) : null, graphCanvas(graph, run, selected, function (id) { selected = id; render(); })]),
       selected ? nodeDetails(graph, selected) : null
     );
   }
@@ -433,7 +636,7 @@ function pageRun(id) {
       var key = run.steps.length + "|" + run.running.join(",") + "|" + run.status;
       if (!built || built.key !== key) built = { key: key, node: run.graph ? graphCard(run.graph, run, run.graphFrom ? "Drawn on " + run.graphFrom + ": a live run has not written its own graph yet." : null) : el("div", { class: "card muted" }, "No graph was recorded for this run.") };
       put(main, 
-        el("h1", {}, [el("a", { href: "#/runners/" + encodeURIComponent(run.runner) }, run.runner), " ", el("span", { class: "muted", style: "font-size:14px" }, "v" + run.version), "  ", pill(run.status)]),
+        el("h1", {}, [el("a", { href: "#/runners/" + encodeURIComponent(run.runner) }, run.runner), el("span", { class: "muted", style: "font:400 15px var(--sans);letter-spacing:0" }, "v" + run.version), pill(run.status)]),
         el("div", { class: "tiles" }, [
           el("div", { class: "tile" }, [el("small", {}, run.live ? "Cost so far" : "Cost"), el("b", {}, usd(run.cost))]),
           el("div", { class: "tile" }, [el("small", {}, run.live ? "Running for" : "Duration"), el("b", {}, dur(run.ms))]),

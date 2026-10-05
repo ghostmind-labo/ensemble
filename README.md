@@ -977,7 +977,8 @@ npx ensemble view          # http://127.0.0.1:4400
 ```
 
 One page, built into the package: the runs here, each run's path through its graph, every step's answers with their
-confidence, and live runs as they go. It is read-only, loads no runner, and listens on this machine only. A project
+confidence, and live runs as they go. The graph can be zoomed and panned, and its nodes dragged into a better
+arrangement, which the browser remembers per graph. It is read-only, loads no runner, and listens on this machine only. A project
 with several runners needs no setup: runs are grouped by runner, and each distinct graph counts as a version.
 
 It is deliberately small. Most reading of runs is done by an agent through the CLI's JSON (`status --json`,
