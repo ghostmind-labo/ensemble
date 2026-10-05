@@ -26,14 +26,16 @@ const bold = (text: string, color: boolean): string => (color ? `\x1b[1m${text}\
 export const money = (usd: number): string =>
   usd === 0 ? "free" : usd < 0.01 ? `$${usd.toFixed(6)}` : `$${usd.toFixed(4)}`;
 
-const BADGE: Record<RunStep["kind"], string> = { decide: "?", work: "⚙", code: "ƒ", model: "✦", mcp: "⇄" };
+const BADGE: Record<RunStep["kind"], string> = { decide: "?", work: "⚙", code: "ƒ", model: "✦", mcp: "⇄", agent: "☎" };
 
 /** What a finished step said, in one line. */
 export function summarise(step: RunStep, color = false): string {
   const badge = step.meta?.["by"] === "human" ? "👤" : BADGE[step.kind];
   // A lane tag only when there is more than one lane to tell apart.
   const name = step.lane && step.lane !== "main" ? `${step.node} ${dim(`[${step.lane}]`, color)}` : step.node;
-  const head = `${badge} ${name.padEnd(16 + (name.length - step.node.length))} ${dim(`${String(step.ms).padStart(6)}ms ${money(step.cost).padStart(10)}`, color)}`;
+  // A delegated step whose agent reported no cost did not run for free: say it is not known.
+  const spent = step.kind === "agent" && step.meta?.["cost"] === "unknown" ? "cost ?" : money(step.cost);
+  const head = `${badge} ${name.padEnd(16 + (name.length - step.node.length))} ${dim(`${String(step.ms).padStart(6)}ms ${spent.padStart(10)}`, color)}`;
   if (step.error) return `${head}  ✗ ${step.error}`;
 
   if (step.answers) {
@@ -56,6 +58,16 @@ export function summarise(step: RunStep, color = false): string {
   }
 
   const wrote = Object.keys(step.writes ?? {});
+  if (step.kind === "agent") {
+    const calls = Array.isArray(step.meta?.["toolCalls"]) ? (step.meta!["toolCalls"] as unknown[]).length : 0;
+    const said = [
+      `${String(step.meta?.["agent"] ?? step.handler ?? "")} · ${String(step.meta?.["protocol"] ?? "")}`,
+      step.meta?.["status"] ? String(step.meta["status"]) : "",
+      calls ? `${calls} tool call${calls === 1 ? "" : "s"}` : "",
+      wrote.length ? `wrote ${wrote.join(", ")}` : "",
+    ].filter(Boolean);
+    return `${head}  ${dim(said.join(" · "), color)}`;
+  }
   return wrote.length ? `${head}  ${dim(`wrote ${wrote.join(", ")}`, color)}` : head;
 }
 

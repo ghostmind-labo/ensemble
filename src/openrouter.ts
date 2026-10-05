@@ -59,8 +59,14 @@ export interface ModelRequest {
   images?: string[];
   temperature?: number;
   maxTokens?: number;
+  /** How hard a model that reasons should think first. Reasoning is paid for out of `maxTokens`. */
+  reasoning?: ReasoningEffort;
   signal?: AbortSignal;
 }
+
+/** OpenRouter's unified effort levels. "none" turns reasoning off where the model allows it. */
+export type ReasoningEffort = "max" | "xhigh" | "high" | "medium" | "low" | "minimal" | "none";
+export const REASONING_EFFORTS: readonly ReasoningEffort[] = ["max", "xhigh", "high", "medium", "low", "minimal", "none"];
 
 export interface ModelReply {
   /** The versioned model that actually answered. */
@@ -84,11 +90,23 @@ export type Caller = (request: ModelRequest) => Promise<ModelReply>;
 export class OpenRouterError extends Error {
   readonly status?: number;
   readonly body?: string;
-  constructor(message: string, options: { status?: number; body?: string; cause?: unknown } = {}) {
+  /**
+   * What the call cost even though it failed. A model that spends its whole
+   * allowance thinking returns nothing and is billed for all of it, so a
+   * failure that drops this makes a budget undercount.
+   */
+  readonly cost?: number;
+  readonly usage?: { prompt_tokens: number; completion_tokens: number };
+  constructor(
+    message: string,
+    options: { status?: number; body?: string; cause?: unknown; cost?: number; usage?: { prompt_tokens: number; completion_tokens: number } } = {},
+  ) {
     super(message, { cause: options.cause });
     this.name = "OpenRouterError";
     this.status = options.status;
     this.body = options.body;
+    this.cost = options.cost;
+    this.usage = options.usage;
   }
 }
 
@@ -283,6 +301,7 @@ export function openrouter(config: CallerConfig = {}): Caller {
       ],
       ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
       ...(request.maxTokens !== undefined ? { max_tokens: request.maxTokens } : {}),
+      ...(request.reasoning !== undefined ? { reasoning: { effort: request.reasoning } } : {}),
       // Ask OpenRouter to price the call for us, rather than guessing from the
       // catalogue — it knows which provider actually served it.
       usage: { include: true },
@@ -316,9 +335,19 @@ export function openrouter(config: CallerConfig = {}): Caller {
         const payload = (await response.json()) as {
           model?: string;
           choices?: Array<{
+            finish_reason?: string;
             message?: { content?: string; images?: Array<{ image_url?: { url?: string } }> };
           }>;
-          usage?: { prompt_tokens?: number; completion_tokens?: number; cost?: number };
+          usage?: {
+            prompt_tokens?: number;
+            completion_tokens?: number;
+            cost?: number;
+            completion_tokens_details?: { reasoning_tokens?: number };
+          };
+        };
+        const usage = {
+          prompt_tokens: payload.usage?.prompt_tokens ?? 0,
+          completion_tokens: payload.usage?.completion_tokens ?? 0,
         };
         const message = payload.choices?.[0]?.message;
         const images = (message?.images ?? [])
@@ -328,19 +357,25 @@ export function openrouter(config: CallerConfig = {}): Caller {
         // is only a failure when nothing came back at all.
         const text = message?.content ?? "";
         if (typeof text !== "string" || (text === "" && images.length === 0)) {
-          throw new OpenRouterError("OpenRouter returned neither text nor images", {
-            body: JSON.stringify(payload).slice(0, 500),
-          });
+          // The usual cause is a model that reasons before it writes: the
+          // thinking is paid for out of max_tokens, and when it uses all of it
+          // there is nothing left for the answer. It was still billed.
+          const thought = payload.usage?.completion_tokens_details?.reasoning_tokens ?? 0;
+          const outOfRoom = payload.choices?.[0]?.finish_reason === "length" || (thought > 0 && thought >= usage.completion_tokens);
+          throw new OpenRouterError(
+            outOfRoom
+              ? `${payload.model ?? request.model} spent its ${request.maxTokens ?? usage.completion_tokens} tokens${thought ? " reasoning" : ""} ` +
+                `and wrote no answer — raise maxTokens, or set reasoning: "low" on the node`
+              : "OpenRouter returned neither text nor images",
+            { body: JSON.stringify(payload).slice(0, 500), cost: payload.usage?.cost ?? 0, usage },
+          );
         }
         return {
           model: payload.model ?? request.model,
           text,
           images,
           cost: payload.usage?.cost ?? 0,
-          usage: {
-            prompt_tokens: payload.usage?.prompt_tokens ?? 0,
-            completion_tokens: payload.usage?.completion_tokens ?? 0,
-          },
+          usage,
         };
       }
 

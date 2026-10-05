@@ -1,6 +1,6 @@
 {
   "name": "@ghostmind-dev/ensemble",
-  "version": "0.31.0",
+  "version": "0.33.0",
   "description": "Typed decisions wired to your code. Asks Jev one calibrated question, calls models through OpenRouter when a node needs to write, draw or look, and emits the graph and the run as JSON.",
   "type": "module",
   "license": "MIT",
@@ -11,6 +11,14 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./a2a": {
+      "types": "./dist/a2a-serve.d.ts",
+      "import": "./dist/a2a-serve.js"
+    },
+    "./mcp": {
+      "types": "./dist/mcp-serve.d.ts",
+      "import": "./dist/mcp-serve.js"
     },
     "./package.json": "./package.json"
   },
@@ -32,7 +40,9 @@
     "agent-skills",
     "mcp",
     "openrouter",
-    "llm"
+    "llm",
+    "a2a",
+    "agent"
   ],
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json",

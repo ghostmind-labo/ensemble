@@ -39,6 +39,61 @@ that answers "what did it know at the time"; for a decide node it is exactly
 what Jev saw. Parallel steps overlap in time, so sort by `started`, not `n`,
 when laying out a timeline.
 
+## Delegated steps
+
+A step with `kind: "agent"` handed one message to an external agent and took one
+reply. The runner ran no part of the agent's loop, so the step is a record of
+what was asked, what came back, and what the agent **said** it did.
+
+| Field | Read it as |
+|---|---|
+| `handler`, `meta.agent` | The key in the runner's `agents` |
+| `meta.protocol`, `meta.at` | How and where: `a2a` (a url), `acp` (a command), `mcp` (`server/tool`). Never a secret |
+| `meta.prompt` | The one message sent. Present even when the step failed |
+| `meta.status` | How it ended, in the protocol's word: `completed` (a2a, mcp), `end_turn` (acp). On a failed step it is where the agent stopped: `max_tokens`, `refusal`, `cancelled` |
+| `meta.served` | Who answered: the agent's own name and version, and the task id (a2a) or session id (acp). `{ "name": "dry-run" }` means a dry run's stub answered, not an agent |
+| `meta.toolCalls` | acp: the tools the agent reported, each `{ id, title, kind, status }`. Absent when it reported none. A tool the agent used without reporting does not appear |
+| `meta.permissions` | acp: what the agent asked leave for, and how the declared policy answered: `allowed`, `rejected`, `cancelled`. Absent when it asked for nothing |
+| `meta.artifacts`, `meta.usage` | a2a artifacts by id and name; acp usage `{ used, size, cost? }` |
+| `meta.cost`, `cost` | `"reported"`: `cost` is the USD the agent reported. `"unknown"`: nothing was reported and `cost` is 0 |
+| `writes` | The reply's text under the first key; `{ status, artifacts, toolCalls, permissions, data? }` under the second, where `data` is structured output (an MCP tool's `structuredContent`, A2A data parts) |
+| `error` | `agent "<name>": …`, naming the fix. The step keeps `status`, `served`, `toolCalls` and `permissions` up to that point; the half-finished reply text is not kept |
+
+**Read `meta.cost` before the number.** `"unknown"` means the protocol reported
+nothing (A2A and MCP define no cost field; an ACP agent may not send one), and
+`step.cost` is 0: say "cost not reported", never "free". The run's total and its
+`budget` count only reported costs, so a run with such a step cost more than
+`run.cost.total` shows. An MCP tool that returns its own cost (`agento mcp`
+does) puts it in `writes.<detail>.data.cost`; it is not in the total. In a
+hosted run, an agent's own cost is never added: the hosted total counts only
+calls through its OpenRouter proxy.
+
+```sh
+jq '.steps[] | select(.kind=="agent") | {node, agent: .meta.agent, protocol: .meta.protocol, status: .meta.status,
+     tools: [.meta.toolCalls[]? | "\(.kind):\(.status)"], permissions: [.meta.permissions[]? | "\(.kind):\(.outcome)"],
+     cost: (if .meta.cost == "unknown" then "not reported" else .cost end), error}' $R
+jq -r '.steps[] | select(.kind=="agent") | .meta.prompt' $R      # what it was asked
+jq -r '.steps[] | select(.kind=="agent") | .writes | to_entries[0].value' $R   # what it replied
+```
+
+Then read the step that follows it. A delegated step is judged by the `decide`
+node after it, so its `answers` say whether the reply was good enough and which
+edge the run took (`took`). A runner with no such node has nothing checking the
+agent's work: say so.
+
+### When an agent step misbehaves
+
+| What the run shows | What it means | Change |
+|---|---|---|
+| `status: "failed"`, `error` starts `agent "x":` | The agent could not be reached, or stopped where a run cannot continue (`input-required`: it asked a question; `auth-required`: it lacks a credential; `max_tokens`: it ran out) | The message names the fix. All of them are in the `ensemble-build` skill's `references/errors.md` |
+| `error` is `mcp "s": tools/call timed out after 30000ms` | An agent on an MCP server outran the server's default timeout | `timeoutMs: 300_000` on the `mcpServers` entry |
+| `meta.permissions` has `rejected`, and the reply says what it could not do | The policy worked. A rejected permission is not a failure: the turn ends normally | Nothing, unless the replies are weaker for it. Then name the tool kinds: `permissions: { allow: ["edit"] }` |
+| Files changed or commands ran, and `meta.permissions` is empty | The agent acted **without asking**, so the declared policy never got a say (`opencode acp` does this as it ships) | Set the agent's own configuration to ask, through `env` in the declaration, and give it a narrower `cwd`. The tested declarations are in `references/api.md` §3 |
+| The reply is short or skips part of the task, after a `rejected` permission | The agent ended its turn at the refusal | Check the `decide` node after it sent the run to the retry or the hand-off. If it passed the reply, sharpen that question |
+| The `decide` node after it keeps answering no, and the retry edge is spent | The agent is not doing the job as asked | Read `meta.prompt`: does it carry what the agent needs? Narrow the task, or route this kind of request elsewhere |
+| `meta.cost: "unknown"` on every delegated step | The spend is real and outside the budget | Bound it: `stepTimeout`, the agent's `timeoutMs` and its own cap (agento: `--max-usd`), `maxLoops` on the retry edge |
+| The step took minutes (`ms`) | The agent's loop is long, or it waited on something | `stepTimeout` on the run, a narrower prompt |
+
 ## Answering "why did it do that?"
 
 ```sh
@@ -66,8 +121,8 @@ noul, a `when:`) matched first. That's usually the explanation.
 | status | Meaning | Look at |
 |---|---|---|
 | `completed` | Reached a node with no matching outgoing edge | `result` should hold the answer. If it's `undefined`, the exit node never wrote the `result` key |
-| `failed` | A node threw | the step with `error`. A handler bug, an HTTP error from Jev or OpenRouter, an mcp error, or a writes-shape mismatch (`returned no …`) |
-| `budget` | Cost passed `--budget` | Which step was expensive. Usually a model node, and image models bill output as tokens |
+| `failed` | A node threw | the step with `error`. A handler bug, an HTTP error from Jev or OpenRouter, an mcp error, an agent that could not be reached or stopped short (`agent "x": …`), or a writes-shape mismatch (`returned no …`) |
+| `budget` | Cost passed `--budget` | Which step was expensive. Usually a model node, and image models bill output as tokens. An agent step counts only when it reported a cost |
 | `maxSteps` | Hit the step cap (default 50) | A loop without `maxLoops`, or a `when:` that never flips |
 | `cancelled` | The signal aborted | the caller |
 | `paused` | A `by: "human"` node is waiting for a person | `pending` (the node, its questions and what it showed). Not a failure: resume it with the saved `paused.json` |
@@ -83,8 +138,11 @@ node <this-skill-dir>/scripts/summarize.mts .ensemble/runs --runner <name>
 ```
 
 This prints the hot paths, edge counts, each question's answer distribution and
-mean confidence, how often each gate fires, the least confident decisions (with
-their goals), failures, and the slowest nodes. Add `--graph sha256:…` to compare
+mean confidence, how often each gate fires, each delegated node (its agent and
+protocol, how the calls ended, tool calls, permissions, and cost as reported or
+"not reported"), the least confident decisions (with their goals), failures,
+and the slowest nodes. When delegated steps reported no cost, the cost line says
+how many, because the totals leave them out. Add `--graph sha256:…` to compare
 only runs of one graph version, and `--json` for a machine-readable output.
 
 What to do with what it shows:
@@ -99,6 +157,16 @@ What to do with what it shows:
   it.
 - **An edge is never taken** across many real runs. It's either dead or shadowed
   by an earlier edge.
+- **A delegated node shows `cost not reported`.** The spend is real and on the
+  agent's side. Ask the agent's owner what a call costs, or watch the node's
+  time and call count instead. Bound it with `stepTimeout`, the agent's
+  `timeoutMs` and `maxLoops` on the retry edge.
+- **A delegated node shows `permissions rejected`.** The declared policy said no
+  to something the agent asked for. If the replies are weaker for it, allow that
+  tool kind in the declaration (`permissions: { allow: [...] }`).
+- **A delegated node shows tool calls and no permissions.** For an `acp` agent
+  that edits or runs commands, that is an agent acting without asking. See
+  "When an agent step misbehaves" above.
 - **Cost is dominated by one node.** It's almost always a model node. Check
   whether a smaller model, a lower `maxTokens`, or a decide step in front of it
   (to skip it when it isn't needed) would do.

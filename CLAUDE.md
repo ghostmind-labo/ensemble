@@ -19,13 +19,15 @@ each need their own key and cost format, and OpenRouter already returns
 A vendor-exclusive feature belongs in a user's own `work` handler, which is
 exactly what that seam is for.
 
-It still holds no prompts of its own, runs no tool loop, ships no skills, serves
-no HTTP, and draws nothing. Those were removed on purpose; a change that adds one
+It still holds no prompts of its own, runs no tool loop, ships no skills,
+serves no HTTP beyond one read-only local page and authenticates nobody. The two connectors
+are request handlers for somebody else's server (see **Reaching a runner from
+outside**). Those were removed on purpose; a change that adds one
 back is the change to question.
 
 ## Project map
 
-Seventeen files, and each one has a single job.
+Twenty-six files, and each one has a single job.
 
 - `src/questions.ts` — `choice` / `score` / `noul`, their answer types, and the API limits enforced at authoring time
 - `src/jev.ts` — the decider: one `fetch` to OpenRouter's `POST /api/v1/systemone`, plus the `Decider` seam
@@ -34,6 +36,9 @@ Seventeen files, and each one has a single job.
 - `src/mcp.ts` — the MCP session (shared by every pipe) and the stdio pipe. One tool call per node, never a loop
 - `src/mcp-remote.ts` — the remote pipes: Streamable HTTP, legacy SSE, WebSocket (hand-rolled over `node:http`, so mTLS and headers work everywhere)
 - `src/mcp-auth.ts` — secrets as `${NAME}`, every auth mode incl. OAuth 2.1, the 0600 token store, and redaction. No secret reaches run.json, graph.json, an event or an error
+- `src/agent.ts` — delegation to an EXTERNAL agent as a declared node: the `agents` map, one call per execution, the `delegate` seam
+- `src/a2a.ts` — the A2A client (agent card, send, stream or poll, cancel), hand-written over `fetch`
+- `src/acp.ts` — the ACP client: one prompt turn over stdio to a local agent, permissions answered by policy, never by a person
 - `src/registry.ts` — discovery: the official MCP registry, a skills index, and `preflight`
 - `src/spec.ts` — the vocabulary you write down: nodes, edges, handlers, the `on:` grammar, `probeReads`
 - `src/validate.ts` — the proof. Returns problems as strings, never throws
@@ -42,10 +47,14 @@ Seventeen files, and each one has a single job.
 - `src/calibrate.ts` — does a decision work: accuracy, calibration gap and gate prices against labelled cases, one decide node at a time
 - `src/supervise.ts` — the brainstem: a runner as a loop that lives for days. Memory, budgets, rest, journal and resume, a watcher runner
 - `src/report.ts` — the terminal reporter (one consumer of `RunEvent`, not the only possible one)
+- `src/live.ts` — a run in progress, where another process can see it and stop it: `tracked`, `liveRuns`, `stopRun`
+- `src/a2a-serve.ts` — the A2A connector: a runner as an agent, as a handler for your server. A separate entry point
+- `src/mcp-serve.ts` — the MCP connector: runners as tools, over stdio or as a handler. A separate entry point
+- `src/view.ts` and `src/view-page.ts` — the one viewer: a read-only local page over the runs. See the viewer rule below
 - `src/runner.ts` — ties them into a callable; `src/index.ts` — the public surface
-- `src/cli.ts` — `validate` / `graph` / `run` / `calibrate` / `check` / `skills` / `servers` / `mcp login·logout·status`
+- `src/cli.ts` — `validate` / `graph` / `run` / `calibrate` / `check` / `skills` / `servers` / `mcp login·logout·status` / `status` / `stop` / `view` / `serve mcp`
 
-`examples/` — nine runnable runners, each with a header comment saying what it
+`examples/` — ten runnable runners (`10-delegate` hands a task to an external agent over A2A, ACP or MCP, with three toy agents under `agents/` that the tests run as real processes), each with a header comment saying what it
 demonstrates. `06-watch` is a watcher runner that also supervises `01-triage`
 when executed directly; `07-senses` forks three lanes, joins them, and remembers;
 `08-studio` is four models in sequence with a budgeted loop; `09-frontdesk` is
@@ -54,12 +63,66 @@ MCP, a loop and both branch forms in a single graph. Keep it that way: it is wha
 the README's third demo quotes, and what proves the concepts compose. `test/` — one `*.test.mts` per suite, auto-discovered by
 `test/run.mts`.
 
+**This repo is the library only**: no service, no site, no UI. The hosted product and the docs site are a separate,
+private repo: `ghostmind-app/together` (`/Volumes/Projects/playground/together`), with Google sign-in, the REST API
+and MCP endpoint, the sandbox that runs user runners, the UI, and `web/`, which renders THIS repo's markdown
+(README, `docs/`, the plugin references) as the docs site — so a doc page written here is published from there,
+through the page list in its `web/app/src/lib/docs.ts`. It consumes this
+library as a git submodule (`lib/`) pinned to a commit of this repo, and its sandbox runs `src/` directly — so a
+library change reaches hosted users only when that pin is bumped and the runner redeployed. Nothing in this repo may
+depend on it, and a hosted-only feature (billing, the sandbox's allow-list, the UI) never lands here. In hosted
+ensemble `acp` and the in-process agent cannot run (no child processes, one allowed import): a feature that only
+works locally is still a feature of this library.
+
+**Agents.** An external agent is consumed in one of four ways, documented under `docs/agents*.md`:
+the `agent` node over `a2a` (a hosted agent), `acp` (a local agent launched as a command, e.g. `opencode acp`) or
+`mcp` (an agent offered as one tool), and the older in-process way (`docs/agent.md`): `@ghostmind-dev/agento`
+(`/Volumes/Projects/labo/agent`, formerly `@ghostmind-dev/agent`) inside one `work` node. agento is an INDEPENDENT
+package, never a dependency of this one. In every case ensemble makes ONE call per node execution and runs no tool
+loop of its own; a `decide` node routes in and another judges the reply (`patterns.md` 16 and 17). Agents supported
+out of the box will be open source and use OpenRouter as their only model provider (an approved catalog is planned,
+not built). In hosted ensemble `acp` and the in-process way cannot run (no child processes, one allowed import).
+
+**Reaching a runner from outside.** A runner is called as a function, through the CLI, over MCP, or as an A2A
+agent. The owner's rule for who uses what: **locally an AI uses the CLI plus the skill; hosted, an AI uses MCP plus the
+skill.** So the CLI must be able to do everything an agent needs on its own machine (`run`, `status`, `stop`,
+`resume`), and MCP is not required locally.
+
+- `src/live.ts` makes a run watchable and stoppable from another process, however it was started: `tracked(runner)`
+  keeps `.ensemble/live/<pid>-<n>.json` current and cancels the run when a stop mark appears next to it. `ensemble run`
+  uses it, and so does a user's own `node run.mts`. No process signal is involved, so nothing is installed in the
+  host program. Do not move this into the CLI: a run started from a script must be just as visible.
+- `src/mcp-serve.ts` and `src/a2a-serve.ts` are CONNECTORS, shipped as separate entry points
+  (`@ghostmind-dev/ensemble/mcp`, `/a2a`). They speak the protocol and nothing else: **no server and no
+  authentication**. A standalone HTTP server and a bearer-token check were built and then removed on purpose; the
+  server and the sign-in belong to whoever mounts the handler. The only command is `ensemble serve mcp` over stdio,
+  where there is no network to guard. Adding OAuth, a token, or `--port` back is the change to question.
+- The core never imports the connectors (`src/index.ts` exports neither; check by hand), they add no dependency and
+  no concept: `RunEvent`s become status updates or progress, a `by: "human"` pause becomes `input-required` or an
+  elicitation form (the caller answers the same closed questions, and only there; it cannot write state at any other
+  moment), and cancel is the run's signal.
+- Over MCP the caller can only CALL the runners the process was given, never create or edit one, so there is no
+  sandbox; that is the difference from the hosted product's MCP endpoint, which manages runners for signed-in users.
+- Nothing may live in process memory that a second instance would need. MCP is stateless (a paused run travels as a
+  token sealed with AES-GCM under `secret`, which every instance must share); A2A keeps tasks in a `TaskStore` (memory
+  by default, a shared one in production) with a heartbeat and a cancel mark; both have `drain()`. The one exception
+  is MCP's opt-in `control` tools (`start_run`, `get_run`, `list_runs`, `cancel_run`), which track runs in memory and
+  are documented as single-instance.
+- MCP serving speaks revision `2026-07-28` AND the `initialize`-based ones, because this library's own client
+  (`src/mcp.ts`) still opens with the handshake. Check https://modelcontextprotocol.io/specification/latest and
+  https://a2a-protocol.org before changing either: MCP was redesigned once already.
+
+Pages: `docs/serve-mcp.md`, `docs/serve-a2a.md`.
+
 `plugin/` + `.claude-plugin/marketplace.json` — the Claude Code plugin (marketplace
 `ghostmind-ensemble`, plugin `ensemble`). It is **not** part of the npm package
-(`files` excludes it), so the library still ships no skills. Its three skills teach
-an agent to use the library: `ensemble-build` (use case → validated runner, with
-`scripts/dryrun.mts`, a $0 executor), `ensemble-questions` (question design) and
-`ensemble-runs` (reading and tuning runs, with `scripts/summarize.mts`).
+(`files` excludes it), so the library still ships no skills. Its five skills teach
+an agent to use the library: `ensemble` (the whole loop, and the entry point:
+build, check, run, watch a live run, stop or answer it, change it, by CLI
+locally and by MCP when hosted), `ensemble-build` (use case → validated runner,
+with `scripts/dryrun.mts`, a $0 executor), `ensemble-questions` (question
+design), `ensemble-runs` (reading and tuning runs, with `scripts/summarize.mts`)
+and `ensemble-serve` (hosting the connectors in your own server).
 
 The skills present ensemble as a **structure** (a graph, a shared state with a proven
 data flow, and a run record), not as a closed toolbox. They install it as a library
@@ -118,14 +181,14 @@ string-vs-object, and `steps[].took` joining a run to `graph.edges[].id`.
 
 <important if="you are adding a node kind, an edge form, or a question type">
 
-There are five node kinds (`decide`, `work`, `code`, `model`, `mcp`), two branch forms
+There are six node kinds (`decide`, `work`, `code`, `model`, `mcp`, `agent`), two branch forms
 (`on:` for meaning, `when:` for arithmetic), one form of parallelism (`fork` on an
 edge, `join` on a node) and three questions. Each is a closed set,
 and the closed-ness is the feature — it is what lets `validate` prove
 exhaustiveness and `graph` emit a complete document. Adding a fourth of anything
 needs a reason that survives that argument.
 
-`model` was the fourth, added after the fact, and the reason it earned its place
+`agent` was the sixth, and cleared the same bar as `model` (the graph now says which agent, over which protocol, with what permissions, which an opaque `work` handler could not). `model` was the fourth, added after the fact, and the reason it earned its place
 is the standard to beat: perception forced it (Jev is text-only, so anything that
 must LOOK needs a generative call), and putting it in a node made the emitted
 graph MORE complete than hiding it in an opaque handler would have — `graph.json`
@@ -139,7 +202,7 @@ If one is added anyway: a node kind needs an `isX` guard in `spec.ts`, a
 <important if="you are touching human-in-the-loop, pause/resume, or the decider fallback">
 
 A person is a DECIDER, not a node kind: `decide` with `by: "human"` asks the same
-closed questions, so the closed set of node kinds stays at five and validate's
+closed questions, so the closed set of node kinds stays at six and validate's
 exhaustiveness proof covers people too. Keep it that way — a "human node" kind
 would be the change to question.
 
@@ -189,14 +252,26 @@ Error messages name the fix. Keep it that way — `inputs: ["…"]` in the messa
 is the reason the check is useful rather than annoying.
 </important>
 
-<important if="you are tempted to add live rendering, a TUI, a viewer, or a report">
+<important if="you are tempted to add live rendering, a TUI, a viewer, a dashboard, or a report">
 
-Don't. A browser viewer, an SSE server and a mermaid/markdown exporter were all
-removed from this repo in the v2 rewrite, and re-adding one is the exact
-regression to avoid. The seam is `RunEvent` (three events) and the two JSON
-documents; anything visual consumes those and lives outside this package.
-`src/report.ts` is the one shipped consumer, and it stays a single line rewritten
-in place, not a screen.
+There is exactly one viewer, and its limits are the point. `ensemble view` (`src/view.ts` plus the page in
+`src/view-page.ts`) was added on the owner's decision so the local loop ends with something to look at: write, check,
+run, look. It replaced a separate React package (`ensemble-view`), which was built first and retired.
+
+It stays small because of these rules. Break one and it has become the product it is not:
+
+- **One static page, no dependency, no build step.** Plain HTML, CSS and JavaScript in a string that `tsc` ships. No
+  framework, no bundler, no asset files. If it needs a library, the feature belongs in the hosted product.
+- **Read-only.** It never starts, answers, edits or deletes anything. A paused run shows the command that answers it.
+- **This machine only** by default (`127.0.0.1`): a run record holds whatever the run was given and wrote.
+- **It loads no runner.** It reads `run.json`, `graph.json` and the live files, so it runs none of the user's code.
+- **Everything from a run goes on the page as text, never as markup.** A record holds whatever a model wrote.
+
+Accounts, sharing, answering a pause from a browser, analytics and anything richer live in the private repo's UI.
+A browser viewer, an SSE server and a mermaid/markdown exporter were removed in the v2 rewrite, and growing this page
+back into one of those is the regression to avoid. The owner's expectation is that almost all querying and
+maintenance is done by an AI through the CLI's JSON and the skills, so the page serves a person's glance and nothing
+more; `src/report.ts` stays a single line rewritten in place, not a screen.
 </important>
 
 <important if="you are about to state a model id, a price, a capability, or how Jev behaves">

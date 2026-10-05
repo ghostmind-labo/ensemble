@@ -299,7 +299,7 @@ flowchart TB
 
 | Concept | In this graph |
 |---|---|
-| all five node kinds | `decide` (triage, review) · `work` (alarm, park, hand_off, send) · `code` (start, pick_tool, recall, pick_skill, choose_writer, tally, remember) · `model` (look, answer, critique, card) · `mcp` (read_log) |
+| five of the six node kinds (the sixth, `agent`, is [`10-delegate`](examples/10-delegate/delegate.mts)) | `decide` (triage, review) · `work` (alarm, park, hand_off, send) · `code` (start, pick_tool, recall, pick_skill, choose_writer, tally, remember) · `model` (look, answer, critique, card) · `mcp` (read_log) |
 | all three questions, one call | `area` choice · `hazard` noul · `urgency` score — asked together at `triage` |
 | a confidence gate | `gate: { on: "area", min: 0.65, to: "hand_off" }` |
 | a fallback when the decider is down | `fallback: "hand_off"` on `triage` — an outage becomes a route, not a crash |
@@ -610,7 +610,7 @@ choice("What kind of picture?", {
 
 ---
 
-## The five node kinds
+## The six node kinds
 
 A node is exactly one of these, told apart by which key it has. There is no
 `runtime:` string.
@@ -634,6 +634,9 @@ look: { model: "google/gemini-2.5-flash", prompt: (s) => `…${s.goal}`,
 // mcp — ONE tool call. Not a loop.
 read: { mcp: { server: "fs", tool: "read_text_file" },
         args: (s) => ({ path: s.path }), writes: ["file_text"] }
+
+// agent — ONE message to an external agent (A2A, ACP or MCP). Its loop, not ours.
+ask: { agent: "researcher", reads: ["goal"], writes: ["reply"] }
 ```
 
 `reads` on a decide node is **required and load-bearing**: accuracy is documented
@@ -742,7 +745,7 @@ elk, graphviz, cytoscape and d3 already eat.
 ```jsonc
 {
   "$schema": "https://ghostmind.dev/ensemble/run-v1.json",
-  "run": { "id": "20260918T003102-triage", "graph": "sha256:9c92f2f1a59ff24d",
+  "run": { "id": "20260918T003102-triage-4f2a", "graph": "sha256:9c92f2f1a59ff24d",
            "status": "completed", "cost": { "total": 0.0213, "currency": "USD" } },
   "steps": [
     { "n": 1, "node": "classify", "kind": "decide", "lane": "main",
@@ -776,6 +779,10 @@ npm run check     -- <file>                 # can it run HERE?     — reads the
 npm run calibrate -- <file> cases.jsonl     # score its decisions  — ~$0.00002 a case
 npx ensemble run  <file> "goal" --budget 0.05     # asks you at a terminal; pauses (exit 3) without one
 npx ensemble resume <file> paused.json --answer ok=no --by dana
+npx ensemble status                               # what is running here, and what has run
+npx ensemble stop <id>                            # cancel a live run; its record is kept
+npx ensemble view                                 # look at the runs in a browser, read-only
+npx ensemble serve mcp <file...>                  # runners as MCP tools over stdio, for a local assistant
 ```
 
 Data goes to stdout so it can be piped; commentary goes to stderr.
@@ -807,6 +814,8 @@ This repo is also a Claude Code plugin marketplace:
 | `ensemble-build` | Use case → a runner that validates and has been dry-run down every branch |
 | `ensemble-questions` | Writing `choice` / `score` / `noul` that Jev answers well, gates and thresholds |
 | `ensemble-runs` | Reading `run.json` and supervised journals, explaining a path, calibrating |
+| `ensemble` | The whole loop for an agent: build a graph, check it, run it, watch it live, stop or answer it, change it |
+| `ensemble-serve` | Hosting runners for other callers: MCP and A2A connectors in your own server |
 
 The plugin is not part of the npm package; the library itself ships no skills.
 
@@ -859,6 +868,122 @@ small model, or a local one, still sits downstream of every tool and skill you
 own. Capability constrains only what a model must do *itself* — vision is the
 real case, and `ensemble check` catches it against the live catalogue.
 
+## Agents, as one step
+
+When the steps can't be known in advance — an open-ended request, tools chosen by
+what the last one returned — hand **one step** to an agent, and let the graph do what
+the agent can't do for itself:
+
+```
+triage (Jev) ──direct──▶ answer ─────────────────────────▶ deliver
+     └──research──▶ research (agent) ─▶ review (Jev) ──ok──▶ deliver
+                        ▲                   └─weak─▶ tally ─(1 retry)─┘
+```
+
+A `decide` node routes to the agent only when one is needed, `stepTimeout` and the
+budget reach it, `run.json` records what it was asked and what it did, and a second
+`decide` node judges the reply — the agent never grades its own work.
+
+An external agent is **declared** and reached through an industry standard, so
+`graph.json` names the agent and the protocol:
+
+```ts
+agents: {
+  researcher: { protocol: "a2a", url: "https://agent.example.com",            // a hosted agent
+                auth: { type: "bearer", token: "${RESEARCH_AGENT_TOKEN}" } },
+  coder:      { protocol: "acp", command: "agento", args: ["acp"],            // a local agent, launched as a command
+                cwd: "/a/directory/you/are/willing/to/expose" },
+  analyst:    { protocol: "mcp", server: "tools", tool: "ask_analyst" },      // an agent offered as an MCP tool
+},
+nodes: {
+  // agent — ONE message to a declared agent, one reply. The loop is the agent's.
+  research: { agent: "researcher", reads: ["goal"], writes: ["reply"] },
+}
+```
+
+| | Way | Local library | Hosted ensemble |
+|---|---|---|---|
+| A hosted agent, by URL | [A2A](docs/agents-a2a.md) | Yes | Yes, when it needs no credentials |
+| A local agent, launched as a command | [ACP](docs/agents-acp.md) | Yes | No |
+| An agent offered as a tool | [MCP](docs/agents-mcp.md) | Yes | On a remote server that needs no credentials |
+| An agent library in your own handler | [a `work` node](docs/agent.md) | Yes | No |
+
+One call per node execution; a cost is recorded when the protocol reports one and
+marked unknown when it does not. Ensemble does not sandbox an agent: a local one runs
+as you, and the `permissions` policy answers only what it *asks*, so read
+[the safety rule](docs/agents.md#the-safety-rule) before declaring one.
+
+[docs/agents.md](docs/agents.md) is the page to start from: the four ways compared,
+which to choose, what lands in `graph.json` and `run.json`, and what works today.
+[`examples/10-delegate`](examples/10-delegate/delegate.mts) is the runnable graph, and
+[docs/agents-build.md](docs/agents-build.md) shows how to write an agent of your own in
+each protocol, with three minimal ones in
+[`examples/10-delegate/agents`](examples/10-delegate/agents).
+[`@ghostmind-dev/agento`](docs/agent.md) is the Ghostmind agent engine (a dollar cap,
+go/pause/stop hooks, an event log, Jev guiding weaker models); it is an independent
+package and ensemble does not depend on it.
+
+---
+
+## Called from anywhere
+
+A runner is a function. The same runner, unchanged, is also reachable three other ways:
+
+| Way in | How | Who it is for |
+|---|---|---|
+| A function | `await triage({ goal })` | Your own code |
+| The CLI | `npx ensemble run triage.mts "goal"` | A person, or an assistant with a shell |
+| MCP tools | `mcpTools([triage]).handler` in your server, or `npx ensemble serve mcp triage.mts` over stdio | An assistant such as Claude |
+| An A2A agent | `a2aAgent(triage).handler` in your server | Another agent |
+
+```ts
+import express from "express";
+import { mcpTools } from "@ghostmind-dev/ensemble/mcp";
+import { a2aAgent } from "@ghostmind-dev/ensemble/a2a";
+import triage from "./triage.mts";
+
+const app = express();
+app.use("/mcp", requireSignIn, mcpTools([triage], { budget: 0.05 }).handler);
+app.use("/agents/triage", requireSignIn, a2aAgent(triage).handler);
+```
+
+The two are connectors, not servers: they speak the protocol and leave the server and the sign-in to you. They are
+never loaded unless you import them. See [runners over MCP](docs/serve-mcp.md) and
+[a runner as an A2A agent](docs/serve-a2a.md).
+
+### Watching a run, and stopping it
+
+Called plainly, a run is one input and one output. It can also be watched and stopped while it goes, however it was
+started:
+
+```sh
+npx ensemble status            # what is running here (nodes in progress, state so far, cost) and what has run
+npx ensemble status <id>       # one run, live or finished, as JSON
+npx ensemble stop <id>         # cancel it cleanly; its record is kept
+```
+
+`ensemble run` is tracked on its own. A runner you call from your own script is tracked with one wrapper, which also
+records the run where the CLI would:
+
+```ts
+import { tracked } from "@ghostmind-dev/ensemble";
+const { result } = await tracked(triage)({ goal });
+```
+
+### Looking at runs
+
+```sh
+npx ensemble view          # http://127.0.0.1:4400
+```
+
+One page, built into the package: the runs here, each run's path through its graph, every step's answers with their
+confidence, and live runs as they go. The graph can be zoomed and panned, and its nodes dragged into a better
+arrangement, which the browser remembers per graph. It is read-only, loads no runner, and listens on this machine only. A project
+with several runners needs no setup: runs are grouped by runner, and each distinct graph counts as a version.
+
+It is deliberately small. Most reading of runs is done by an agent through the CLI's JSON (`status --json`,
+`run.json`); the page is for a person who wants to see one at a glance.
+
 ---
 
 ## Jagged edges
@@ -883,8 +1008,9 @@ They are design constraints, and several are enforced here:
 
 No prompts of its own, no built-in agent loop, no vendor SDKs *in the package* —
 your handlers may use any of them. Skills and MCP are here as choices and single
-calls, never a model picking its own next tool. No server, no browser viewer, no
-mermaid or markdown exporter. No variable-width fan-out (that is a handler's
+calls, never a model picking its own next tool. No server and no sign-in (the
+two connectors below are handlers for your own server), no dashboard beyond one
+read-only local page, no mermaid or markdown exporter. No variable-width fan-out (that is a handler's
 job), no replay.
 
 Those are not oversights — they were removed. Keeping them would have made this a
@@ -910,7 +1036,28 @@ node plugin/skills/ensemble-build/scripts/dryrun.mts examples/07-senses/senses.m
 | [`06-watch`](examples/06-watch/watch.mts) | A conscience for a loop that runs for days — and it supervises `01-triage` when run directly |
 | [`07-senses`](examples/07-senses/senses.mts) | Look, listen and count at once: three forked lanes, one join, a memory key |
 | [`08-studio`](examples/08-studio/studio.mts) | The complex shape: four models in sequence, a budgeted loop, both branch forms, safety first |
-| [`09-frontdesk`](examples/09-frontdesk/frontdesk.mts) | **Everything at once**: five node kinds, three lanes, memory, a skill, MCP, a loop, both branch forms, a person in the loop, and a fallback |
+| [`09-frontdesk`](examples/09-frontdesk/frontdesk.mts) | **Everything at once**: five of the six node kinds, three lanes, memory, a skill, MCP, a loop, both branch forms, a person in the loop, and a fallback |
+| [`10-delegate`](examples/10-delegate/delegate.mts) | Hand one step to an external agent (A2A, ACP or MCP): route in, delegate, judge the reply, retry once |
+
+---
+
+## Documentation
+
+This README is the overview. The rest is markdown in this repository.
+
+| Read | For |
+|---|---|
+| [API reference](plugin/skills/ensemble-build/references/api.md) | Every field, node kind, edge, option and export |
+| [Patterns](plugin/skills/ensemble-build/references/patterns.md) | Complete worked graphs for the common shapes |
+| [Errors and fixes](plugin/skills/ensemble-build/references/errors.md) | Each `validate` message, what causes it, and the fix |
+| [Models, skills and MCP](plugin/skills/ensemble-build/references/discovery.md) | Finding models, skills and MCP servers to wire in |
+| [Build a runner](plugin/skills/ensemble-build/SKILL.md) | From a use case to a validated, dry-run runner, step by step |
+| [Design the questions](plugin/skills/ensemble-questions/SKILL.md) | Writing choice, score and noul questions Jev answers well |
+| [Read and tune runs](plugin/skills/ensemble-runs/SKILL.md) | What `run.json` says, and what to change when a decision is off |
+| [Agents](docs/agents.md) | The four ways to hand a step to an agent, and which to choose |
+| [A2A](docs/agents-a2a.md) · [ACP](docs/agents-acp.md) · [MCP](docs/agents-mcp.md) · [in-process](docs/agent.md) | Each way in detail |
+| [Build your own agent](docs/agents-build.md) | What an agent must do per protocol, with a minimal one for each |
+| [Runners over MCP](docs/serve-mcp.md) · [as an A2A agent](docs/serve-a2a.md) | Making a runner callable by Claude, an IDE or another agent |
 
 ---
 
@@ -930,11 +1077,12 @@ import {
   connect, pool, toolOptions,       // MCP, local or remote
   login, logout, fileTokenStore,    // remote MCP auth
   preflight, searchServers,         // discovery
+  agentCard, searchAgents,          // an A2A agent's card, the ACP registry
 } from "@ghostmind-dev/ensemble";
 ```
 
 Every seam is a function type, so anything can be replaced: `Decider` (Jev),
-`Human` (a person), `Caller` (OpenRouter), `Handler` (your code). That is what
+`Human` (a person), `Caller` (OpenRouter), `Delegate` (external agents), `Handler` (your code). That is what
 makes the test suite free and offline — and, with `fallback:` on a decide node,
 what keeps one young vendor from being a single point of failure.
 

@@ -1,72 +1,33 @@
 {
   "id": "JDPxx3FVr4HO",
   "name": "ensemble",
-  "version": "0.19.0",
   "type": "project",
-  "description": "Multi-model agent ensembles. Scenes (one TypeScript file) define nodes \u2014 any model, typed shared state, tool-using agents, human/agent approval pauses \u2014 wired by conditional edges and executed over OpenRouter.",
-  "tags": [
-    "agents",
-    "orchestration",
-    "openrouter",
-    "mcp",
-    "cli"
-  ],
+  "description": "Typed decisions wired to your code: a graph whose forks are Jev's calibrated answers, proven offline and recorded as JSON. The npm library only; the hosted product and the docs site are the private ghostmind-app/together.",
+  "tags": ["jev", "decisions", "graph", "openrouter", "mcp", "library"],
   "routines": {
-    "dev": "node src/cli.ts serve dev/.ensemble/scenes --port 7777",
-    "check": "npm run typecheck",
     "test": "npm test",
-    "validate": "node src/cli.ts validate dev/.ensemble/scenes/starter.mts",
-    "view": "node src/cli.ts view dev/.ensemble/scenes/starter.mts",
-    "runs": "node src/cli.ts serve dev/.ensemble/scenes --port 7777 --no-open",
+    "typecheck": "npm run typecheck",
+    "validate": "node src/cli.ts validate examples/09-frontdesk/frontdesk.mts",
     "herdr_init": "run herdr init ensemble --all",
     "herdr_attach": "run herdr attach ensemble",
-    "herdr_terminate": "run herdr terminate ensemble",
-    "jury": "node src/cli.ts run dev/.ensemble/scenes/jury.mts \"Should a two-person team start a new internal tool on SQLite or Postgres?\" --budget 0.10",
-    "trivia": "node src/cli.ts run dev/.ensemble/scenes/trivia.mts \"Run a fun 5-question trivia night\" --budget 0.30"
+    "herdr_terminate": "run herdr terminate ensemble"
   },
   "herdr": {
     "workspaces": [
       {
         "label": "ensemble",
-        "focus": false,
         "tabs": [
           {
-            "label": "dev",
+            "label": "lib",
+            "prefix": false,
             "focus": true,
             "layout": "compact",
             "compact": {
               "type": "main-side",
               "panes": [
-                {
-                  "name": "run",
-                  "description": "Primary pane for executing scenes: `node src/cli.ts run scenes/<scene>.mts \"<goal>\"`. Runs are long-lived and stream per-node output, so keep this pane dedicated to them.",
-                  "focus": true
-                },
-                {
-                  "name": "check",
-                  "description": "Typecheck and validation loop: `npx tsc --noEmit` and `node src/cli.ts validate scenes/*.mts`. Validation is free, so run it here before spending tokens on a run."
-                },
-                {
-                  "name": "shell",
-                  "description": "Free shell for ad-hoc work \u2014 editing scenes, inspecting .ensemble/runs/<id>/state.json, or checking `ensemble models`. Kept empty so the run pane is never interrupted."
-                }
-              ]
-            }
-          },
-          {
-            "label": "inspect",
-            "layout": "compact",
-            "compact": {
-              "type": "vertical",
-              "panes": [
-                {
-                  "name": "topology",
-                  "description": "Render scene topology: `node src/cli.ts view scenes/<scene>.mts` for the terminal sketch, `--mermaid` for diagram source, or `--html=g.html` for a browser view."
-                },
-                {
-                  "name": "artifacts",
-                  "description": "Inspect run output under .ensemble/runs/<timestamp>-<scene>/ \u2014 `state.json` is the checkpointed blackboard, `result.md` renders every state key."
-                }
+                { "name": "claude", "description": "Claude Code session for the whole project", "focus": true },
+                { "name": "check", "description": "the free loop: npm run typecheck, npm test, node src/cli.ts validate <runner>" },
+                { "name": "execution-shell", "description": "ad-hoc commands" }
               ]
             }
           }

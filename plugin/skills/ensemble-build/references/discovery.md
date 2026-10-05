@@ -1,4 +1,4 @@
-# Finding models, skills and MCP servers
+# Finding models, skills, MCP servers and agents
 
 A runner only names what exists. Look things up live; never type an id, a price
 or a capability from memory, because all three change weekly.
@@ -67,8 +67,8 @@ npx ensemble servers github    # search; shows the launch command and ⚠ missin
 
 In code: `const [entry] = await searchServers("filesystem"); toServerSpec(entry)`
 gives `{ command, args, env }` for `mcpServers`, and `missingEnv(entry)` lists
-what still has to be set. A remote-only server (no stdio package) can't be used,
-because this client speaks stdio.
+what still has to be set. For a remote-only server it gives `{ url, transport }`,
+which may still ask for a login (`npx ensemble mcp login <server>`).
 
 To choose a tool on a server, list its tools once while writing the runner and
 freeze them into the file:
@@ -85,3 +85,82 @@ module scope: that would start a process just to validate the file.
 
 When the use case needs a server, record in the hand-over which env vars it needs,
 and whether `npx` has to download it on first run.
+
+## Agents (A2A cards, the ACP registry, the MCP registry)
+
+An `agent` node names an entry of the runner's `agents`. There is no single
+directory of agents: where to look depends on the protocol. Which protocol fits
+is in the skill's `SKILL.md` ("When a step is an agent").
+
+**OpenRouter lists models, not agents.** It has no public directory of agents
+to search. What its documentation does have is "interns" (agents a person
+creates on OpenRouter, listed only for their own API key) and a beta
+`openrouter:subagent` server tool (a model hands a task to a smaller worker
+model inside one call). Neither is a place to find someone else's agent, so the
+three sources below are the ones to use.
+
+**A2A: the agent's own card.** There is no central A2A list, by design: each
+agent publishes its own card at its own address. Get the address from whoever
+runs the agent, then read the card:
+
+```sh
+npx ensemble agents card https://agent.example.com        # JSON on stdout; the agents: { … } line to paste on stderr
+npx ensemble agents card https://agent.example.com --header authorization="Bearer $TOKEN"   # a card behind auth
+```
+
+The card is looked for at `<url>/.well-known/agent-card.json`; a url ending in
+`.json` is taken as the card itself. In code:
+`await agentCard("researcher", { protocol: "a2a", url })` returns
+`{ name, description, version, interfaces, streaming, skills, security, raw }`.
+Read `interfaces` (this client speaks `JSONRPC` and `HTTP+JSON`) and `security`
+(what `auth` to declare) before writing the declaration.
+
+**ACP: the protocol's registry.** One published JSON file lists the agents that
+speak ACP and how each is launched:
+https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json
+
+```sh
+npx ensemble agents            # every agent, with the declaration that launches it
+npx ensemble agents code       # filter by id, name or description
+```
+
+An entry distributed through `npx` or `uvx` prints a declaration that works as
+written (`{ protocol: "acp", command: "npx", args: ["-y", "<package>", …] }`);
+one distributed as a binary says so, and is installed first and then named by
+its command. In code: `const [entry] = await searchAgents("code");
+toAgentSpec(entry)` gives the declaration, or `undefined` for a binary. Any
+program that speaks ACP on stdio works whether or not it is listed.
+
+The registry says how to launch an agent, not how it behaves. Before declaring
+one, find out what it does without asking and how its own configuration is set
+to ask (the safety rule in `SKILL.md`). Two have been run with this client,
+`agento acp` and `opencode acp`: their declarations are in `api.md` §3
+("Tested declarations").
+
+**MCP: a tool that is an agent.** Some servers offer an agent as one tool (a
+prompt in, an answer out). Find the server in the official MCP registry with
+`npx ensemble servers <q>`, declare it in `mcpServers`, list its tools once as
+shown above, and name the tool:
+`{ protocol: "mcp", server: "tools", tool: "ask_agent", input: "prompt" }`,
+where `input` is the argument the message goes in. `agento mcp` serves agento
+that way, with the tool `run_task` (`api.md` §3).
+
+**Which agents to prefer.** The ones supported out of the box are open source
+and use OpenRouter as their only model provider, so `OPENROUTER_API_KEY` is the
+one key and the one bill: `agento` and `opencode` first. An approved,
+version-pinned catalog of them is planned; until it exists, an agent is
+installed by hand and declared.
+
+**The commands, all of them:**
+
+| Command | What it does |
+|---|---|
+| `npx ensemble agents [query]` | Search the ACP registry; print each agent and the declaration that launches it |
+| `npx ensemble agents card <url> [--header k=v]` | Read an A2A agent's card |
+| `npx ensemble agents list <runner file>` | The agents a runner declares: name, protocol, where, and the auth mode or permission policy. Never a secret |
+| `npx ensemble servers [query]` | Search the MCP registry, for an agent offered as a tool |
+| `npx ensemble mcp login <agent or server> <runner file>` | Log in once to an OAuth A2A agent or MCP server |
+| `npm run check -- <runner file>` | Confirm each declared agent can be reached from here |
+
+Record in the hand-over what has to be installed, which secret or login each
+agent needs, and whether it reports a cost.

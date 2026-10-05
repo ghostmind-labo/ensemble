@@ -159,7 +159,7 @@ const SECRET_HEADER = /authorization|token|secret|key|password|cookie|session/i;
  * Secrets written inline rather than as `${NAME}` — a warning, because a
  * runner file gets committed, shared and pasted into chats.
  */
-export function literalSecrets(server: string, spec: RemoteServerSpec): string[] {
+export function literalSecrets(server: string, spec: RemoteServerSpec, what = "MCP server"): string[] {
   const found: string[] = [];
   const literal = (value: unknown): boolean => typeof value === "string" && value.length > 0 && templateNames(value).length === 0;
   const pem = (value: unknown): boolean => typeof value === "string" && value.includes("-----BEGIN");
@@ -181,7 +181,7 @@ export function literalSecrets(server: string, spec: RemoteServerSpec): string[]
       if (literal(auth.passphrase)) found.push(at("passphrase"));
     }
   }
-  return found.map((where) => `MCP server "${server}" has a literal secret in ${where} — write it as "\${NAME}" and set NAME in the environment`);
+  return found.map((where) => `${what} "${server}" has a literal secret in ${where} — write it as "\${NAME}" and set NAME in the environment`);
 }
 
 export const authList = (spec: RemoteServerSpec): McpAuth[] =>

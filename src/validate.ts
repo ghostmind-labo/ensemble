@@ -14,10 +14,12 @@
  * Problems are returned as strings, never thrown. `validate` is a report;
  * `execute` is what refuses to run.
  */
+import { REASONING_EFFORTS } from "./openrouter.ts";
 import {
   branchHolds,
   externalKeys,
   imageKeys,
+  isAgent,
   isCode,
   isDecide,
   isHuman,
@@ -37,6 +39,8 @@ import {
 import { optionsOf } from "./questions.ts";
 import { literalSecrets, safeUrl, authList } from "./mcp-auth.ts";
 import type { McpServerSpec, RemoteServerSpec } from "./mcp.ts";
+import { ACP_TOOL_KINDS, AGENT_PROTOCOLS, type AgentSpec } from "./agent.ts";
+import { forwardServer } from "./acp.ts";
 
 const IDENT = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 const list = (xs: string[]): string => xs.map((x) => `"${x}"`).join(", ");
@@ -62,11 +66,12 @@ export function validate(spec: RunnerSpec): string[] {
       isCode(node) && "code",
       isModel(node) && "model",
       isMcp(node) && "mcp",
+      isAgent(node) && "agent",
     ].filter(Boolean);
     if (kinds.length !== 1) {
       problems.push(
         kinds.length === 0
-          ? `node "${name}" is none of decide / work / code / model / mcp — a node must be exactly one`
+          ? `node "${name}" is none of decide / work / code / model / mcp / agent — a node must be exactly one`
           : `node "${name}" is both ${kinds.join(" and ")} — a node must be exactly one`,
       );
       continue;
@@ -156,6 +161,9 @@ export function validate(spec: RunnerSpec): string[] {
         problems.push(`node "${name}" names no model — give it an id, or { from: "<state key>" }`);
       }
       if (!node.prompt) problems.push(`node "${name}" has no prompt — the instruction IS the node`);
+      if (node.reasoning !== undefined && !REASONING_EFFORTS.includes(node.reasoning)) {
+        problems.push(`node "${name}" has reasoning "${String(node.reasoning)}" — use one of ${REASONING_EFFORTS.join(", ")}`);
+      }
       const writes = node.writes ?? [];
       if (writes.length > 2) {
         problems.push(
@@ -198,6 +206,33 @@ export function validate(spec: RunnerSpec): string[] {
         problems.push(
           `node "${name}" declares writes ${list(node.writes!)} — an mcp node writes at most two keys, ` +
             `positionally: [text] or [text, data]`,
+        );
+      }
+    }
+
+    if (isAgent(node)) {
+      const agents = spec.agents ?? {};
+      if (!node.agent || typeof node.agent !== "string") {
+        problems.push(`node "${name}" names no agent — give it a key of the runner's agents: { … }`);
+      } else if (!agents[node.agent]) {
+        const known = Object.keys(agents);
+        problems.push(
+          `node "${name}" delegates to agent "${node.agent}", which the runner does not declare. ` +
+            (known.length
+              ? `Declared: ${list(known)}`
+              : `Declare it: agents: { ${IDENT.test(node.agent) ? node.agent : JSON.stringify(node.agent)}: { protocol: "a2a", url: "https://…" } }`),
+        );
+      }
+      if (node.prompt !== undefined && typeof node.prompt !== "string" && typeof node.prompt !== "function") {
+        problems.push(`node "${name}" has a prompt that is neither text nor a function — or leave it out to send the node's reads`);
+      }
+      if (node.prompt === "") {
+        problems.push(`node "${name}" has an empty prompt — write the request, or leave prompt out to send the node's reads`);
+      }
+      if ((node.writes ?? []).length > 2) {
+        problems.push(
+          `node "${name}" declares writes ${list(node.writes!)} — an agent node writes at most two keys, ` +
+            `positionally: [text] or [text, detail]`,
         );
       }
     }
@@ -524,6 +559,9 @@ export function validate(spec: RunnerSpec): string[] {
   /* ── mcp servers: a command or a url, and auth that can work ── */
   for (const [server, raw] of Object.entries(spec.mcpServers ?? {})) problems.push(...serverProblems(server, raw));
 
+  /* ── agents: one of three protocols, each with what it needs to be reached ── */
+  for (const [agent, raw] of Object.entries(spec.agents ?? {})) problems.push(...agentProblems(agent, raw, spec));
+
   /* ── reachability ── */
   if (spec.entry && names.has(spec.entry)) {
     const reached = new Set([spec.entry]);
@@ -558,6 +596,98 @@ const TRANSPORTS = ["auto", "streamable-http", "sse", "websocket"];
 const GRANTS = ["authorization_code", "device_code", "client_credentials", "refresh_token"];
 const CLIENT_AUTH = ["none", "client_secret_basic", "client_secret_post", "private_key_jwt"];
 
+/** One declared agent: a known protocol, and the fields that protocol cannot work without. */
+function agentProblems(agent: string, raw: AgentSpec, spec: RunnerSpec): string[] {
+  const at = `agent "${agent}"`;
+  const fields = (raw ?? {}) as unknown as Record<string, unknown>;
+  const protocol = fields["protocol"];
+  if (typeof protocol !== "string" || !(AGENT_PROTOCOLS as readonly string[]).includes(protocol)) {
+    const guess = typeof fields["url"] === "string" ? "a2a" : typeof fields["command"] === "string" ? "acp" : typeof fields["server"] === "string" ? "mcp" : undefined;
+    return [
+      `${at} has protocol ${JSON.stringify(protocol)} — say how it is reached: protocol: "a2a" (a hosted agent, by url), ` +
+        `"acp" (a local agent, launched as a command) or "mcp" (an agent offered as a tool)` +
+        (guess ? `. This one looks like protocol: "${guess}"` : ""),
+    ];
+  }
+  const problems: string[] = [];
+  if (raw.protocol === "a2a") {
+    if (typeof raw.url !== "string" || !raw.url) return [`${at} needs url — where the agent lives, e.g. https://agent.example.com`];
+    let url: URL | undefined;
+    try {
+      url = new URL(raw.url);
+    } catch {
+      problems.push(`${at} has url "${raw.url}", which is not a url — e.g. https://agent.example.com`);
+    }
+    if (url && !["http:", "https:"].includes(url.protocol)) problems.push(`${at} uses ${url.protocol}// — an A2A agent is reached over http(s)://`);
+    for (const field of ["card", "endpoint"] as const) {
+      const value = raw[field];
+      if (value === undefined) continue;
+      try {
+        new URL(value, url);
+      } catch {
+        problems.push(`${at} has ${field} "${value}", which is not a url`);
+      }
+    }
+    if (raw.binding !== undefined && !["JSONRPC", "HTTP+JSON"].includes(raw.binding)) {
+      problems.push(`${at} has binding "${raw.binding}" — use "JSONRPC" or "HTTP+JSON", or leave it out (gRPC is not spoken)`);
+    }
+    if (raw.version !== undefined && !["1.0", "0.3"].includes(raw.version)) {
+      problems.push(`${at} has version "${raw.version}" — use "1.0" or "0.3", or leave it out to read it from the card`);
+    }
+    problems.push(...authProblems(at, { url: raw.url, ...(raw.auth !== undefined ? { auth: raw.auth } : {}) }, url));
+  } else if (raw.protocol === "acp") {
+    if (typeof raw.command !== "string" || !raw.command) {
+      return [`${at} needs command — the program that speaks ACP on stdio, e.g. command: "opencode", args: ["acp"]`];
+    }
+    if (raw.args !== undefined && (!Array.isArray(raw.args) || raw.args.some((arg) => typeof arg !== "string"))) {
+      problems.push(`${at} has args that are not a list of strings`);
+    }
+    const policy = raw.permissions;
+    if (policy !== undefined && policy !== "reject" && policy !== "allow") {
+      const kinds = (policy as { allow?: unknown })?.allow;
+      if (!Array.isArray(kinds)) {
+        problems.push(`${at} has permissions ${JSON.stringify(policy)} — use "reject" (the default), "allow", or { allow: ["read", "search"] }`);
+      } else {
+        const unknown = kinds.filter((kind) => !ACP_TOOL_KINDS.includes(String(kind)));
+        if (unknown.length) problems.push(`${at} allows ${list(unknown.map(String))}, which ${unknown.length === 1 ? "is not an ACP tool kind" : "are not ACP tool kinds"}. Kinds: ${ACP_TOOL_KINDS.join(", ")}`);
+      }
+    }
+    if (raw.mcpServers !== undefined) {
+      if (!Array.isArray(raw.mcpServers)) problems.push(`${at} has mcpServers that is not a list — name the runner's servers to hand over: mcpServers: ["fs"]`);
+      else {
+        const servers = spec.mcpServers ?? {};
+        for (const key of raw.mcpServers) {
+          const server = servers[key];
+          if (!server) {
+            const known = Object.keys(servers);
+            problems.push(`${at} is handed MCP server "${key}", which the runner does not declare. ` + (known.length ? `Declared: ${list(known)}` : `No mcpServers are declared.`));
+            continue;
+          }
+          if (typeof (server as { command?: unknown }).command === "string") continue;
+          // Whether the agent takes url servers is only known at the handshake; auth that cannot travel is known now.
+          const { why } = forwardServer(key, server, { http: true, sse: true });
+          if (why) problems.push(`${at} cannot be handed MCP server "${key}": ${why}`);
+        }
+      }
+    }
+    if ("terminal" in fields) {
+      problems.push(`${at} asks for a terminal — this client never offers one. The agent runs commands with its own tools, gated by permissions`);
+    }
+  } else {
+    const servers = spec.mcpServers ?? {};
+    if (typeof raw.server !== "string" || !raw.server) problems.push(`${at} needs server — a key of the runner's mcpServers`);
+    else if (!servers[raw.server]) {
+      const known = Object.keys(servers);
+      problems.push(
+        `${at} uses MCP server "${raw.server}", which the runner does not declare. ` +
+          (known.length ? `Declared: ${list(known)}` : `No mcpServers are declared.`),
+      );
+    }
+    if (typeof raw.tool !== "string" || !raw.tool) problems.push(`${at} needs tool — the name of the tool that IS the agent`);
+  }
+  return problems;
+}
+
 /** One declared server: is it something the client can reach, with auth it can use? */
 function serverProblems(server: string, raw: McpServerSpec): string[] {
   const at = `MCP server "${server}"`;
@@ -586,7 +716,14 @@ function serverProblems(server: string, raw: McpServerSpec): string[] {
     problems.push(`${at} is a ${url!.protocol}// url but says transport "${spec.transport}" — use transport: "websocket"`);
   }
 
-  const auths = authList(spec);
+  problems.push(...authProblems(at, spec, url));
+  return problems;
+}
+
+/** Auth that can work — shared by remote MCP servers and A2A agents, which are asked who they are the same ways. */
+function authProblems(at: string, spec: Pick<RemoteServerSpec, "url" | "auth">, url: URL | undefined): string[] {
+  const problems: string[] = [];
+  const auths = authList(spec as RemoteServerSpec);
   if (auths.filter((auth) => auth?.type === "oauth").length > 1) problems.push(`${at} lists oauth twice — combine it into one`);
   for (const auth of auths) {
     const mode = `${at} auth (${auth?.type})`;
@@ -660,6 +797,31 @@ export function warnings(spec: RunnerSpec): string[] {
     const credentials = authList(remote).some((auth) => !["none", "headers"].includes(auth.type)) || Object.keys(remote.headers ?? {}).length > 0;
     if (!local && credentials && (url.protocol === "http:" || url.protocol === "ws:")) {
       found.push(`MCP server "${server}" sends credentials to ${safeUrl(url)} without TLS — use https:// or wss://`);
+    }
+  }
+  for (const [agent, raw] of Object.entries(spec.agents ?? {})) {
+    if (raw?.protocol === "acp") {
+      // A key handed to a local agent belongs in the environment, by name.
+      for (const [key, value] of Object.entries(raw.env ?? {})) {
+        if (/token|secret|key|password/i.test(key) && typeof value === "string" && value && !/\$\{[A-Za-z_][A-Za-z0-9_]*\}/.test(value)) {
+          found.push(`agent "${agent}" has a literal secret in env["${key}"] — write it as "\${NAME}" and set NAME in the environment`);
+        }
+      }
+      continue;
+    }
+    if (raw?.protocol !== "a2a" || typeof raw.url !== "string") continue;
+    const remote: RemoteServerSpec = { url: raw.url, ...(raw.headers ? { headers: raw.headers } : {}), ...(raw.auth !== undefined ? { auth: raw.auth } : {}) };
+    found.push(...literalSecrets(agent, remote, "agent"));
+    let url: URL | undefined;
+    try {
+      url = new URL(remote.url);
+    } catch {
+      continue;
+    }
+    const local = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+    const credentials = authList(remote).some((auth) => !["none", "headers"].includes(auth.type)) || Object.keys(remote.headers ?? {}).length > 0;
+    if (!local && credentials && url.protocol === "http:") {
+      found.push(`agent "${agent}" sends credentials to ${safeUrl(url)} without TLS — use https://`);
     }
   }
   return found;

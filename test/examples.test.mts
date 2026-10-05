@@ -7,6 +7,8 @@ import { dirname, join } from "node:path";
 import {
   isRunner,
   type Answer,
+  type AgentRequest,
+  type Delegate,
   type Caller,
   type Decider,
   type ModelReply,
@@ -28,6 +30,7 @@ const refine = await load("examples/03-refine/refine.mts");
 const robot = await load("examples/04-robot/brain.mts");
 const studio = await load("examples/08-studio/studio.mts");
 const frontdesk = await load("examples/09-frontdesk/frontdesk.mts");
+const delegated = await load("examples/10-delegate/delegate.mts");
 
 // ── 1 · every example validates ─────────────────────────────────────────────
 for (const [name, example] of [
@@ -37,13 +40,14 @@ for (const [name, example] of [
   ["04-robot", robot],
   ["08-studio", studio],
   ["09-frontdesk", frontdesk],
+  ["10-delegate", delegated],
 ] as const) {
   assert.deepEqual(example.validate(), [], `${name} must be sound`);
 }
 console.log("ok · 1 every example validates clean");
 
 // ── 2 · every example serialises to a complete graph ────────────────────────
-for (const example of [triage, picture, refine, robot, studio, frontdesk]) {
+for (const example of [triage, picture, refine, robot, studio, frontdesk, delegated]) {
   const graph = example.graph();
   assert.deepEqual(JSON.parse(JSON.stringify(graph)), graph);
   assert.match(graph.runner.hash, /^sha256:/);
@@ -349,4 +353,61 @@ console.log("ok · 9 the studio example loops twice, then hands off; a memo skip
 }
 console.log("ok · 10 the frontdesk example carries every concept, and safety outranks the routing");
 
-console.log("10 cases");
+// ── 11 · 10 delegates to a declared agent, and a decide node judges the reply ─
+{
+  const graph = delegated.graph();
+  const node = graph.nodes.find((n) => n.id === "research")!;
+  assert.equal(node.kind, "agent");
+  assert.equal(node.agent!.name, "researcher");
+  assert.equal(node.agent!.protocol, "a2a");
+  assert.equal(node.agent!.auth, "bearer", "how it authenticates, in words — the token is a name in the runner and absent here");
+  assert.ok(!JSON.stringify(graph).includes("RESEARCH_AGENT_TOKEN") || !JSON.stringify(graph).includes("Bearer "));
+
+  const asked: AgentRequest[] = [];
+  const agent = (replies: string[]): Delegate => async (request) => {
+    asked.push(request);
+    return { text: replies[asked.length - 1] ?? replies.at(-1)!, status: "completed", artifacts: [], toolCalls: [], permissions: [], meta: { name: "stub" } };
+  };
+  const decider = (route: string, verdicts: number[]): Decider => {
+    let reviews = 0;
+    return async (_state: unknown, questions: Record<string, Question>) => {
+      const answers: Record<string, Answer> = {};
+      for (const [key, q] of Object.entries(questions)) {
+        if (q.type === "choice") answers[key] = { type: "choice", choice: route, confidence: 0.9, probabilities: { [route]: 0.9 } };
+        else if (q.type === "noul") answers[key] = { type: "noul", noul: verdicts[reviews++] ?? 1 };
+      }
+      return { model: "stub", answers, usage: { input_tokens: 1, output_tokens: 0 }, cost: 0.00002 };
+    };
+  };
+
+  // Small talk never reaches the agent.
+  const direct = await delegated({ goal: "thanks!" }, { decider: decider("direct", []), delegate: agent(["unused"]) });
+  assert.deepEqual(direct.run.steps.map((s) => s.node), ["triage", "answer", "deliver"]);
+  assert.equal(asked.length, 0);
+
+  // A weak reply goes round once; the second is delivered.
+  const outcome = await delegated(
+    { goal: "What changed in the last release?" },
+    { decider: decider("research", [0.2, 0.9]), delegate: agent(["Some things.", "Streaming was added in 2.1."]) },
+  );
+  assert.deepEqual(outcome.run.steps.map((s) => s.node), ["triage", "research", "review", "tally", "research", "review", "deliver"]);
+  assert.equal(outcome.result, "Streaming was added in 2.1.");
+  assert.equal(asked.length, 2, "one call per node execution");
+  assert.equal(asked[0]!.name, "researcher");
+  assert.equal(asked[0]!.agent.protocol, "a2a");
+  assert.match(asked[1]!.prompt, /A first answer was judged incomplete/);
+  const step = outcome.run.steps[1]!;
+  assert.equal(step.kind, "agent");
+  assert.equal(step.meta!["cost"], "unknown");
+  assert.equal((outcome.state["delegation"] as { status: string }).status, "completed");
+
+  // The loop budget is on the edge: two weak replies and the run still ends.
+  asked.length = 0;
+  const stuck = await delegated({ goal: "?" }, { decider: decider("research", [0.1, 0.1]), delegate: agent(["no", "still no"]) });
+  assert.equal(asked.length, 2);
+  assert.equal(stuck.run.run.status, "completed");
+  assert.equal(stuck.result, "still no");
+}
+console.log("ok · 11 the delegate example routes, delegates once per step, judges the reply and bounds the retry");
+
+console.log("11 cases");

@@ -5,6 +5,8 @@ import assert from "node:assert/strict";
 import {
   choice,
   imageKeys,
+  OpenRouterError,
+  RunFailed,
   runner,
   validate,
   type Caller,
@@ -236,4 +238,42 @@ console.log("ok · 6 a model node needs an id and a prompt, and writes at most t
 }
 console.log("ok · 7 graph.json names the model, the prompt and what the node looks at");
 
-console.log("7 cases");
+// ── 8 · reasoning: declared on the node, sent, drawn, checked; and a billed failure is not free ─
+{
+  const spec: RunnerSpec = {
+    name: "thinker",
+    work: {},
+    nodes: {
+      think: { model: "vendor/thinker", prompt: "solve it", writes: ["answer"], maxTokens: 700, reasoning: "low" },
+    },
+    edges: [],
+    entry: "think",
+  };
+  const caller = stub([{ text: "42" }]);
+  await runner(spec)({ goal: "g" }, { caller });
+  assert.equal(caller.seen[0]!.reasoning, "low", "the node's effort reaches the call");
+  assert.equal(runner(spec).graph().nodes[0]!.model!.reasoning, "low", "and the graph says it");
+  assert.deepEqual(
+    validate({ ...spec, nodes: { think: { ...spec.nodes["think"]!, reasoning: "lots" as never } } }),
+    ['node "think" has reasoning "lots" — use one of max, xhigh, high, medium, low, minimal, none'],
+  );
+
+  // The model thought its allowance away: nothing came back, and it was billed.
+  const billed: Caller = async () => {
+    throw new OpenRouterError("vendor/thinker spent its 700 tokens reasoning and wrote no answer", { cost: 0.0098, usage: { prompt_tokens: 40, completion_tokens: 700 } });
+  };
+  await assert.rejects(
+    () => runner(spec)({ goal: "g" }, { caller: billed }),
+    (error: unknown) => {
+      assert.ok(error instanceof RunFailed);
+      assert.equal(error.run.steps[0]!.cost, 0.0098, "the failed step records what it cost");
+      assert.equal(error.run.run.cost.total, 0.0098, "and the run's total counts it");
+      assert.deepEqual(error.run.steps[0]!.meta, { usage: { prompt_tokens: 40, completion_tokens: 700 } });
+      return true;
+    },
+  );
+
+}
+console.log("ok · 8 a node's reasoning effort is sent and drawn, and a failed model call still costs what it cost");
+
+console.log("8 cases");

@@ -11,8 +11,8 @@
     {
       "name": "ensemble",
       "source": "./plugin",
-      "description": "Build, prove and tune @ghostmind-dev/ensemble runners: calibrated Jev decisions wired to your own code. Skills for writing the graph, designing the questions, and reading the runs.",
-      "version": "0.30.0",
+      "description": "Operate @ghostmind-dev/ensemble runners end to end: build a decision graph, prove it, dry-run it for $0, run it, watch a live run and stop or answer it, read and tune the runs, and host runners over MCP or A2A.",
+      "version": "0.33.0",
       "author": {
         "name": "ghostmind"
       },

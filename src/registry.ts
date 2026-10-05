@@ -13,6 +13,11 @@
  *   The **Agent Skills** ecosystem, which since the format was opened as a
  *   standard has real directories behind it. `searchSkills` reads one of them.
  *
+ *   The **ACP registry** (`cdn.agentclientprotocol.com`), one published JSON
+ *   file listing the agents that speak the Agent Client Protocol and how each
+ *   is launched. `searchAgents` reads it. (An A2A agent has no central list by
+ *   design: it is found by its own card, which `agentCard` in `a2a.ts` reads.)
+ *
  * A caveat stated rather than buried: the MCP registry is a specified API and
  * is treated as one. skills.sh is not — it is an undocumented endpoint behind a
  * website, and it may change or vanish without notice. It is here because
@@ -22,11 +27,16 @@
  * fetching those automatically from a public index is not something a library
  * should do quietly.
  */
+import { existsSync } from "node:fs";
+import { delimiter, join } from "node:path";
 import { isRemote, type McpServerSpec, type RemoteServerSpec } from "./mcp.ts";
-import { authList, authMode, loginStatus, safeUrl, secretNames, type SecretResolver } from "./mcp-auth.ts";
+import { authList, authMode, loginStatus, safeUrl, secretNames, templateNames, type SecretResolver } from "./mcp-auth.ts";
+import { describeAgent, type A2aAgentSpec, type AcpAgentSpec, type AgentSpec } from "./agent.ts";
+import type { AgentCard } from "./a2a.ts";
 
 export const MCP_REGISTRY_URL = "https://registry.modelcontextprotocol.io";
 export const SKILLS_INDEX_URL = "https://skills.sh";
+export const ACP_REGISTRY_URL = "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json";
 
 export interface EnvVarSpec {
   name: string;
@@ -327,7 +337,81 @@ export async function searchSkills(
   }
 }
 
+/* ────────────────────────────── the ACP registry ─────────────────────────── */
+
+export interface RegistryAgent {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  repository?: string;
+  website?: string;
+  license?: string;
+  /** How it is obtained: `npx`, `uvx`, `binary`. */
+  distribution: string[];
+  /** Present when a package manager can launch it as it stands. A binary must be installed first. */
+  launch?: { command: string; args: string[] };
+}
+
+/**
+ * Agents that speak ACP, from the protocol's own registry.
+ *
+ * The registry is one JSON file, so a search is a fetch and a filter. What it
+ * answers is "which agents could an `acp` agent point at, and with what
+ * command" — an entry distributed through npx or uvx can be launched as
+ * written; one distributed as a binary has to be installed first, and says so.
+ */
+export async function searchAgents(query?: string, config: DiscoveryConfig & { limit?: number } = {}): Promise<RegistryAgent[]> {
+  const doFetch = config.fetch ?? globalThis.fetch;
+  const url = config.baseUrl ?? ACP_REGISTRY_URL;
+  let payload: { agents?: Array<Record<string, unknown>> };
+  try {
+    const response = await doFetch(url, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(config.timeoutMs ?? 15_000) });
+    if (!response.ok) throw new DiscoveryError(`the ACP registry returned HTTP ${response.status}`, { status: response.status });
+    payload = (await response.json()) as typeof payload;
+  } catch (cause) {
+    if (cause instanceof DiscoveryError) throw cause;
+    throw new DiscoveryError(`could not read the ACP registry at ${url}: ${(cause as Error).message}`, { cause });
+  }
+  const needle = (query ?? "").trim().toLowerCase();
+  const out: RegistryAgent[] = [];
+  for (const raw of payload.agents ?? []) {
+    const distribution = (raw["distribution"] ?? {}) as Record<string, { package?: unknown; args?: unknown }>;
+    const entry: RegistryAgent = {
+      id: String(raw["id"] ?? ""),
+      name: String(raw["name"] ?? ""),
+      version: String(raw["version"] ?? ""),
+      description: String(raw["description"] ?? ""),
+      ...(raw["repository"] ? { repository: String(raw["repository"]) } : {}),
+      ...(raw["website"] ? { website: String(raw["website"]) } : {}),
+      ...(raw["license"] ? { license: String(raw["license"]) } : {}),
+      distribution: Object.keys(distribution),
+    };
+    for (const [manager, command, flags] of [["npx", "npx", ["-y"]], ["uvx", "uvx", []]] as const) {
+      const how = distribution[manager];
+      if (entry.launch || !how || typeof how.package !== "string") continue;
+      const extra = Array.isArray(how.args) ? how.args.filter((arg): arg is string => typeof arg === "string") : [];
+      entry.launch = { command, args: [...flags, how.package, ...extra] };
+    }
+    if (!entry.id) continue;
+    if (needle && !`${entry.id} ${entry.name} ${entry.description}`.toLowerCase().includes(needle)) continue;
+    out.push(entry);
+  }
+  return out.slice(0, config.limit ?? 100);
+}
+
+/** A registry entry as an `agents` declaration, when it can be launched as it stands. */
+export const toAgentSpec = (entry: RegistryAgent): AcpAgentSpec | undefined =>
+  entry.launch ? { protocol: "acp", command: entry.launch.command, args: entry.launch.args } : undefined;
+
 /* ──────────────────────────────── preflight ──────────────────────────────── */
+
+/** Is a command launchable from here? A look along PATH, never a spawn. */
+function onPath(command: string, path: string | undefined): boolean {
+  if (command.includes("/") || command.includes("\\")) return existsSync(command);
+  const extensions = process.platform === "win32" ? ["", ".exe", ".cmd", ".bat"] : [""];
+  return (path ?? "").split(delimiter).some((dir) => dir && extensions.some((ext) => existsSync(join(dir, `${command}${ext}`))));
+}
 
 export interface Preflight {
   /** Hard problems: this graph cannot run as written, here. */
@@ -364,8 +448,13 @@ export async function preflight(
     nodes: Record<string, unknown>;
     skills?: Array<{ name: string; path: string; description: string; compatibility?: string }>;
     mcpServers?: Record<string, McpServerSpec>;
+    agents?: Record<string, AgentSpec>;
   },
   config: DiscoveryConfig & {
+    /** Reads an A2A agent's card. Default: the network. A test passes a stub. */
+    card?: (name: string, agent: A2aAgentSpec) => Promise<AgentCard>;
+    /** Is this command launchable here? Default: a look along PATH. */
+    which?: (command: string) => boolean;
     catalog?: () => Promise<Array<{ id: string; vision: boolean; draws: boolean; tools: boolean }>>;
     env?: Record<string, string | undefined>;
     /** Checks `${NAME}`s in remote MCP servers — by name, never printing a value. Default: `env`. */
@@ -396,7 +485,7 @@ export async function preflight(
   ].filter(Boolean);
   if (callers.length) need("OPENROUTER_API_KEY", callers.join(" and "));
 
-  const secrets: Array<{ name: string; server: string }> = [];
+  const secrets: Array<{ name: string; server: string; what?: string }> = [];
   const checked = new Set<string>();
   for (const [name, raw] of mcps) {
     const node = raw as { mcp: { server: string } };
@@ -422,6 +511,62 @@ export async function preflight(
           `MCP server "${node.mcp.server}" needs a login — run: npx ensemble mcp login ${node.mcp.server} --url ${safeUrl(server.url)}`,
         );
       }
+    }
+  }
+
+  // Agents: a card that can be read and spoken to, a command that exists, a
+  // tool on a declared server. Checked once per agent, however many nodes use it.
+  const delegating = nodes.filter(([, node]) => node && typeof node === "object" && "agent" in node);
+  const seen = new Set<string>();
+  for (const [name, raw] of delegating) {
+    const key = String((raw as { agent: unknown }).agent);
+    const agent = (spec.agents ?? {})[key];
+    if (!agent || seen.has(key)) continue;
+    seen.add(key);
+    if (agent.protocol === "acp") {
+      notes.push(
+        `node "${name}" launches agent "${key}" as a local process over ACP (${describeAgent(agent)}); ` +
+          `permission requests are answered "${typeof (agent.permissions ?? "reject") === "string" ? (agent.permissions ?? "reject") : `allow: ${(agent.permissions as { allow: string[] }).allow.join(", ")}`}"`,
+      );
+      for (const value of [...Object.values(agent.env ?? {}), ...(agent.args ?? [])]) {
+        for (const secret of templateNames(value)) secrets.push({ name: secret, server: key, what: "agent" });
+      }
+      const found = config.which ? config.which(agent.command) : onPath(agent.command, env["PATH"]);
+      if (!found) problems.push(`agent "${key}" runs "${agent.command}", which is not on PATH here — install it, or give the full path as command`);
+      continue;
+    }
+    if (agent.protocol === "mcp") {
+      notes.push(`node "${name}" reaches agent "${key}" as the MCP tool ${describeAgent(agent)}`);
+      const server = (spec.mcpServers ?? {})[agent.server];
+      if (server && isRemote(server)) for (const secret of secretNames(server)) secrets.push({ name: secret, server: agent.server });
+      continue;
+    }
+    if (agent.protocol !== "a2a") continue;
+    const remote = { url: agent.url, ...(agent.headers ? { headers: agent.headers } : {}), ...(agent.auth !== undefined ? { auth: agent.auth } : {}) };
+    for (const secret of secretNames(remote)) secrets.push({ name: secret, server: key, what: "agent" });
+    try {
+      const card = config.card
+        ? await config.card(key, agent)
+        : await (await import("./a2a.ts")).agentCard(key, agent, {
+            // The same environment the rest of this check reads, so `env` in a test or a host is honoured.
+            secretResolver: config.secretResolver ?? ((secret) => env[secret]),
+            ...(config.tokenStore ? { tokenStore: config.tokenStore } : {}),
+          });
+      const route = (await import("./a2a.ts")).chooseInterface(key, agent, card);
+      notes.push(
+        `node "${name}" delegates to agent "${key}" — "${card.name}"${card.version ? ` ${card.version}` : ""} at ${describeAgent(agent)} ` +
+          `(A2A ${route.dialect}, ${route.binding}, ${card.streaming && agent.streaming !== false ? "streaming" : "polling"}, auth: ${authMode(remote)})`,
+      );
+      if (card.skills.length) notes.push(`agent "${key}" offers: ${card.skills.map((skill) => skill.name || skill.id).slice(0, 8).join(", ")}${card.skills.length > 8 ? ", …" : ""}`);
+      if (card.security.length && agent.auth === undefined && !Object.keys(agent.headers ?? {}).length) {
+        notes.push(
+          `agent "${key}" declares security (${card.security.map((scheme) => `${scheme.name}: ${scheme.type}`).join(", ")}) and the runner gives it no auth — add auth to agents.${key} if calls are refused`,
+        );
+      }
+    } catch (error) {
+      const message = (error as Error).message;
+      // A missing secret is reported once, by name, below — not as an unreachable agent.
+      if (!/which (is|are) not set/.test(message)) problems.push(message);
     }
   }
 
@@ -470,11 +615,13 @@ export async function preflight(
   }
 
   // A secret is reported by NAME, set or not, so a run never starts only to find one missing.
-  for (const { name, server } of secrets) {
+  for (const { name, server, what } of secrets) {
     const set = config.secretResolver ? Boolean(await config.secretResolver(name)) : Boolean(env[name]);
+    const why = `${what ?? "MCP server"} "${server}"`;
     const existing = needs.find((entry) => entry.name === name);
-    if (existing) existing.why = `${existing.why} and MCP server "${server}"`;
-    else needs.push({ name, why: `MCP server "${server}"`, set });
+    if (existing) {
+      if (!existing.why.includes(why)) existing.why = `${existing.why} and ${why}`;
+    } else needs.push({ name, why, set });
   }
 
   for (const entry of needs) {
