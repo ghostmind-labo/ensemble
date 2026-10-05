@@ -152,6 +152,8 @@ console.log("ok · 3 a stream carries node:start / node:end as status updates, t
   assert.equal(right.status.state, "TASK_STATE_COMPLETED");
   assert.equal(right.artifacts[0].parts[0].text, "declined: refund for ask about A-104");
   assert.equal(right.metadata.ensemble.steps, 3, "one continuous run record");
+  assert.deepEqual(right.history.filter((message: Json) => message.role === "ROLE_USER").map((message: Json) => message.parts[0].text), ["ask about A-104", "ok=yes\ntier=platinum", "ok=no\ntier=senior"], "the history keeps what the caller said, in order");
+  assert.equal(right.history[right.history.length - 1].parts[1].data.node, "say_no");
 
   // As data, and for a task that is not waiting.
   const second = (await rpc(served.url, "SendMessage", text("ask about A-200"))).result.task as Json;
@@ -182,6 +184,10 @@ console.log("ok · 5 a runner calling a pausing runner fails with the fix, and t
   assert.equal(started.status.state, "TASK_STATE_WORKING", "returnImmediately answers before the run ends");
   const polled = (await rpc(served.url, "GetTask", { id: started.id })).result as Json;
   assert.equal(polled.status.state, "TASK_STATE_WORKING");
+  assert.deepEqual(polled.history.map((message: Json) => [message.role, message.parts[0].text]), [["ROLE_USER", "hang on"], ["ROLE_AGENT", "write took e0"]], "a caller that polls sees the steps so far");
+  assert.equal(polled.history[1].parts[1].data.node, "write");
+  assert.equal((await rpc(served.url, "GetTask", { id: started.id, historyLength: 1 })).result.history.length, 1);
+  assert.equal((await rpc(served.url, "GetTask", { id: started.id, historyLength: 0 })).result.history.length, 0);
   const cancelled = (await rpc(served.url, "CancelTask", { id: started.id })).result as Json;
   assert.equal(cancelled.status.state, "TASK_STATE_CANCELED");
   assert.equal(seen.aborted, 1, "the handler was told to stop");

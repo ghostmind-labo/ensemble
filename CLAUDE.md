@@ -96,10 +96,16 @@ redesigned once already. Pages: `docs/serve-a2a.md`, `docs/serve-mcp.md`.
 
 `plugin/` + `.claude-plugin/marketplace.json` — the Claude Code plugin (marketplace
 `ghostmind-ensemble`, plugin `ensemble`). It is **not** part of the npm package
-(`files` excludes it), so the library still ships no skills. Its three skills teach
+(`files` excludes it), so the library still ships no skills. Its four skills teach
 an agent to use the library: `ensemble-build` (use case → validated runner, with
-`scripts/dryrun.mts`, a $0 executor), `ensemble-questions` (question design) and
-`ensemble-runs` (reading and tuning runs, with `scripts/summarize.mts`).
+`scripts/dryrun.mts`, a $0 executor), `ensemble-questions` (question design),
+`ensemble-runs` (reading and tuning runs, with `scripts/summarize.mts`) and
+`ensemble-serve` (a runner as MCP tools or an A2A agent, and the viewer).
+
+The viewer is a separate open package, `@ghostmind-dev/ensemble-view`
+(`/Volumes/Projects/labo/ensemble-view`): a read-only page over `.ensemble/runs`
+that reads `run.json` and `graph.json` and never imports a runner. Nothing here
+may depend on it, and it stays out of this repo (see the viewer rule below).
 
 The skills present ensemble as a **structure** (a graph, a shared state with a proven
 data flow, and a run record), not as a closed toolbox. They install it as a library

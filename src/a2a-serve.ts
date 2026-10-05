@@ -11,6 +11,7 @@
  *   the RunEvent stream       → status updates, one as each node starts and ends
  *   a `by: "human"` pause     → `input-required`; the caller answers, the run resumes
  *   CancelTask                → the run's AbortSignal
+ *   GetTask                   → the task, with each finished step in its `history`
  *   the result                → one artifact
  *
  * The caller steers only where the graph declared a pause, with the same closed
@@ -205,6 +206,12 @@ export function a2aAgent(runner: Runner, options: AgentOptions = {}): A2aAgent {
     });
   };
 
+  /** One more message in the task's history: what the caller sent, and each step as it finished. */
+  const remember = (entry: Entry, role: string, parts: unknown): void => {
+    const history = (entry.task["history"] ??= []) as Json[];
+    history.push({ messageId: randomUUID(), role, parts, taskId: entry.task["id"], contextId: entry.task["contextId"] });
+  };
+
   /** Run, or resume, until the task ends or pauses. Never rejects: every ending is a task state. */
   function drive(entry: Entry, start: (runOptions: RunOptions) => ReturnType<Runner>, resumed?: Paused): Promise<void> {
     const onEvent = (event: RunEvent): void => {
@@ -222,8 +229,14 @@ export function a2aAgent(runner: Runner, options: AgentOptions = {}): A2aAgent {
           ms: step.ms,
           cost: step.cost,
           ...(step.answers ? { answers: step.answers } : {}),
+          ...(step.meta ? { meta: step.meta } : {}),
           ...(step.error ? { error: step.error } : {}),
         });
+        // The same step, kept: a caller that polls with GetTask sees as much as one that streamed.
+        remember(entry, "ROLE_AGENT", [
+          { text: `${step.node} ${step.error ? `failed: ${step.error}` : step.took ? `took ${step.took}` : "ended"}` },
+          { data: { n: step.n, node: step.node, kind: step.kind, lane: step.lane, took: step.took, ms: step.ms, cost: step.cost, ...(step.answers ? { answers: step.answers } : {}), ...(step.meta ? { meta: step.meta } : {}) } },
+        ]);
       }
     };
     const finish = (state: string, run: RunDoc | undefined, text?: string, extra: Json = {}): void => {
@@ -281,6 +294,7 @@ export function a2aAgent(runner: Runner, options: AgentOptions = {}): A2aAgent {
       if (!paused) throw refuse(-32602, `Task ${waitingId} is not waiting for an answer: it is ${String(obj(entry.task["status"])["state"])}`);
       const answer = toAnswer(message, paused.pending);
       delete entry.paused;
+      remember(entry, "ROLE_USER", message["parts"] ?? []);
       entry.task["status"] = status("TASK_STATE_WORKING");
       if (listen) entry.listeners.add(listen);
       entry.settled = drive(entry, (runOptions) => runner.resume(paused, answer, runOptions), paused);
@@ -303,6 +317,7 @@ export function a2aAgent(runner: Runner, options: AgentOptions = {}): A2aAgent {
       settled: Promise.resolve(),
     };
     tasks.set(String(entry.task["id"]), entry);
+    remember(entry, "ROLE_USER", message["parts"] ?? []);
     // Before the run starts: its first node:start fires synchronously.
     if (listen) entry.listeners.add(listen);
     entry.settled = drive(entry, (runOptions) => runner(inputs, runOptions));
@@ -322,7 +337,12 @@ export function a2aAgent(runner: Runner, options: AgentOptions = {}): A2aAgent {
       if (configuration["returnImmediately"] !== true && configuration["blocking"] !== false) await entry.settled;
       return { task: entry.task };
     },
-    GetTask: async (params) => find(params).task,
+    GetTask: async (params) => {
+      const { task } = find(params);
+      const length = params["historyLength"];
+      const history = (task["history"] ?? []) as Json[];
+      return typeof length === "number" && length >= 0 ? { ...task, history: length === 0 ? [] : history.slice(-length) } : task;
+    },
     CancelTask: async (params) => {
       const entry = find(params);
       if (DONE.has(String(obj(entry.task["status"])["state"]))) throw refuse(-32002, "Task cannot be canceled");

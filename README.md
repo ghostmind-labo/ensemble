@@ -812,6 +812,7 @@ This repo is also a Claude Code plugin marketplace:
 | `ensemble-build` | Use case → a runner that validates and has been dry-run down every branch |
 | `ensemble-questions` | Writing `choice` / `score` / `noul` that Jev answers well, gates and thresholds |
 | `ensemble-runs` | Reading `run.json` and supervised journals, explaining a path, calibrating |
+| `ensemble-serve` | Serving a runner as MCP tools or an A2A agent, answering its pauses, viewing runs |
 
 The plugin is not part of the npm package; the library itself ships no skills.
 

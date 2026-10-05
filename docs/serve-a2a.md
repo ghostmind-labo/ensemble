@@ -47,10 +47,11 @@ its own port. Both take `run`, passed to every run: a `stepTimeout`, a `secretRe
 | The agent card | `graph.json`: the name, the description, the inputs. Its `version` is the graph hash |
 | A message's text | `goal` |
 | A message's data part | The other declared inputs, e.g. `{ "amount": 40 }` |
-| A status update, while working | A `RunEvent`. `metadata.ensemble` holds `event` (`node:start` or `node:end`), `node`, `kind`, `lane`, and on an end `took`, `ms`, `cost`, `answers` |
+| A status update, while working | A `RunEvent`. `metadata.ensemble` holds `event` (`node:start` or `node:end`), `node`, `kind`, `lane`, and on an end `took`, `ms`, `cost`, `answers`, and `meta` (what a handler passed to `report()`) |
 | `input-required` | A `by: "human"` node paused. The status message lists the questions; `metadata.ensemble.pending` holds them as data |
 | A message with that `taskId` | The answer. The run resumes in the same task |
 | `CancelTask` | The run's `AbortSignal`, which reaches every handler |
+| `GetTask` | The task as it is now. Its `history` holds what the caller sent and one message per finished step (text, plus the step as data), so polling shows as much as streaming. `historyLength` limits it |
 | The artifact | The runner's `result`: text, plus a data part when it is not a string |
 | `metadata.ensemble` on the task | The run id, the graph hash, the steps taken, and the cost. A2A has no field for cost, so it is here |
 
