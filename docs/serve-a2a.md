@@ -95,12 +95,31 @@ paused one waiting for its answer, is the store's expiry.
 
 A stream is served by the instance that received the request, so keep long-lived connections allowed at the ingress.
 
+## Shutting down
+
+When an instance is replaced (a deploy, a scale-down), stopping it should not drop the runs it is in the middle of.
+`ensemble serve a2a` does this on SIGTERM or Ctrl-C; in your own server, call `drain()` from your signal handler:
+
+```ts
+const agent = a2aAgent(triage, { store });
+process.on("SIGTERM", () => void agent.drain(25_000).then(() => process.exit(0)));
+```
+
+| While draining | What happens |
+|---|---|
+| A new message or an answer to a pause | Refused with `503` and `Retry-After`, so the caller or the load balancer sends it to another instance |
+| `GetTask`, `CancelTask` | Still answered |
+| A run in flight | Finishes, or pauses, as it would have |
+| A run still going after the grace period (25 s by default, `--grace` on the CLI) | Stopped; its task is recorded as cancelled |
+
+Set the grace period below what your platform allows a stopping instance.
+
 ## Limits
 
 - With the default store, tasks live in this process's memory: a restart forgets them, and a second instance has
   never heard of them. Give it a shared store to change that (see below).
-- A run executes on the instance that received it. If that instance dies mid-run, the task is reported failed; it is
-  not picked up by another.
+- A run executes on the instance that received it. If that instance dies without warning mid-run, the task is
+  reported failed; it is not picked up by another. A planned stop drains first (see above).
 - One runner per handler. Mount several handlers for several runners.
 - A2A 1.0 over JSON-RPC only: no 0.3 dialect, no HTTP+JSON binding, no push notifications.
 - The library's own `agent` node cannot answer `input-required`, so a runner delegating to a pausing runner fails with

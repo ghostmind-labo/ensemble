@@ -555,6 +555,9 @@ a two-argument decider is still a valid `Decider`.
 
 CLI (through `package.json` scripts, never global):
 `ensemble validate | graph | run | resume <file> <paused.json> | calibrate <file> <cases> | check | skills [q] [--remote] | servers [q] | agents [q] | agents card <url> | agents list <file> | mcp login·logout·status | serve mcp <file...> | serve a2a <file> | version`.
+`serve` takes `--port`, `--host`, `--token`, `--budget`, `--secret` (mcp),
+`--public-url` (a2a) and `--grace <seconds>`: on SIGTERM or Ctrl-C it refuses
+new work and lets the runs in flight finish for that long (default 25).
 A run that fails still writes its `run.json` and `graph.json` (status
 `failed`, the error on the step where it stopped) and exits 1.
 Run options: `--input k=v`, `--budget`, `--max-steps`, `--json`, `-o`; `resume`

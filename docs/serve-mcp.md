@@ -94,6 +94,18 @@ Two things to plan for:
 - On a platform without Node's `(req, res)`, call `handle(message, { signal })` yourself: it takes one JSON-RPC
   message and returns `{ status, body }`, with no transport in it.
 
+## Shutting down
+
+`ensemble serve mcp --port …` drains on SIGTERM or Ctrl-C: new calls are refused with `503` and `Retry-After` (so the
+caller or a load balancer tries another instance), calls in flight return their result, and whatever is still running
+after the grace period (25 s by default, `--grace <seconds>`) is stopped and returns `isError` with status
+`cancelled`. In your own server, call `drain()` from your signal handler:
+
+```ts
+const tools = mcpTools([triage], { secret: process.env.MCP_SECRET });
+process.on("SIGTERM", () => void tools.drain(25_000).then(() => process.exit(0)));
+```
+
 ## Protocol revisions
 
 MCP changed shape in revision `2026-07-28`: no `initialize` handshake, no sessions, metadata on every request, and

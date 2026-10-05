@@ -5,6 +5,7 @@
 // `answer` tool, cancel on both transports, a token and a budget.
 // No decider is called: the only decide node asks a person.
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { PassThrough } from "node:stream";
 import { mcpTools, serveTools, LEGACY_VERSIONS, MODERN_VERSIONS, type ServeOptions } from "../src/mcp-serve.ts";
 import { connect, runner } from "../src/index.ts";
@@ -268,8 +269,50 @@ console.log("ok · 7 a run is cancelled by hanging up (HTTP) or by notifications
   assert.throws(() => mcpTools([named("has space")]), /cannot be a tool/);
   assert.throws(() => mcpTools([named("twin"), named("twin")]), /two runners are named "twin"/);
   assert.throws(() => mcpTools([runner({ name: "broken", work: {}, nodes: { a: { work: "missing" } }, edges: [], entry: "a" })]), /does not validate, so it is not served/);
-  assert.deepEqual(Object.keys(mcpTools({ one: named("one"), two: named("two") })), ["handle", "handler", "stdio", "close"], "a record of runners works too");
+  assert.deepEqual(Object.keys(mcpTools({ one: named("one"), two: named("two") })), ["handle", "handler", "stdio", "drain", "close"], "a record of runners works too");
 }
 console.log("ok · 8 a token is required, the budget caps a call, and unservable runners are refused by name");
 
-console.log("8 cases");
+// ── 9 · a clean shutdown: no new calls, calls in flight return, and SIGTERM does the same ──
+{
+  const served = await serve();
+  const slow = call(served.url, "refunds", { goal: "slow one" });
+  await new Promise((done) => setTimeout(done, 60));
+  const draining = served.drain(5_000);
+  const refused = await fetch(served.url, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": "2026-07-28", "mcp-method": "tools/call", "mcp-name": "refunds" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 90, method: "tools/call", params: { name: "refunds", arguments: { goal: "another" }, _meta: meta() } }),
+  });
+  assert.equal(refused.status, 503, "a new call is refused, so a load balancer sends it elsewhere");
+  assert.equal(refused.headers.get("retry-after"), "1");
+  assert.equal((await slow).body.result.content[0].text, "paid: refund for slow one", "the call in flight returned its result");
+  await draining;
+
+  // Past the grace period the call is stopped, and its result says so.
+  const before = seen.aborted;
+  const again = await serve();
+  const stuck = call(again.url, "refunds", { goal: "hang forever" });
+  await new Promise((done) => setTimeout(done, 60));
+  await again.drain(80);
+  assert.equal(seen.aborted, before + 1);
+  const stopped = (await stuck).body.result as Json;
+  assert.equal(stopped.isError, true);
+  assert.equal(stopped.structuredContent.status, "cancelled");
+
+  // The serve command drains on SIGTERM and exits 0.
+  const child = spawn(process.execPath, ["src/cli.ts", "serve", "mcp", "test/fixtures/refunds.mts", "--port", "4399", "--grace", "5"], { stdio: ["ignore", "ignore", "pipe"] });
+  let log = "";
+  child.stderr.on("data", (chunk) => (log += String(chunk)));
+  for (let waited = 0; !log.includes("MCP tools at") && waited < 5_000; waited += 50) await new Promise((done) => setTimeout(done, 50));
+  const inFlight = call("http://127.0.0.1:4399/mcp", "refunds", { goal: "slow under sigterm" });
+  await new Promise((done) => setTimeout(done, 100));
+  child.kill("SIGTERM");
+  assert.equal((await inFlight).body.result.content[0].text, "paid: refund for slow under sigterm");
+  const code = await new Promise((done) => child.on("exit", done));
+  assert.equal(code, 0);
+  assert.match(log, /SIGTERM: finishing the runs in flight/);
+}
+console.log("ok · 9 drain refuses new calls and lets the ones in flight return; SIGTERM drains and exits 0");
+
+console.log("9 cases");

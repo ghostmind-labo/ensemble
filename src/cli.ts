@@ -104,6 +104,8 @@ Options
       --secret <s>   serve mcp: the key paused runs are sealed with (or
                      MCP_SECRET); without it a restart forgets them
       --public-url <url> serve a2a: the address callers reach it at
+      --grace <s>    serve: on SIGTERM or Ctrl-C, how long runs in flight may
+                     take to finish before they are stopped (default 25)
 
 The file must default-export a runner(). Scenes are .mts, loaded by Node's own
 type stripping — Node 22.18 or newer.
@@ -407,6 +409,7 @@ async function main(): Promise<void> {
       token: { type: "string" },
       secret: { type: "string" },
       "public-url": { type: "string" },
+      grace: { type: "string" },
     },
   });
 
@@ -721,6 +724,19 @@ async function main(): Promise<void> {
 
     case "serve": {
       const budget = num(values.budget);
+      const grace = (num(values.grace) ?? 25) * 1000;
+      // A stop signal is a request to finish, not to drop: runs in flight get the grace period.
+      const onStop = (served: { drain(graceMs?: number): Promise<void> }): void => {
+        let stopping = false;
+        for (const signal of ["SIGTERM", "SIGINT"] as const) {
+          process.on(signal, () => {
+            if (stopping) process.exit(1); // a second signal means now
+            stopping = true;
+            process.stderr.write(`  ${signal}: finishing the runs in flight (up to ${grace / 1000}s)\n`);
+            void served.drain(grace).then(() => process.exit(0));
+          });
+        }
+      };
       const shared = { ...(budget !== undefined ? { budget } : {}), ...(values.host ? { host: values.host } : {}) };
       if (file === "mcp") {
         if (!rest.length) return die("no file given — ensemble serve mcp <file.mts> [more files]");
@@ -736,6 +752,7 @@ async function main(): Promise<void> {
           if (values.port) {
             const served = await serveTools(runners, { ...options, port: num(values.port)! });
             process.stderr.write(`${names}: MCP tools at ${served.url}\n`);
+            onStop(served);
             const pauses = runners.some((runner) => runner.graph().nodes.some((node) => node.decide?.by === "human"));
             if (pauses && !secret) {
               process.stderr.write(`  ⚠ no --secret: a paused run can only be resumed by this process. Set MCP_SECRET to survive a restart or run several instances\n`);
@@ -761,6 +778,7 @@ async function main(): Promise<void> {
             ...(values["public-url"] ? { publicUrl: values["public-url"] } : {}),
           });
           process.stderr.write(`${runner.spec.name} is an A2A agent at ${served.url} (card: ${served.url}/.well-known/agent-card.json)\n`);
+          onStop(served);
         } catch (error) {
           die((error as Error).message);
         }

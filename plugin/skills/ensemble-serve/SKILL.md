@@ -97,6 +97,10 @@ Behind a load balancer, on Kubernetes or on a serverless platform, a request may
 
 A run still executes on the instance that received it, so it must fit that platform's request timeout.
 
+When an instance is stopped on purpose, it should finish what it is doing first. `ensemble serve` does this on
+SIGTERM (`--grace <seconds>`, default 25): new work is refused with `503` so it goes to another instance, and runs in
+flight complete. In your own server, call `drain()` on the adapter from your signal handler.
+
 ## Letting the caller steer
 
 A caller can steer a run only where the graph declares a pause: a decide node with `by: "human"`. It answers the same

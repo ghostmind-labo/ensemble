@@ -101,7 +101,13 @@ export interface McpTools {
   handler: Handler;
   /** Newline-delimited JSON-RPC over two streams. Resolves when the input ends. */
   stdio(input?: NodeJS.ReadableStream, output?: NodeJS.WritableStream): Promise<void>;
-  /** Stop every run in flight. */
+  /**
+   * Shut down without breaking anything: refuse new calls (503 over HTTP, so the caller or a load
+   * balancer tries elsewhere) and wait for the calls in flight to return. Whatever is still running
+   * after `graceMs` (default 25 s) is stopped.
+   */
+  drain(graceMs?: number): Promise<void>;
+  /** Stop every run in flight, now. */
   close(): void;
 }
 
@@ -335,6 +341,9 @@ export function mcpTools(runners: Runner[] | Record<string, Runner>, options: To
   /* ── the protocol: one message at a time, nothing remembered ── */
 
   const inFlight = new Map<string | number, AbortController>();
+  /** Calls being served right now, for drain(). */
+  const calls = new Set<Promise<void>>();
+  let draining = false;
 
   async function handle(message: unknown, context: Context): Promise<Reply> {
     const request = obj(message);
@@ -379,6 +388,8 @@ export function mcpTools(runners: Runner[] | Record<string, Runner>, options: To
       if (method === "server/discover") return ok({ supportedVersions: [...MODERN_VERSIONS, ...LEGACY_VERSIONS], capabilities: { tools: {} } });
       if (method === "tools/list") return ok({ tools: tools() });
       if (method === "tools/call") {
+        // Shutting down: this call would not have time to finish here.
+        if (draining) return error(503, -32603, "this instance is shutting down: send the call again");
         // A form may be sent only to a caller that said it can show one, and only in the current revision.
         const elicitation = obj(meta[`${META}clientCapabilities`])["elicitation"];
         const form = modern && elicitation !== undefined && (Object.keys(obj(elicitation)).length === 0 || obj(elicitation)["form"] !== undefined);
@@ -387,7 +398,11 @@ export function mcpTools(runners: Runner[] | Record<string, Runner>, options: To
         context.signal.addEventListener("abort", relay, { once: true });
         inFlight.set(id, abort);
         try {
-          const result = await call(params, { ...context, signal: abort.signal }, form);
+          const working = call(params, { ...context, signal: abort.signal }, form);
+          const tracked = working.then(() => {}, () => {});
+          calls.add(tracked);
+          void tracked.then(() => calls.delete(tracked));
+          const result = await working;
           if (result["resultType"] === "input_required") return { status: 200, body: { jsonrpc: "2.0", id, result: { ...result, _meta: { [`${META}serverInfo`]: SERVER_INFO } } } };
           return ok(result);
         } finally {
@@ -477,7 +492,7 @@ export function mcpTools(runners: Runner[] | Record<string, Runner>, options: To
       const reply = await handle(message, { signal: gone.signal, header, ...(notify ? { notify } : {}) });
       if (gone.signal.aborted) return;
       if (opened) return void res.end(`data: ${JSON.stringify(reply.body)}\n\n`);
-      json(reply.status, reply.body);
+      json(reply.status, reply.body, reply.status === 503 ? { "retry-after": "1" } : {});
     };
 
     const parsed = (req as Parsed).body;
@@ -523,6 +538,15 @@ export function mcpTools(runners: Runner[] | Record<string, Runner>, options: To
     handle,
     handler,
     stdio,
+    drain: async (graceMs = 25_000) => {
+      draining = true;
+      const settled = Promise.all([...calls]);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([settled, new Promise((done) => (timer = setTimeout(done, graceMs)))]);
+      clearTimeout(timer);
+      for (const abort of live) abort.abort();
+      await settled;
+    },
     close: () => {
       for (const abort of live) abort.abort();
     },
@@ -532,6 +556,8 @@ export function mcpTools(runners: Runner[] | Record<string, Runner>, options: To
 export interface Served {
   url: string;
   server: Server;
+  /** Finish the calls in flight (up to `graceMs`), then stop listening. For SIGTERM. */
+  drain(graceMs?: number): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -553,6 +579,13 @@ export async function serveTools(runners: Runner[] | Record<string, Runner>, opt
   return {
     url: `http://${address.includes(":") ? `[${address}]` : address}:${port}/mcp`,
     server,
+    drain: async (graceMs) => {
+      await tools.drain(graceMs);
+      // Give the last replies a moment to leave before the sockets are closed.
+      await new Promise((done) => setTimeout(done, 50));
+      server.closeAllConnections();
+      await new Promise<void>((done) => server.close(() => done()));
+    },
     close: () =>
       new Promise<void>((done) => {
         tools.close();

@@ -25,11 +25,13 @@ const refunds = runner({
     slow: ({ signal }) =>
       new Promise((_, reject) => signal.addEventListener("abort", () => (seen.aborted++, reject(new Error("stopped"))), { once: true })),
     spend: ({ report }) => (report({ cost: 0.4 }), "spent"),
+    nap: () => new Promise((done) => setTimeout(() => done("rested"), 300)),
   },
   nodes: {
     write: { work: "draft", reads: ["amount"], writes: ["draft"] },
     wait: { work: "slow", writes: ["waited"] },
     burn: { work: "spend", writes: ["burnt"] },
+    rest: { work: "nap", writes: ["rested"] },
     burn_again: { work: "spend", writes: ["burnt"] },
     approve: {
       decide: { ok: noul("Should this refund be issued as drafted?"), tier: choice("Which approval tier applies?", { standard: null, senior: null }) },
@@ -42,11 +44,13 @@ const refunds = runner({
   edges: [
     { from: "write", to: "wait", when: ({ goal }) => String(goal).startsWith("hang") },
     { from: "write", to: "burn", when: ({ goal }) => String(goal).startsWith("spend") },
+    { from: "write", to: "rest", when: ({ goal }) => String(goal).startsWith("slow") },
     { from: "write", to: "approve", when: ({ goal }) => String(goal).startsWith("ask") },
     { from: "write", to: "pay_it" },
     { from: "burn", to: "burn_again" },
     { from: "burn_again", to: "pay_it" },
     { from: "wait", to: "pay_it" },
+    { from: "rest", to: "pay_it" },
     { from: "approve", to: "pay_it", on: "ok" },
     { from: "approve", to: "say_no" },
   ],
@@ -309,4 +313,33 @@ console.log("ok · 8 the handler works mounted under a path with the body alread
 }
 console.log("ok · 9 with a shared store, any instance can report on, answer or cancel a task");
 
-console.log("9 cases");
+// ── 10 · a clean shutdown: no new work, runs in flight finish, the rest are stopped at the deadline ──
+{
+  const store = memoryStore();
+  const served = await serve({ store });
+  const slow = (await rpc(served.url, "SendMessage", { ...text("slow one"), configuration: { returnImmediately: true } })).result.task as Json;
+  const draining = served.drain(5_000);
+
+  const refused = await fetch(`${served.url}/a2a`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "SendMessage", params: text("another") }) });
+  assert.equal(refused.status, 503, "new work is refused, so a load balancer sends it elsewhere");
+  assert.equal(refused.headers.get("retry-after"), "1");
+  assert.match(((await refused.json()) as Json).error.message, /shutting down/);
+  assert.equal((await rpc(served.url, "GetTask", { id: slow.id })).result.status.state, "TASK_STATE_WORKING", "asking after a task still works");
+
+  await draining;
+  const ended = (await store.get(`task:${slow.id}`)) as Json;
+  assert.equal(ended.task.status.state, "TASK_STATE_COMPLETED", "the run in flight finished instead of being dropped");
+  assert.equal(ended.task.artifacts[0].parts[0].text, "paid: refund for slow one");
+  await assert.rejects(() => fetch(`${served.url}/a2a`, { method: "POST", body: "{}" }), "and then it stopped listening");
+
+  // Past the grace period, what is left is stopped, and the task says so.
+  const before = seen.aborted;
+  const again = await serve({ store });
+  const stuck = (await rpc(again.url, "SendMessage", { ...text("hang forever"), configuration: { returnImmediately: true } })).result.task as Json;
+  await again.drain(80);
+  assert.equal(seen.aborted, before + 1);
+  assert.equal(((await store.get(`task:${stuck.id}`)) as Json).task.status.state, "TASK_STATE_CANCELED");
+}
+console.log("ok · 10 drain refuses new work, lets runs finish, and stops what outlives the grace period");
+
+console.log("10 cases");

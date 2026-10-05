@@ -117,13 +117,21 @@ type Mounted = IncomingMessage & { baseUrl?: string; body?: unknown };
 
 export interface A2aAgent {
   handler: Handler;
-  /** Stop every run in flight. */
+  /**
+   * Shut down without breaking anything: refuse new work (503, so the caller or a load balancer
+   * tries elsewhere), keep answering status checks and cancels, and wait for the runs in flight to
+   * end or pause. Whatever is still running after `graceMs` (default 25 s) is stopped.
+   */
+  drain(graceMs?: number): Promise<void>;
+  /** Stop every run in flight, now. */
   close(): void;
 }
 
 export interface Served {
   url: string;
   server: Server;
+  /** Finish the runs in flight (up to `graceMs`), then stop listening. For SIGTERM. */
+  drain(graceMs?: number): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -226,6 +234,7 @@ export function a2aAgent(runner: Runner, options: AgentOptions = {}): A2aAgent {
   const graph = runner.graph();
   /** Tasks running in this process. Everything else is asked of the store. */
   const tasks = new Map<string, Entry>();
+  let draining = false;
   const store = options.store ?? memoryStore(options.keep ?? 200);
   const heartbeatMs = options.heartbeatMs ?? 10_000;
   const staleMs = options.staleMs ?? 45_000;
@@ -523,6 +532,12 @@ export function a2aAgent(runner: Runner, options: AgentOptions = {}): A2aAgent {
     if (version && version !== "1.0") return reply({ error: { code: -32009, message: `A2A version ${String(version)} is not supported: this agent speaks 1.0` } });
     const params = obj(call["params"]);
 
+    // Shutting down: no new work here. Asking after a task, or cancelling one, still works.
+    if (draining && (call["method"] === "SendMessage" || call["method"] === "SendStreamingMessage")) {
+      res.writeHead(503, { "content-type": "application/json", "retry-after": "1" });
+      return void res.end(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32603, message: "this instance is shutting down: send the message again" } }));
+    }
+
     if (call["method"] === "SendStreamingMessage") {
       let entry: Entry;
       const early: Json[] = [];
@@ -554,14 +569,25 @@ export function a2aAgent(runner: Runner, options: AgentOptions = {}): A2aAgent {
     }
   }
 
+  const close = (): void => {
+    for (const entry of tasks.values()) {
+      clearInterval(entry.beat);
+      entry.abort.abort();
+    }
+  };
   return {
     handler,
-    close: () => {
-      for (const entry of tasks.values()) {
-        clearInterval(entry.beat);
-        entry.abort.abort();
-      }
+    drain: async (graceMs = 25_000) => {
+      draining = true;
+      const settled = Promise.all([...tasks.values()].map((entry) => entry.settled));
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([settled, new Promise((done) => (timer = setTimeout(done, graceMs)))]);
+      clearTimeout(timer);
+      // Past the deadline: stop what is left, and let each task record that it was cancelled.
+      close();
+      await settled;
     },
+    close,
   };
 }
 
@@ -577,6 +603,11 @@ export async function serveRunner(runner: Runner, options: ServeOptions = {}): P
   return {
     url: options.publicUrl ?? `http://${address.includes(":") ? `[${address}]` : address}:${port}`,
     server,
+    drain: async (graceMs) => {
+      await agent.drain(graceMs);
+      server.closeAllConnections();
+      await new Promise<void>((done) => server.close(() => done()));
+    },
     close: () =>
       new Promise<void>((done) => {
         agent.close();
