@@ -19,6 +19,10 @@
  * cannot push state into a run at any other moment: that would be a write with
  * no origin, which `validate` exists to rule out.
  *
+ * Tasks live in a store, not in the process: the default is memory, and behind a
+ * load balancer every instance is given the same one (`store`), so any of them
+ * can report on, answer or cancel a task another is running.
+ *
  * A2A has no field for what a task cost, so the run's cost travels in the
  * task's `metadata.ensemble`, next to the run id and the steps taken.
  *
@@ -55,8 +59,51 @@ export interface AgentOptions {
   publicUrl?: string;
   /** Passed to every run: a stub decider in a test, a step timeout, a secret resolver. */
   run?: Omit<RunOptions, "signal" | "onEvent" | "human" | "budget">;
-  /** Finished tasks kept for GetTask. Default 200. */
+  /** Finished tasks kept for GetTask by the default, in-memory store. Default 200. */
   keep?: number;
+  /**
+   * Where tasks are kept. Default: this process's memory, which is right for one instance and wrong
+   * for several. Behind a load balancer, give every instance the same store (Redis, Postgres, any
+   * key-value table) and any of them can answer for a task another one ran.
+   */
+  store?: TaskStore;
+  /** How often a running task is saved and checked for a cancel sent to another instance. Default 10 s. */
+  heartbeatMs?: number;
+  /** A task still "working" with no heartbeat for this long is reported failed: its instance is gone. Default 45 s. */
+  staleMs?: number;
+}
+
+/**
+ * A key-value store of JSON, shared by every instance of the agent. Three methods, so an adapter for
+ * Redis or a database table is a few lines. Keys are `task:<id>` and `cancel:<id>`; expiry is the
+ * store's business (a paused task waits as long as the store keeps it).
+ */
+export interface TaskStore {
+  get(key: string): Promise<Record<string, unknown> | undefined>;
+  set(key: string, value: Record<string, unknown>): Promise<void>;
+  delete(key: string): Promise<void>;
+}
+
+/** The default store: this process's memory. Values are copied in and out, as a real store would. */
+export function memoryStore(keep = 200): TaskStore {
+  const values = new Map<string, Record<string, unknown>>();
+  const done = (value: Record<string, unknown>): boolean => DONE.has(String(obj(obj(value["task"])["status"])["state"]));
+  return {
+    get: async (key) => {
+      const value = values.get(key);
+      return value === undefined ? undefined : structuredClone(value);
+    },
+    set: async (key, value) => {
+      values.delete(key);
+      values.set(key, structuredClone(value));
+      // Forget the oldest finished tasks; a waiting or running one is never dropped.
+      for (const [old, kept] of values) {
+        if (values.size <= keep) break;
+        if (!old.startsWith("task:") || done(kept)) values.delete(old);
+      }
+    },
+    delete: async (key) => void values.delete(key),
+  };
 }
 
 export interface ServeOptions extends AgentOptions {
@@ -80,6 +127,7 @@ export interface Served {
   close(): Promise<void>;
 }
 
+/** A task running in THIS process. Once it ends or pauses it lives only in the store. */
 interface Entry {
   task: Json;
   abort: AbortController;
@@ -88,6 +136,18 @@ interface Entry {
   budget?: number;
   listeners: Set<(event: Json) => void>;
   settled: Promise<void>;
+  /** The chain of writes to the store, in order. */
+  saved: Promise<void>;
+  beat?: ReturnType<typeof setInterval>;
+}
+
+/** A task as the store holds it. */
+interface Stored {
+  task: Json;
+  paused?: Paused;
+  budget?: number;
+  /** When the instance running it last said so. */
+  beat: number;
 }
 
 const obj = (value: unknown): Json => (value && typeof value === "object" && !Array.isArray(value) ? (value as Json) : {});
@@ -164,8 +224,49 @@ export function a2aAgent(runner: Runner, options: AgentOptions = {}): A2aAgent {
   const problems = runner.validate();
   if (problems.length) throw new Error(`runner "${runner.spec.name}" does not validate, so it is not served:\n  - ${problems.join("\n  - ")}`);
   const graph = runner.graph();
+  /** Tasks running in this process. Everything else is asked of the store. */
   const tasks = new Map<string, Entry>();
-  const keep = options.keep ?? 200;
+  const store = options.store ?? memoryStore(options.keep ?? 200);
+  const heartbeatMs = options.heartbeatMs ?? 10_000;
+  const staleMs = options.staleMs ?? 45_000;
+  const stateOf = (task: Json): string => String(obj(task["status"])["state"]);
+
+  /** Write the task as it is now. Writes are chained, so the store never sees them out of order. */
+  const save = (entry: Entry): Promise<void> => {
+    const record: Stored = { task: entry.task, ...(entry.paused ? { paused: entry.paused } : {}), ...(entry.budget !== undefined ? { budget: entry.budget } : {}), beat: Date.now() };
+    const snapshot = structuredClone(record) as unknown as Record<string, unknown>;
+    entry.saved = entry.saved
+      .then(() => store.set(`task:${String(entry.task["id"])}`, snapshot))
+      .catch((error: unknown) => void process.stderr.write(`a2a: the task store refused a write: ${error instanceof Error ? error.message : String(error)}\n`));
+    return entry.saved;
+  };
+
+  /** A cancel may have reached another instance: it leaves a mark in the store, and the one running the task acts on it. */
+  const heedCancel = (entry: Entry): void => {
+    void store.get(`cancel:${String(entry.task["id"])}`).then((mark) => mark && entry.abort.abort(), () => {});
+  };
+
+  /** Start the clock on a task this process is about to run. */
+  const begin = (entry: Entry): void => {
+    tasks.set(String(entry.task["id"]), entry);
+    entry.beat = setInterval(() => {
+      void save(entry);
+      heedCancel(entry);
+    }, heartbeatMs);
+    entry.beat.unref();
+  };
+
+  /** The task as the store has it. One that says "working" but has gone quiet lost its instance. */
+  async function stored(id: string): Promise<Stored | undefined> {
+    const record = (await store.get(`task:${id}`)) as unknown as Stored | undefined;
+    if (!record) return undefined;
+    if (stateOf(record.task) === "TASK_STATE_WORKING" && Date.now() - record.beat > staleMs && !tasks.has(id)) {
+      record.task["status"] = status("TASK_STATE_FAILED", "the instance running this task stopped before it finished");
+      record.beat = Date.now();
+      await store.set(`task:${id}`, record as unknown as Record<string, unknown>);
+    }
+    return record;
+  }
 
   const card = (base: string): Json => ({
     name: graph.runner.name,
@@ -238,6 +339,8 @@ export function a2aAgent(runner: Runner, options: AgentOptions = {}): A2aAgent {
           { data: { n: step.n, node: step.node, kind: step.kind, lane: step.lane, took: step.took, ms: step.ms, cost: step.cost, ...(step.answers ? { answers: step.answers } : {}), ...(step.meta ? { meta: step.meta } : {}) } },
         ]);
       }
+      if (event.type === "node:start") heedCancel(entry);
+      if (event.type !== "run:end") void save(entry);
     };
     const finish = (state: string, run: RunDoc | undefined, text?: string, extra: Json = {}): void => {
       entry.task["metadata"] = { ensemble: { ...(run ? summary(run) : {}), ...extra } };
@@ -274,28 +377,32 @@ export function a2aAgent(runner: Runner, options: AgentOptions = {}): A2aAgent {
         }
         finish("TASK_STATE_FAILED", run, error instanceof Error ? error.message : String(error));
       })
-      .finally(() => {
-        // Forget the oldest finished tasks; a waiting or running one is never dropped.
-        for (const [id, old] of tasks) {
-          if (tasks.size <= keep) break;
-          if (DONE.has(String(obj(old.task["status"])["state"]))) tasks.delete(id);
-        }
+      .finally(async () => {
+        // It ended or it is waiting: either way this process is done with it, and the store has the last word.
+        clearInterval(entry.beat);
+        await save(entry);
+        tasks.delete(String(entry.task["id"]));
+        await store.delete(`cancel:${String(entry.task["id"])}`).catch(() => {});
       });
   }
 
   /** A new task, or the answer to one that is waiting. Returns the entry, already running. */
-  function accept(params: Json, listen?: (event: Json) => void): Entry {
+  async function accept(params: Json, listen?: (event: Json) => void): Promise<Entry> {
     const message = obj(params["message"]);
     const waitingId = typeof message["taskId"] === "string" ? message["taskId"] : undefined;
     if (waitingId) {
-      const entry = tasks.get(waitingId);
-      if (!entry) throw refuse(-32001, "Task not found");
-      const paused = entry.paused;
-      if (!paused) throw refuse(-32602, `Task ${waitingId} is not waiting for an answer: it is ${String(obj(entry.task["status"])["state"])}`);
+      const record = tasks.has(waitingId) ? undefined : await stored(waitingId);
+      if (!record && !tasks.has(waitingId)) throw refuse(-32001, "Task not found");
+      const paused = record?.paused;
+      if (!record || !paused) throw refuse(-32602, `Task ${waitingId} is not waiting for an answer: it is ${stateOf(record?.task ?? tasks.get(waitingId)!.task)}`);
       const answer = toAnswer(message, paused.pending);
-      delete entry.paused;
+      // Whichever instance was asked takes the task over from the store and runs it from here.
+      const entry: Entry = { task: record.task, abort: new AbortController(), ...(record.budget !== undefined ? { budget: record.budget } : {}), listeners: new Set(), settled: Promise.resolve(), saved: Promise.resolve() };
       remember(entry, "ROLE_USER", message["parts"] ?? []);
       entry.task["status"] = status("TASK_STATE_WORKING");
+      begin(entry);
+      // Saved without its snapshot before anything runs, so a second answer finds nothing to resume.
+      await save(entry);
       if (listen) entry.listeners.add(listen);
       entry.settled = drive(entry, (runOptions) => runner.resume(paused, answer, runOptions), paused);
       return entry;
@@ -315,44 +422,64 @@ export function a2aAgent(runner: Runner, options: AgentOptions = {}): A2aAgent {
       ...(budget !== undefined ? { budget } : {}),
       listeners: new Set(),
       settled: Promise.resolve(),
+      saved: Promise.resolve(),
     };
-    tasks.set(String(entry.task["id"]), entry);
     remember(entry, "ROLE_USER", message["parts"] ?? []);
+    begin(entry);
+    await save(entry);
     // Before the run starts: its first node:start fires synchronously.
     if (listen) entry.listeners.add(listen);
     entry.settled = drive(entry, (runOptions) => runner(inputs, runOptions));
     return entry;
   }
 
-  const find = (params: Json): Entry => {
-    const entry = tasks.get(String(params["id"]));
-    if (!entry) throw refuse(-32001, "Task not found");
-    return entry;
+  /** The task wherever it is: running here, or in the store. */
+  const find = async (params: Json): Promise<Json> => {
+    const id = String(params["id"]);
+    const task = tasks.get(id)?.task ?? (await stored(id))?.task;
+    if (!task) throw refuse(-32001, "Task not found");
+    return task;
   };
 
   const methods: Record<string, (params: Json) => Promise<Json>> = {
     SendMessage: async (params) => {
-      const entry = accept(params);
+      const entry = await accept(params);
       const configuration = obj(params["configuration"]);
       if (configuration["returnImmediately"] !== true && configuration["blocking"] !== false) await entry.settled;
       return { task: entry.task };
     },
     GetTask: async (params) => {
-      const { task } = find(params);
+      const task = await find(params);
       const length = params["historyLength"];
       const history = (task["history"] ?? []) as Json[];
       return typeof length === "number" && length >= 0 ? { ...task, history: length === 0 ? [] : history.slice(-length) } : task;
     },
     CancelTask: async (params) => {
-      const entry = find(params);
-      if (DONE.has(String(obj(entry.task["status"])["state"]))) throw refuse(-32002, "Task cannot be canceled");
-      entry.abort.abort();
-      if (entry.paused) {
+      const id = String(params["id"]);
+      const local = tasks.get(id);
+      if (local) {
+        local.abort.abort();
+        await local.settled;
+        return local.task;
+      }
+      const record = await stored(id);
+      if (!record) throw refuse(-32001, "Task not found");
+      if (DONE.has(stateOf(record.task))) throw refuse(-32002, "Task cannot be canceled");
+      if (stateOf(record.task) !== "TASK_STATE_WORKING") {
         // Nothing is running: the run rests in its snapshot, so dropping the snapshot is the cancel.
-        delete entry.paused;
-        update(entry, status("TASK_STATE_CANCELED"));
-      } else await entry.settled;
-      return entry.task;
+        delete record.paused;
+        record.task["status"] = status("TASK_STATE_CANCELED");
+        await store.set(`task:${id}`, record as unknown as Record<string, unknown>);
+        return record.task;
+      }
+      // Another instance is running it: leave a mark it will see, and wait a moment for it to stop.
+      await store.set(`cancel:${id}`, { at: Date.now() });
+      for (let waited = 0; waited < 5_000; waited += 100) {
+        await new Promise((done) => setTimeout(done, 100));
+        const now = await stored(id);
+        if (now && stateOf(now.task) !== "TASK_STATE_WORKING") return now.task;
+      }
+      return (await stored(id))?.task ?? record.task;
     },
   };
 
@@ -401,7 +528,7 @@ export function a2aAgent(runner: Runner, options: AgentOptions = {}): A2aAgent {
       const early: Json[] = [];
       const hold = (event: Json): void => void early.push(event);
       try {
-        entry = accept(params, hold);
+        entry = await accept(params, hold);
       } catch (error) {
         return reply(failed(error));
       }
@@ -430,7 +557,10 @@ export function a2aAgent(runner: Runner, options: AgentOptions = {}): A2aAgent {
   return {
     handler,
     close: () => {
-      for (const entry of tasks.values()) entry.abort.abort();
+      for (const entry of tasks.values()) {
+        clearInterval(entry.beat);
+        entry.abort.abort();
+      }
     },
   };
 }

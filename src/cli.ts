@@ -736,6 +736,10 @@ async function main(): Promise<void> {
           if (values.port) {
             const served = await serveTools(runners, { ...options, port: num(values.port)! });
             process.stderr.write(`${names}: MCP tools at ${served.url}\n`);
+            const pauses = runners.some((runner) => runner.graph().nodes.some((node) => node.decide?.by === "human"));
+            if (pauses && !secret) {
+              process.stderr.write(`  ⚠ no --secret: a paused run can only be resumed by this process. Set MCP_SECRET to survive a restart or run several instances\n`);
+            }
           } else {
             process.stderr.write(`${names}: MCP tools on stdio\n`);
             await mcpTools(runners, options).stdio();

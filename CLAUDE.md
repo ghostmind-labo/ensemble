@@ -88,8 +88,11 @@ by hand), they add no dependency, and they add no concept: `RunEvent`s become st
 `by: "human"` pause becomes `input-required` or an elicitation form (the caller answers the same closed questions, and
 only there; it cannot write state at any other moment), and cancel is the run's signal. The caller of the MCP entry
 can only CALL the runners the process was started with, never create or edit one, so there is no sandbox; that is the
-difference from the hosted product's MCP endpoint, which manages runners for signed-in users. MCP serving is stateless
-(a paused run travels as a token sealed with AES-GCM under `secret`) and speaks revision `2026-07-28` AND the
+difference from the hosted product's MCP endpoint, which manages runners for signed-in users. Both must work on several instances at once (the app runs on Kubernetes): never
+keep anything in process memory that a second instance would need. MCP serving is stateless
+(a paused run travels as a token sealed with AES-GCM under `secret`, which every instance must share); A2A serving
+keeps tasks in a `TaskStore` (memory by default, a shared one in production), with a heartbeat so a dead instance's
+task reads as failed and a cancel mark so any instance can stop a run. MCP serving speaks revision `2026-07-28` AND the
 `initialize`-based ones, because this library's own client (`src/mcp.ts`) still opens with the handshake. Check
 https://modelcontextprotocol.io/specification/latest and https://a2a-protocol.org before changing either: MCP was
 redesigned once already. Pages: `docs/serve-a2a.md`, `docs/serve-mcp.md`.

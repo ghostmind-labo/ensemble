@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { a2aAgent, serveRunner, type ServeOptions } from "../src/a2a-serve.ts";
+import { a2aAgent, memoryStore, serveRunner, type ServeOptions } from "../src/a2a-serve.ts";
 import { AgentError, agentCard, choice, noul, runner, sendA2a, type A2aAgentSpec } from "../src/index.ts";
 
 type Json = Record<string, any>;
@@ -264,4 +264,49 @@ console.log("ok · 7 a data part is inputs, a token is required, and the budget 
 }
 console.log("ok · 8 the handler works mounted under a path with the body already parsed");
 
-console.log("8 cases");
+// ── 9 · several instances, one store: any of them can report on, answer or cancel a task ──
+{
+  const store = memoryStore();
+  const one = await serve({ store, heartbeatMs: 40 });
+  const two = await serve({ store, heartbeatMs: 40 });
+
+  // Paused on one instance, answered on the other.
+  const paused = (await rpc(one.url, "SendMessage", text("ask about A-900"))).result.task as Json;
+  assert.equal(paused.status.state, "TASK_STATE_INPUT_REQUIRED");
+  assert.equal((await rpc(two.url, "GetTask", { id: paused.id })).result.status.state, "TASK_STATE_INPUT_REQUIRED", "the other instance knows the task");
+  const answered = (await rpc(two.url, "SendMessage", text("ok=yes\ntier=senior", { taskId: paused.id }))).result.task as Json;
+  assert.equal(answered.artifacts[0].parts[0].text, "paid: refund for ask about A-900");
+  assert.equal((await rpc(one.url, "GetTask", { id: paused.id })).result.status.state, "TASK_STATE_COMPLETED", "and the first sees how it ended");
+  assert.match((await rpc(one.url, "SendMessage", text("ok=no\ntier=senior", { taskId: paused.id }))).error.message, /not waiting/, "an answer is taken once");
+
+  // Running on one instance, watched and cancelled from the other.
+  const before = seen.aborted;
+  const running = (await rpc(one.url, "SendMessage", { ...text("hang across"), configuration: { returnImmediately: true } })).result.task as Json;
+  await new Promise((done) => setTimeout(done, 60));
+  const watched = (await rpc(two.url, "GetTask", { id: running.id })).result as Json;
+  assert.equal(watched.status.state, "TASK_STATE_WORKING");
+  assert.equal(watched.history[1].parts[0].text, "write took e0", "the steps so far are in the store");
+  const cancelled = (await rpc(two.url, "CancelTask", { id: running.id })).result as Json;
+  assert.equal(cancelled.status.state, "TASK_STATE_CANCELED");
+  assert.equal(seen.aborted, before + 1, "the instance running it was told, and stopped the handler");
+
+  // An instance that died mid-run: its task says so instead of "working" forever.
+  await store.set("task:orphan", { task: { id: "orphan", contextId: "c", status: { state: "TASK_STATE_WORKING" } }, beat: Date.now() - 60_000 });
+  const orphan = (await rpc(two.url, "GetTask", { id: "orphan" })).result as Json;
+  assert.equal(orphan.status.state, "TASK_STATE_FAILED");
+  assert.match(said(orphan), /the instance running this task stopped/);
+
+  await one.close();
+  await two.close();
+
+  // Without a shared store, the second instance has never heard of the task.
+  const alone = await serve();
+  const other = await serve();
+  const local = (await rpc(alone.url, "SendMessage", text("order A-1"))).result.task as Json;
+  assert.equal((await rpc(other.url, "GetTask", { id: local.id })).error.code, -32001);
+  await alone.close();
+  await other.close();
+}
+console.log("ok · 9 with a shared store, any instance can report on, answer or cancel a task");
+
+console.log("9 cases");

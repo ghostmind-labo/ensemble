@@ -64,9 +64,43 @@ The caller can steer the run only where the graph declared a pause, with the sam
 
 An answer that does not fit runs nothing: the task returns to `input-required` and says what was wrong.
 
+## Several instances (Kubernetes, a load balancer)
+
+Give every instance the same store, and any of them can report on, answer or cancel a task another one ran:
+
+```ts
+import { createClient } from "redis";
+import { a2aAgent, type TaskStore } from "@ghostmind-dev/ensemble/a2a";
+
+const redis = await createClient({ url: process.env.REDIS_URL }).connect();
+const store: TaskStore = {
+  get: async (key) => JSON.parse((await redis.get(key)) ?? "null") ?? undefined,
+  set: async (key, value) => void (await redis.set(key, JSON.stringify(value), { EX: 7 * 86_400 })),
+  delete: async (key) => void (await redis.del(key)),
+};
+
+app.use("/agents/triage", a2aAgent(triage, { store }).handler);
+```
+
+The store is three methods over JSON, so a database table works the same way. How long a task is kept, including a
+paused one waiting for its answer, is the store's expiry.
+
+| What happens | How it works across instances |
+|---|---|
+| `GetTask` reaches another instance | It reads the task from the store, with the steps so far |
+| The answer to a pause reaches another instance | That instance takes the paused run from the store and resumes it there |
+| `CancelTask` reaches another instance | It leaves a mark in the store; the instance running the task sees it at its next node or heartbeat (10 s by default) and stops |
+| The instance running a task dies | After 45 s without a heartbeat the task is reported `failed`, saying its instance stopped |
+| A caller streaming loses its connection | The task keeps running; ask after it with `GetTask` |
+
+A stream is served by the instance that received the request, so keep long-lived connections allowed at the ingress.
+
 ## Limits
 
-- Tasks live in memory. A restart forgets them, including a paused one.
+- With the default store, tasks live in this process's memory: a restart forgets them, and a second instance has
+  never heard of them. Give it a shared store to change that (see below).
+- A run executes on the instance that received it. If that instance dies mid-run, the task is reported failed; it is
+  not picked up by another.
 - One runner per handler. Mount several handlers for several runners.
 - A2A 1.0 over JSON-RPC only: no 0.3 dialect, no HTTP+JSON binding, no push notifications.
 - The library's own `agent` node cannot answer `input-required`, so a runner delegating to a pausing runner fails with

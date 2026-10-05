@@ -76,6 +76,24 @@ Either way the server remembers nothing. The paused run travels to the caller an
 token, so the caller cannot read or alter the state, and any instance started with the same `--secret` can resume it.
 An answer that does not fit the questions runs nothing and asks again, with the reason.
 
+## Several instances (Kubernetes, serverless)
+
+The server keeps nothing between requests, so it runs behind a load balancer or scales to zero with one condition:
+**every instance needs the same `secret`**. A paused run is sealed with it, and an instance with a different key
+cannot open what another one sealed. Without a `secret` each process invents its own, which is only right for a
+single instance.
+
+```ts
+app.use("/mcp", mcpTools([triage, refunds], { secret: process.env.MCP_SECRET, token: process.env.MCP_TOKEN }).handler);
+```
+
+Two things to plan for:
+
+- A call runs to completion on the instance that received it, so the run must fit within the platform's request
+  timeout. Progress notifications need a connection that can stream.
+- On a platform without Node's `(req, res)`, call `handle(message, { signal })` yourself: it takes one JSON-RPC
+  message and returns `{ status, body }`, with no transport in it.
+
 ## Protocol revisions
 
 MCP changed shape in revision `2026-07-28`: no `initialize` handshake, no sessions, metadata on every request, and

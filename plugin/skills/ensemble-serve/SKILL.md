@@ -86,6 +86,17 @@ app.use("/agents/triage", a2aAgent(triage, { budget: 0.05 }).handler);
 Put your own auth middleware in front for anything beyond one shared token. Both take `run`, passed to every run
 (`stepTimeout`, `secretResolver`, a stub `decider` in a test).
 
+## More than one instance
+
+Behind a load balancer, on Kubernetes or on a serverless platform, a request may reach any instance:
+
+- **MCP** keeps nothing between requests. Give every instance the same `secret` (`MCP_SECRET`), or a paused run
+  sealed by one cannot be opened by another.
+- **A2A** keeps tasks in a store. The default is the process's memory; pass `store` (three methods over JSON: `get`,
+  `set`, `delete`, backed by Redis or a table) so any instance can report on, answer or cancel a task.
+
+A run still executes on the instance that received it, so it must fit that platform's request timeout.
+
 ## Letting the caller steer
 
 A caller can steer a run only where the graph declares a pause: a decide node with `by: "human"`. It answers the same
