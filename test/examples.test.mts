@@ -31,6 +31,8 @@ const robot = await load("examples/04-robot/brain.mts");
 const studio = await load("examples/08-studio/studio.mts");
 const frontdesk = await load("examples/09-frontdesk/frontdesk.mts");
 const delegated = await load("examples/10-delegate/delegate.mts");
+const support = await load("examples/11-two-runners/support.mts");
+const ideas = await load("examples/11-two-runners/ideas.mts");
 
 // ── 1 · every example validates ─────────────────────────────────────────────
 for (const [name, example] of [
@@ -41,13 +43,15 @@ for (const [name, example] of [
   ["08-studio", studio],
   ["09-frontdesk", frontdesk],
   ["10-delegate", delegated],
+  ["11-two-runners/support", support],
+  ["11-two-runners/ideas", ideas],
 ] as const) {
   assert.deepEqual(example.validate(), [], `${name} must be sound`);
 }
 console.log("ok · 1 every example validates clean");
 
 // ── 2 · every example serialises to a complete graph ────────────────────────
-for (const example of [triage, picture, refine, robot, studio, frontdesk, delegated]) {
+for (const example of [triage, picture, refine, robot, studio, frontdesk, delegated, support, ideas]) {
   const graph = example.graph();
   assert.deepEqual(JSON.parse(JSON.stringify(graph)), graph);
   assert.match(graph.runner.hash, /^sha256:/);
@@ -410,4 +414,55 @@ console.log("ok · 10 the frontdesk example carries every concept, and safety ou
 }
 console.log("ok · 11 the delegate example routes, delegates once per step, judges the reply and bounds the retry");
 
-console.log("11 cases");
+// ── 12 · 11 is two runners in one project: the same three models in swapped roles, told apart by name ─
+{
+  /** Answers from a table: an option name for a choice, a number for a noul or a score. */
+  const decider = (table: Record<string, string | number>): Decider => async (_state, questions: Record<string, Question>) => {
+    const answers: Record<string, Answer> = {};
+    for (const key of Object.keys(questions)) {
+      const said = table[key]!;
+      answers[key] =
+        typeof said === "string"
+          ? { type: "choice", choice: said, confidence: 0.9, probabilities: { [said]: 0.9 } }
+          : key === "tone" || key === "quality"
+            ? { type: "score", score: said, confidence: 0.9, probabilities: {}, legend: {} }
+            : { type: "noul", noul: said };
+    }
+    return { model: "stub", answers, usage: { input_tokens: 1, output_tokens: 1 }, cost: 0.00002 };
+  };
+  const asked: ModelRequest[] = [];
+  const caller: Caller = async (request: ModelRequest): Promise<ModelReply> => {
+    asked.push(request);
+    return { model: request.model, text: `said by ${request.model}`, images: [], cost: 0.001, usage: { prompt_tokens: 10, completion_tokens: 10 } };
+  };
+
+  assert.notEqual(support.spec.name, ideas.spec.name, "two runners in one folder are told apart by name");
+  assert.notEqual(support.graph().runner.hash, ideas.graph().runner.hash);
+  const models = (example: Runner): string[] => example.graph().nodes.filter((node) => node.kind === "model").map((node) => node.model!.id!);
+  assert.deepEqual(new Set(models(support)), new Set(models(ideas)), "the same two models, in different roles");
+  assert.equal(support.graph().nodes.find((node) => node.id === "tighten")!.model!.reasoning, "low", "a rewrite asks for little reasoning");
+
+  // The support desk: routed, drafted by the brain, tightened, checked, delivered.
+  const sent = await support({ goal: "I was charged twice" }, { decider: decider({ team: "billing", upset: 0.9, answers: 0.95, tone: 2 }), caller });
+  assert.deepEqual(sent.run.steps.map((step) => step.node), ["classify", "think", "tighten", "check", "deliver"]);
+  assert.equal(sent.result, `[billing] said by ${asked[1]!.model}`);
+  assert.match(asked[0]!.prompt, /is upset: acknowledge it first/, "the brain is told what Jev decided");
+  // A reply that does not answer the question goes to a person instead.
+  const escalated = await support({ goal: "?" }, { decider: decider({ team: "orders", upset: 0.1, answers: 0.2, tone: 2 }), caller });
+  assert.equal(escalated.run.steps.at(-1)!.node, "escalate");
+
+  // The idea studio: a weak plan goes back once, then ships whatever it has.
+  asked.length = 0;
+  let reviews = 0;
+  const improving: Decider = async (state, questions, options) => decider({ size: "project", quality: "quality" in questions && reviews++ === 0 ? 0.4 : 1.9 })(state, questions, options);
+  const shipped = await ideas({ goal: "sell more bread" }, { decider: improving, caller });
+  assert.deepEqual(shipped.run.steps.map((step) => step.node), ["brainstorm", "size_up", "write_plan", "review", "tally", "write_plan", "review", "ship"]);
+  assert.match(asked[2]!.prompt, /Your previous plan scored 0.4 out of 2/, "the second draft is told how the first scored");
+  assert.match(String(shipped.result), /^project plan after 2 draft\(s\)/);
+  const stuck = await ideas({ goal: "sell more bread" }, { decider: decider({ size: "weekend", quality: 0.1 }), caller });
+  assert.equal(stuck.run.steps.filter((step) => step.node === "write_plan").length, 2, "one revision at most: the loop budget is on the edge");
+  assert.equal(stuck.run.run.status, "completed");
+}
+console.log("ok · 12 the two-runner example runs both graphs, and they are told apart by name and hash");
+
+console.log("12 cases");

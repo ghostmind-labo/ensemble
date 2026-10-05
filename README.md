@@ -1038,6 +1038,7 @@ node plugin/skills/ensemble-build/scripts/dryrun.mts examples/07-senses/senses.m
 | [`08-studio`](examples/08-studio/studio.mts) | The complex shape: four models in sequence, a budgeted loop, both branch forms, safety first |
 | [`09-frontdesk`](examples/09-frontdesk/frontdesk.mts) | **Everything at once**: five of the six node kinds, three lanes, memory, a skill, MCP, a loop, both branch forms, a person in the loop, and a fallback |
 | [`10-delegate`](examples/10-delegate/delegate.mts) | Hand one step to an external agent (A2A, ACP or MCP): route in, delegate, judge the reply, retry once |
+| [`11-two-runners`](examples/11-two-runners/support.mts) | Two runners in one project ([support desk](examples/11-two-runners/support.mts), [idea studio](examples/11-two-runners/ideas.mts)): the same three models in swapped roles, told apart in `status` and `view` with no setup |
 
 ---
 

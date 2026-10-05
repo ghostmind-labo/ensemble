@@ -54,7 +54,7 @@ Twenty-six files, and each one has a single job.
 - `src/runner.ts` — ties them into a callable; `src/index.ts` — the public surface
 - `src/cli.ts` — `validate` / `graph` / `run` / `calibrate` / `check` / `skills` / `servers` / `mcp login·logout·status` / `status` / `stop` / `view` / `serve mcp`
 
-`examples/` — ten runnable runners (`10-delegate` hands a task to an external agent over A2A, ACP or MCP, with three toy agents under `agents/` that the tests run as real processes), each with a header comment saying what it
+`examples/` — eleven runnable examples (`11-two-runners` is two runners in one folder, the same three models in swapped roles, and is what shows a project needs no configuration to hold several; `10-delegate` hands a task to an external agent over A2A, ACP or MCP, with three toy agents under `agents/` that the tests run as real processes), each with a header comment saying what it
 demonstrates. `06-watch` is a watcher runner that also supervises `01-triage`
 when executed directly; `07-senses` forks three lanes, joins them, and remembers;
 `08-studio` is four models in sequence with a budgeted loop; `09-frontdesk` is
