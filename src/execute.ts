@@ -13,6 +13,7 @@
  * decision as its full distribution, not just the winner — a run you can only
  * read as "the critic rejected it" is a run you cannot audit.
  */
+import { randomBytes } from "node:crypto";
 import {
   branchHolds,
   edgeId,
@@ -469,7 +470,10 @@ export async function execute(
   }
 
   const startedAt = from ? new Date(from.paused.run.started) : new Date();
-  const runId = `${stamp(startedAt)}-${spec.name}`;
+  // Sortable by time, readable by name, and unique: two runs of one runner in the same second (a
+  // server taking two requests) must not share an id, or the second record overwrites the first.
+  // A resumed run keeps the id it paused with, so it stays one run.
+  const runId = from?.paused.run.id ?? `${stamp(startedAt)}-${spec.name}-${randomBytes(2).toString("hex")}`;
   const state: State = from ? { ...from.paused.state } : { goal: "", ...inputs };
   const goal = String(state["goal"] ?? "");
   const steps: RunStep[] = from ? [...from.paused.steps] : [];

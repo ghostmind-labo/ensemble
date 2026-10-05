@@ -745,7 +745,7 @@ elk, graphviz, cytoscape and d3 already eat.
 ```jsonc
 {
   "$schema": "https://ghostmind.dev/ensemble/run-v1.json",
-  "run": { "id": "20260918T003102-triage", "graph": "sha256:9c92f2f1a59ff24d",
+  "run": { "id": "20260918T003102-triage-4f2a", "graph": "sha256:9c92f2f1a59ff24d",
            "status": "completed", "cost": { "total": 0.0213, "currency": "USD" } },
   "steps": [
     { "n": 1, "node": "classify", "kind": "decide", "lane": "main",
@@ -779,8 +779,9 @@ npm run check     -- <file>                 # can it run HERE?     — reads the
 npm run calibrate -- <file> cases.jsonl     # score its decisions  — ~$0.00002 a case
 npx ensemble run  <file> "goal" --budget 0.05     # asks you at a terminal; pauses (exit 3) without one
 npx ensemble resume <file> paused.json --answer ok=no --by dana
-npx ensemble serve mcp <file...>                  # runners as MCP tools: stdio, or --port for HTTP
-npx ensemble serve a2a <file> --port 4320         # one runner as an A2A agent
+npx ensemble status                               # what is running here, and what has run
+npx ensemble stop <id>                            # cancel a live run; its record is kept
+npx ensemble serve mcp <file...>                  # runners as MCP tools over stdio, for a local assistant
 ```
 
 Data goes to stdout so it can be piped; commentary goes to stderr.
@@ -812,7 +813,8 @@ This repo is also a Claude Code plugin marketplace:
 | `ensemble-build` | Use case → a runner that validates and has been dry-run down every branch |
 | `ensemble-questions` | Writing `choice` / `score` / `noul` that Jev answers well, gates and thresholds |
 | `ensemble-runs` | Reading `run.json` and supervised journals, explaining a path, calibrating |
-| `ensemble-serve` | Serving a runner as MCP tools or an A2A agent, answering its pauses, viewing runs |
+| `ensemble` | The whole loop for an agent: build a graph, check it, run it, watch it live, stop or answer it, change it |
+| `ensemble-serve` | Hosting runners for other callers: MCP and A2A connectors in your own server |
 
 The plugin is not part of the npm package; the library itself ships no skills.
 
@@ -926,12 +928,12 @@ package and ensemble does not depend on it.
 
 A runner is a function. The same runner, unchanged, is also reachable three other ways:
 
-| Way in | How |
-|---|---|
-| A function | `await triage({ goal })` |
-| The CLI | `npx ensemble run triage.mts "goal"` |
-| An MCP tool | `npx ensemble serve mcp triage.mts`, or `mcpTools([triage]).handler` in your server |
-| An A2A agent | `npx ensemble serve a2a triage.mts`, or `a2aAgent(triage).handler` in your server |
+| Way in | How | Who it is for |
+|---|---|---|
+| A function | `await triage({ goal })` | Your own code |
+| The CLI | `npx ensemble run triage.mts "goal"` | A person, or an assistant with a shell |
+| MCP tools | `mcpTools([triage]).handler` in your server, or `npx ensemble serve mcp triage.mts` over stdio | An assistant such as Claude |
+| An A2A agent | `a2aAgent(triage).handler` in your server | Another agent |
 
 ```ts
 import express from "express";
@@ -940,15 +942,32 @@ import { a2aAgent } from "@ghostmind-dev/ensemble/a2a";
 import triage from "./triage.mts";
 
 const app = express();
-app.use("/mcp", mcpTools([triage], { token: process.env.MCP_TOKEN, budget: 0.05 }).handler);
-app.use("/agents/triage", a2aAgent(triage).handler);
+app.use("/mcp", requireSignIn, mcpTools([triage], { budget: 0.05 }).handler);
+app.use("/agents/triage", requireSignIn, a2aAgent(triage).handler);
 ```
 
-Called plainly, a run is one input and one output. Served, the caller can also
-watch each node as it starts and ends, answer a `by: "human"` question, and stop
-the run. The runner does not know which way it was called, and the two serving
-entry points are never loaded unless you import them. See
-[runners as MCP tools](docs/serve-mcp.md) and [a runner as an A2A agent](docs/serve-a2a.md).
+The two are connectors, not servers: they speak the protocol and leave the server and the sign-in to you. They are
+never loaded unless you import them. See [runners over MCP](docs/serve-mcp.md) and
+[a runner as an A2A agent](docs/serve-a2a.md).
+
+### Watching a run, and stopping it
+
+Called plainly, a run is one input and one output. It can also be watched and stopped while it goes, however it was
+started:
+
+```sh
+npx ensemble status            # what is running here (nodes in progress, state so far, cost) and what has run
+npx ensemble status <id>       # one run, live or finished, as JSON
+npx ensemble stop <id>         # cancel it cleanly; its record is kept
+```
+
+`ensemble run` is tracked on its own. A runner you call from your own script is tracked with one wrapper, which also
+records the run where the CLI would:
+
+```ts
+import { tracked } from "@ghostmind-dev/ensemble";
+const { result } = await tracked(triage)({ goal });
+```
 
 ---
 
@@ -1023,7 +1042,7 @@ This README is the overview. The rest is markdown in this repository.
 | [Agents](docs/agents.md) | The four ways to hand a step to an agent, and which to choose |
 | [A2A](docs/agents-a2a.md) · [ACP](docs/agents-acp.md) · [MCP](docs/agents-mcp.md) · [in-process](docs/agent.md) | Each way in detail |
 | [Build your own agent](docs/agents-build.md) | What an agent must do per protocol, with a minimal one for each |
-| [Serve as MCP tools](docs/serve-mcp.md) · [as an A2A agent](docs/serve-a2a.md) | Making a runner callable by Claude, an IDE or another agent |
+| [Runners over MCP](docs/serve-mcp.md) · [as an A2A agent](docs/serve-a2a.md) | Making a runner callable by Claude, an IDE or another agent |
 
 ---
 

@@ -2,18 +2,40 @@
 // client (which opens with `initialize`) and against the wire in the current
 // revision (2026-07-28: no handshake, metadata on every request): discovery,
 // header validation, progress, a pause answered through a form and through the
-// `answer` tool, cancel on both transports, a token and a budget.
+// `answer` tool, cancel on both transports, a budget, a clean shutdown, and
+// the tools that watch and steer a run.
 // No decider is called: the only decide node asks a person.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { PassThrough } from "node:stream";
-import { mcpTools, serveTools, LEGACY_VERSIONS, MODERN_VERSIONS, type ServeOptions } from "../src/mcp-serve.ts";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { AddressInfo } from "node:net";
+import { mcpTools, LEGACY_VERSIONS, MODERN_VERSIONS, type ToolsOptions } from "../src/mcp-serve.ts";
 import { connect, runner } from "../src/index.ts";
 import refunds, { seen } from "./fixtures/refunds.mts";
 
 type Json = Record<string, any>;
 
-const serve = (options: ServeOptions = {}) => serveTools([refunds], { port: 0, secret: "test", ...options });
+/** The adapter is a handler, not a server: this is the few lines of server a host supplies. */
+async function serve(options: ToolsOptions = {}) {
+  const tools = mcpTools([refunds], { secret: "test", ...options });
+  const server = createServer((req, res) => (new URL(req.url ?? "/", "http://local").pathname === "/mcp" ? tools.handler(req, res) : void res.writeHead(404).end()));
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", () => done()));
+  const stop = (): Promise<void> =>
+    new Promise((done) => {
+      server.closeAllConnections();
+      server.close(() => done());
+    });
+  return {
+    url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`,
+    tools,
+    drain: async (graceMs?: number) => (await tools.drain(graceMs), await new Promise((done) => setTimeout(done, 50)), await stop()),
+    close: async () => (tools.close(), await stop()),
+  };
+}
 const META = { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { name: "test", version: "1" } };
 const meta = (capabilities: Json = {}, extra: Json = {}): Json => ({ ...META, "io.modelcontextprotocol/clientCapabilities": capabilities, ...extra });
 
@@ -42,7 +64,7 @@ const call = (url: string, name: string, args: Json, extra: Json = {}, capabilit
 {
   const session = await connect("refunds", { command: process.execPath, args: ["src/cli.ts", "serve", "mcp", "test/fixtures/refunds.mts"] });
   const tools = await session.listTools();
-  assert.deepEqual(tools.map((tool) => tool.name), ["refunds", "answer"], "one tool per runner, and `answer` because it can pause");
+  assert.deepEqual(tools.map((tool) => tool.name), ["refunds", "start_run", "get_run", "list_runs", "cancel_run", "answer"], "one tool per runner, the tools that watch and steer, and `answer` because it can pause");
   assert.match(tools[0]!.description, /Drafts a refund and settles it\./);
   assert.deepEqual(Object.keys((tools[0]!.inputSchema as Json).properties), ["goal", "amount"], "the runner's inputs are the arguments");
   const result = await session.call("refunds", { goal: "order A-104", amount: 40 });
@@ -253,11 +275,10 @@ console.log("ok · 6 a caller without forms answers through the `answer` tool");
 }
 console.log("ok · 7 a run is cancelled by hanging up (HTTP) or by notifications/cancelled (stdio)");
 
-// ── 8 · a token, a budget, and what cannot be served ───────────────────────
+// ── 8 · a budget, and what cannot be served ────────────────────────────────
 {
-  const served = await serve({ token: "s3cret", budget: 0.5 });
-  assert.equal((await call(served.url, "refunds", { goal: "x" })).status, 401);
-  const auth = { headers: { authorization: "Bearer s3cret" } };
+  const served = await serve({ budget: 0.5 });
+  const auth = {};
   const capped = (await modern(served.url, "tools/call", { name: "refunds", arguments: { goal: "spend it" } }, auth)).body.result as Json;
   assert.equal(capped.isError, true);
   assert.match(capped.content[0].text, /stopped at its budget/);
@@ -271,7 +292,7 @@ console.log("ok · 7 a run is cancelled by hanging up (HTTP) or by notifications
   assert.throws(() => mcpTools([runner({ name: "broken", work: {}, nodes: { a: { work: "missing" } }, edges: [], entry: "a" })]), /does not validate, so it is not served/);
   assert.deepEqual(Object.keys(mcpTools({ one: named("one"), two: named("two") })), ["handle", "handler", "stdio", "drain", "close"], "a record of runners works too");
 }
-console.log("ok · 8 a token is required, the budget caps a call, and unservable runners are refused by name");
+console.log("ok · 8 the budget caps a call, and unservable runners are refused by name");
 
 // ── 9 · a clean shutdown: no new calls, calls in flight return, and SIGTERM does the same ──
 {
@@ -300,19 +321,92 @@ console.log("ok · 8 a token is required, the budget caps a call, and unservable
   assert.equal(stopped.isError, true);
   assert.equal(stopped.structuredContent.status, "cancelled");
 
-  // The serve command drains on SIGTERM and exits 0.
-  const child = spawn(process.execPath, ["src/cli.ts", "serve", "mcp", "test/fixtures/refunds.mts", "--port", "4399", "--grace", "5"], { stdio: ["ignore", "ignore", "pipe"] });
+  // The serve command (stdio) drains on SIGTERM and exits 0: the call in flight still gets its answer.
+  const child = spawn(process.execPath, ["src/cli.ts", "serve", "mcp", "test/fixtures/refunds.mts", "--grace", "5"], { stdio: ["pipe", "pipe", "pipe"], cwd: process.cwd(), env: { ...process.env, MCP_SECRET: "test" } });
   let log = "";
+  let out = "";
   child.stderr.on("data", (chunk) => (log += String(chunk)));
-  for (let waited = 0; !log.includes("MCP tools at") && waited < 5_000; waited += 50) await new Promise((done) => setTimeout(done, 50));
-  const inFlight = call("http://127.0.0.1:4399/mcp", "refunds", { goal: "slow under sigterm" });
+  child.stdout.on("data", (chunk) => (out += String(chunk)));
+  for (let waited = 0; !log.includes("MCP tools on stdio") && waited < 5_000; waited += 50) await new Promise((done) => setTimeout(done, 50));
+  child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "refunds", arguments: { goal: "slow under sigterm" }, _meta: meta() } })}\n`);
   await new Promise((done) => setTimeout(done, 100));
   child.kill("SIGTERM");
-  assert.equal((await inFlight).body.result.content[0].text, "paid: refund for slow under sigterm");
-  const code = await new Promise((done) => child.on("exit", done));
+  const code = await new Promise((done) => child.on("close", done));
   assert.equal(code, 0);
+  assert.equal(JSON.parse(out.trim().split("\n").pop()!).result.content[0].text, "paid: refund for slow under sigterm");
   assert.match(log, /SIGTERM: finishing the runs in flight/);
 }
 console.log("ok · 9 drain refuses new calls and lets the ones in flight return; SIGTERM drains and exits 0");
 
-console.log("9 cases");
+// ── 10 · watching and steering: start without waiting, read the state mid-run, stop it, find it again later ─
+{
+  const runsDir = mkdtempSync(join(tmpdir(), "ensemble-mcp-runs-"));
+  const served = await serve({ control: true, runsDir });
+  const tool = async (name: string, args: Json): Promise<Json> => (await call(served.url, name, args)).body.result as Json;
+  assert.deepEqual((await modern(served.url, "tools/list")).body.result.tools.map((entry: Json) => entry.name), ["refunds", "start_run", "get_run", "list_runs", "cancel_run", "answer"]);
+
+  // Started, not waited for: the id comes back at once, and the run can be read while it goes.
+  const before = seen.aborted;
+  const started = (await tool("start_run", { runner: "refunds", inputs: { goal: "hang on", amount: 7 } })).structuredContent as Json;
+  assert.equal(started.status, "running");
+  await new Promise((done) => setTimeout(done, 60));
+  const midway = (await tool("get_run", { run: started.run })).structuredContent as Json;
+  assert.equal(midway.status, "running");
+  assert.deepEqual(midway.running, ["wait"], "the node in progress");
+  assert.deepEqual(midway.steps.map((step: Json) => [step.node, step.took]), [["write", "e0"]], "the steps that finished, with the edge each took");
+  assert.deepEqual(midway.state, { goal: "hang on", amount: 7, draft: "refund for hang on (7)" }, "the state so far: the inputs and what each step wrote");
+
+  // Stopped from outside: the handler is told, and the run says how it ended.
+  const stopped = (await tool("cancel_run", { run: started.run })).structuredContent as Json;
+  assert.equal(seen.aborted, before + 1);
+  assert.notEqual(stopped.status, "running");
+  assert.equal((await tool("cancel_run", { run: started.run })).isError, true, "a run that is over cannot be stopped again");
+
+  // One that finishes: its result, and its record on disk where `ensemble run` would have put it.
+  const quick = (await tool("start_run", { runner: "refunds", inputs: { goal: "order A-7" } })).structuredContent as Json;
+  let done: Json = {};
+  for (let waited = 0; waited < 2_000 && done.status !== "completed"; waited += 20) {
+    done = (await tool("get_run", { run: quick.run })).structuredContent as Json;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.equal(done.result, "paid: refund for order A-7");
+  assert.ok(existsSync(join(runsDir, done.record, "run.json")) && existsSync(join(runsDir, done.record, "graph.json")), "recorded as run.json and graph.json");
+
+  // A run that pauses is read the same way, and answered with the token it shows.
+  const asking = (await tool("start_run", { runner: "refunds", inputs: { goal: "ask about A-8" } })).structuredContent as Json;
+  let waiting: Json = {};
+  for (let waited = 0; waited < 2_000 && waiting.status !== "paused"; waited += 20) {
+    waiting = (await tool("get_run", { run: asking.run })).structuredContent as Json;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.deepEqual(waiting.pending.questions.map((question: Json) => question.key), ["ok", "tier"]);
+  assert.equal((await tool("answer", { resume: waiting.resume, answers: { ok: true, tier: "standard" } })).content[0].text, "paid: refund for ask about A-8");
+
+  // A plain, waited-for call is tracked too, and the list has them all, newest first.
+  await tool("refunds", { goal: "order A-9" });
+  const listed = (await tool("list_runs", {})).structuredContent as Json;
+  assert.ok(listed.runs.length >= 4);
+  assert.ok(listed.runs.every((row: Json, index: number) => index === 0 || listed.runs[index - 1].started >= row.started));
+  assert.equal((await tool("list_runs", { runner: "nobody" })).structuredContent.runs.length, 0);
+  assert.equal((await tool("get_run", { run: "nope" })).isError, true);
+  assert.equal((await tool("start_run", { runner: "nope", inputs: {} })).isError, true);
+  await served.close();
+
+  // Another process, later: it never ran these, and still finds them on disk.
+  const later = await serve({ control: true, runsDir });
+  const found = (await call(later.url, "get_run", { run: done.record })).body.result.structuredContent as Json;
+  assert.equal(found.result, "paid: refund for order A-7");
+  assert.equal(found.status, "completed");
+  assert.ok(((await call(later.url, "list_runs", {})).body.result.structuredContent as Json).runs.some((row: Json) => row.record === done.record));
+  await later.close();
+
+  // Without `control`, none of this is offered.
+  const plain = await serve();
+  assert.equal((await call(plain.url, "get_run", { run: "x" })).body.error.code, -32602);
+  await plain.close();
+  assert.throws(() => mcpTools([runner({ name: "get_run", work: { a: () => 1 }, nodes: { a: { work: "a" } }, edges: [], entry: "a" })]), /one of the connector's own tools/);
+  rmSync(runsDir, { recursive: true, force: true });
+}
+console.log("ok · 10 start_run, get_run, list_runs and cancel_run watch and steer a run, and find it again on disk");
+
+console.log("10 cases");

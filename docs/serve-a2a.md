@@ -1,28 +1,13 @@
 # A runner as an A2A agent
 
-`@ghostmind-dev/ensemble/a2a` exposes any ensemble runner as an [Agent2Agent](https://a2a-protocol.org) agent (protocol 1.0, JSON-RPC,
-streaming). Another agent sends it a goal, watches where it is, answers when it asks, and can stop it.
+`@ghostmind-dev/ensemble/a2a` is a connector that exposes any ensemble runner as an
+[Agent2Agent](https://a2a-protocol.org) agent (protocol 1.0, JSON-RPC, streaming). Another agent sends it a goal, watches where it is, answers when it asks, and can stop it.
 
 It is a separate entry point of the package: the core never imports it, so a project that only calls `runner()` loads
 no server code. It has no dependencies (`node:http`). Nothing in the runner changes and no node knows about it; the
 adapter listens to the run from outside.
 
-## On its own port
-
-```sh
-npx ensemble serve a2a triage.mts --port 4320
-```
-
-| Option | What it does |
-|---|---|
-| `--port`, `--host` | Where to listen. Default `127.0.0.1:4320` |
-| `--token`, or `A2A_TOKEN` | Require `Authorization: Bearer <token>`; the card declares it |
-| `--budget <usd>` | Cap on each task. A caller may ask for less, never more |
-| `--public-url` | The address callers reach it at, written in the card |
-
-Starting it costs nothing. Each task is a real run of the runner, with its real costs.
-
-## Inside your own server
+## Mounting it
 
 `a2aAgent(runner)` returns a plain `(req, res)` handler, so it mounts in anything built on `node:http`:
 
@@ -32,13 +17,28 @@ import { a2aAgent } from "@ghostmind-dev/ensemble/a2a";
 import triage from "./triage.mts";
 
 const app = express();
-app.use("/agents/triage", a2aAgent(triage, { budget: 0.05 }).handler);
+app.use("/agents/triage", requireSignIn, a2aAgent(triage, { budget: 0.05 }).handler);
 app.listen(3000);
 // card:  http://localhost:3000/agents/triage/.well-known/agent-card.json
 ```
 
-A body parser in front of it (`express.json()`) is fine. `serveRunner(runner, options)` is the same handler listening on
-its own port. Both take `run`, passed to every run: a `stepTimeout`, a `secretResolver`, a stub `decider` in a test.
+A body parser in front of it (`express.json()`) is fine. There is no command for this: an A2A agent is reached over
+HTTP, and the server is yours.
+
+| Option | What it does |
+|---|---|
+| `budget` | USD cap on each task. A caller may ask for less (`metadata.budget`), never more |
+| `publicUrl` | The address callers reach it at, written in the card. Default: the request's host and mount path |
+| `card` | Merged into the agent card. Declare your server's sign-in here (`securitySchemes`, `securityRequirements`) |
+| `store` | Where tasks are kept. Memory by default; a shared one for several instances (below) |
+| `run` | Passed to every run: a `stepTimeout`, a `secretResolver`, a stub `decider` in a test |
+
+Mounting costs nothing. Each task is a real run of the runner, with its real costs.
+
+## Sign-in
+
+The adapter authenticates nobody: `requireSignIn` above is yours, and the handler should not be exposed without it.
+What it does for you is tell callers: put your scheme in `card` and it is published in the agent card.
 
 ## What maps to what
 
@@ -98,7 +98,7 @@ A stream is served by the instance that received the request, so keep long-lived
 ## Shutting down
 
 When an instance is replaced (a deploy, a scale-down), stopping it should not drop the runs it is in the middle of.
-`ensemble serve a2a` does this on SIGTERM or Ctrl-C; in your own server, call `drain()` from your signal handler:
+Call `drain()` from your signal handler:
 
 ```ts
 const agent = a2aAgent(triage, { store });
@@ -110,7 +110,7 @@ process.on("SIGTERM", () => void agent.drain(25_000).then(() => process.exit(0))
 | A new message or an answer to a pause | Refused with `503` and `Retry-After`, so the caller or the load balancer sends it to another instance |
 | `GetTask`, `CancelTask` | Still answered |
 | A run in flight | Finishes, or pauses, as it would have |
-| A run still going after the grace period (25 s by default, `--grace` on the CLI) | Stopped; its task is recorded as cancelled |
+| A run still going after the grace period (25 s by default) | Stopped; its task is recorded as cancelled |
 
 Set the grace period below what your platform allows a stopping instance.
 
@@ -121,6 +121,7 @@ Set the grace period below what your platform allows a stopping instance.
 - A run executes on the instance that received it. If that instance dies without warning mid-run, the task is
   reported failed; it is not picked up by another. A planned stop drains first (see above).
 - One runner per handler. Mount several handlers for several runners.
+- No authentication of any kind. That belongs to the server the handler is mounted in.
 - A2A 1.0 over JSON-RPC only: no 0.3 dialect, no HTTP+JSON binding, no push notifications.
 - The library's own `agent` node cannot answer `input-required`, so a runner delegating to a pausing runner fails with
   a message naming the fix. A caller that can answer (another agent, your own code) is unaffected.

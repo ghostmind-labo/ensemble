@@ -12,7 +12,7 @@
  */
 import { parseArgs } from "node:util";
 import { createInterface } from "node:readline/promises";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isRunner, type Runner } from "./runner.ts";
@@ -23,8 +23,8 @@ import { money, reporter } from "./report.ts";
 import { loadSkills, validateSkill } from "./skills.ts";
 import { describeServer, isRunnable, missingEnv, preflight, searchAgents, searchServers, searchSkills } from "./registry.ts";
 import { agentCard } from "./a2a.ts";
-import { serveRunner } from "./a2a-serve.ts";
-import { mcpTools, serveTools } from "./mcp-serve.ts";
+import { mcpTools } from "./mcp-serve.ts";
+import { liveRuns, stopRun, tracked } from "./live.ts";
 import { describeAgent } from "./agent.ts";
 import { isRemote, type RemoteServerSpec } from "./mcp.ts";
 import { authMode, fileTokenStore, login, loginStatus, logout, safeUrl } from "./mcp-auth.ts";
@@ -78,11 +78,14 @@ Usage
   ensemble mcp logout <server> [file] Revoke and forget its tokens.
   ensemble mcp status [file]        Remote servers, how each authenticates, and
                                     whether it is logged in. Never a secret.
-  ensemble serve mcp <file...>      Serve runners as MCP tools: over stdio, or
-                                    with --port over HTTP at /mcp. One runner
-                                    is one tool. Free until a tool is called.
-  ensemble serve a2a <file>         Serve one runner as an A2A agent (default
-                                    port 4320). Free until a task is sent.
+  ensemble status [id]              What is running here right now (state so far,
+                                    nodes in progress, cost) and what has run,
+                                    however it was started. --json for data.
+  ensemble stop <id>                Cancel a live run. It stops cleanly and its
+                                    record is kept.
+  ensemble serve mcp <file...>      Offer runners as MCP tools over stdio, for an
+                                    assistant on this machine: run, start, watch,
+                                    answer and cancel. Free until a tool is called.
   ensemble version
 
 Options
@@ -97,15 +100,10 @@ Options
       --url <url>    mcp: the server's url, when no runner file names it
       --header k=v   mcp: a header the server needs even to log in (repeatable)
       --device       mcp login: the device flow, for a machine with no browser
-      --port <n>     serve: the port (mcp: HTTP instead of stdio)
-      --host <host>  serve: the interface to bind (default 127.0.0.1)
-      --token <t>    serve: require "Authorization: Bearer <t>"
-                     (or MCP_TOKEN / A2A_TOKEN)
       --secret <s>   serve mcp: the key paused runs are sealed with (or
                      MCP_SECRET); without it a restart forgets them
-      --public-url <url> serve a2a: the address callers reach it at
-      --grace <s>    serve: on SIGTERM or Ctrl-C, how long runs in flight may
-                     take to finish before they are stopped (default 25)
+      --grace <s>    serve mcp: on SIGTERM or Ctrl-C, how long runs in flight
+                     may take to finish before they are stopped (default 25)
 
 The file must default-export a runner(). Scenes are .mts, loaded by Node's own
 type stripping — Node 22.18 or newer.
@@ -336,6 +334,21 @@ function printQuestions(questions: QuestionReport[], set?: string): void {
  * but a script that expected an answer must notice: it exits 3, next to a
  * paused.json that `ensemble resume` takes.
  */
+/** Ctrl-C and SIGTERM cancel the run instead of killing the process, so its record is kept. A second one means now. */
+function interruptible(): AbortSignal {
+  const controller = new AbortController();
+  let asked = false;
+  const onSignal = (): void => {
+    if (asked) process.exit(130);
+    asked = true;
+    process.stderr.write("\n  stopping: the run is cancelled and its record kept\n");
+    controller.abort();
+  };
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
+  return controller.signal;
+}
+
 /**
  * A run that failed is still a run: the record of where it stopped is the thing
  * you want, and a viewer or `summarize` can only count failures that are on disk.
@@ -404,11 +417,7 @@ async function main(): Promise<void> {
       url: { type: "string" },
       header: { type: "string", multiple: true },
       device: { type: "boolean", default: false },
-      port: { type: "string" },
-      host: { type: "string" },
-      token: { type: "string" },
       secret: { type: "string" },
-      "public-url": { type: "string" },
       grace: { type: "string" },
     },
   });
@@ -488,10 +497,12 @@ async function main(): Promise<void> {
 
       const live = reporter();
       try {
-        const outcome = await runner(inputs, {
+        // Tracked, so `ensemble status` and `ensemble stop` work from another terminal; the record is written below.
+        const outcome = await tracked(runner, { file: file!, record: false })(inputs, {
           budget: num(values.budget),
           maxSteps: num(values["max-steps"]),
           onEvent: live,
+          signal: interruptible(),
           ...(process.stdin.isTTY && !values.json ? { human: terminal() } : {}),
         });
         finishRun(runner, outcome, file!, { out: values.out, json: values.json });
@@ -538,10 +549,11 @@ async function main(): Promise<void> {
       process.stderr.write(`${runner.spec.name} — resuming at ${paused.node}\n`);
       const live = reporter();
       try {
-        const outcome = await runner.resume(paused, answer, {
+        const outcome = await tracked(runner, { file: file!, record: false }).resume(paused, answer, {
           budget: num(values.budget),
           maxSteps: num(values["max-steps"]),
           onEvent: live,
+          signal: interruptible(),
           ...(process.stdin.isTTY && !values.json ? { human: terminal() } : {}),
         });
         finishRun(runner, outcome, file!, { out: values.out, json: values.json });
@@ -723,72 +735,97 @@ async function main(): Promise<void> {
     }
 
     case "serve": {
+      if (file !== "mcp") {
+        return die(
+          `unknown serve target "${file ?? ""}" — the command serves MCP over stdio: ensemble serve mcp <file...>. ` +
+            `Over HTTP, or as an A2A agent, a runner is mounted in your own server: mcpTools([...]).handler, a2aAgent(runner).handler`,
+        );
+      }
+      if (!rest.length) return die("no file given — ensemble serve mcp <file.mts> [more files]");
+      // stdout carries protocol messages only: whatever a handler logs goes to stderr.
+      console.log = console.info = console.debug = (...args: unknown[]) => console.error(...args);
+      const runners: Runner[] = [];
+      for (const path of rest) runners.push(await load(path));
       const budget = num(values.budget);
+      const secret = values.secret ?? process.env["MCP_SECRET"];
       const grace = (num(values.grace) ?? 25) * 1000;
-      // A stop signal is a request to finish, not to drop: runs in flight get the grace period.
-      const onStop = (served: { drain(graceMs?: number): Promise<void> }): void => {
+      try {
+        const tools = mcpTools(runners, {
+          ...(budget !== undefined ? { budget } : {}),
+          ...(secret ? { secret } : {}),
+          // The same folder `ensemble run` writes, so the viewer and `ensemble status` see these runs too.
+          runsDir: resolve(".ensemble", "runs"),
+          control: true,
+        });
+        // A stop signal is a request to finish, not to drop: runs in flight get the grace period.
         let stopping = false;
         for (const signal of ["SIGTERM", "SIGINT"] as const) {
           process.on(signal, () => {
-            if (stopping) process.exit(1); // a second signal means now
+            if (stopping) process.exit(1);
             stopping = true;
             process.stderr.write(`  ${signal}: finishing the runs in flight (up to ${grace / 1000}s)\n`);
-            void served.drain(grace).then(() => process.exit(0));
+            void tools.drain(grace).then(() => process.exit(0));
           });
         }
-      };
-      const shared = { ...(budget !== undefined ? { budget } : {}), ...(values.host ? { host: values.host } : {}) };
-      if (file === "mcp") {
-        if (!rest.length) return die("no file given — ensemble serve mcp <file.mts> [more files]");
-        // On stdio, stdout carries protocol messages only: whatever a handler logs goes to stderr.
-        if (!values.port) console.log = console.info = console.debug = (...args: unknown[]) => console.error(...args);
-        const runners: Runner[] = [];
-        for (const path of rest) runners.push(await load(path));
-        const token = values.token ?? process.env["MCP_TOKEN"];
-        const secret = values.secret ?? process.env["MCP_SECRET"];
-        const options = { ...shared, ...(token ? { token } : {}), ...(secret ? { secret } : {}) };
-        const names = runners.map((runner) => runner.spec.name).join(", ");
-        try {
-          if (values.port) {
-            const served = await serveTools(runners, { ...options, port: num(values.port)! });
-            process.stderr.write(`${names}: MCP tools at ${served.url}\n`);
-            onStop(served);
-            const pauses = runners.some((runner) => runner.graph().nodes.some((node) => node.decide?.by === "human"));
-            if (pauses && !secret) {
-              process.stderr.write(`  ⚠ no --secret: a paused run can only be resumed by this process. Set MCP_SECRET to survive a restart or run several instances\n`);
-            }
-          } else {
-            process.stderr.write(`${names}: MCP tools on stdio\n`);
-            await mcpTools(runners, options).stdio();
+        process.stderr.write(`${runners.map((runner) => runner.spec.name).join(", ")}: MCP tools on stdio\n`);
+        await tools.stdio();
+      } catch (error) {
+        die((error as Error).message);
+      }
+      return;
+    }
+
+    case "status": {
+      const live = liveRuns();
+      if (file) {
+        const found = live.find((run) => run.id === file || String(run.pid) === file);
+        const path = resolve(".ensemble", "runs", file, "run.json");
+        if (found) process.stdout.write(`${JSON.stringify(found, null, 2)}\n`);
+        else if (/^[\w.-]+$/.test(file) && existsSync(path)) process.stdout.write(readFileSync(path, "utf8"));
+        else die(`no run "${file}" — a live run is named by the id \`ensemble status\` shows, a finished one by its folder under .ensemble/runs`);
+        return;
+      }
+      const dir = resolve(".ensemble", "runs");
+      // Folder names sort by the second a run started; within a second the order is the record's own clock.
+      const recorded = (existsSync(dir) ? readdirSync(dir) : [])
+        .sort()
+        .reverse()
+        .slice(0, 40)
+        .flatMap((id) => {
+          try {
+            const doc = JSON.parse(readFileSync(join(dir, id, "run.json"), "utf8")) as { run: { runner: string; status: string; started: string; cost: { total: number } }; steps: unknown[] };
+            return [{ run: id, runner: doc.run.runner, status: doc.run.status, started: doc.run.started, cost: doc.run.cost.total, steps: doc.steps.length }];
+          } catch {
+            return [];
           }
-        } catch (error) {
-          die((error as Error).message);
-        }
+        })
+        .sort((a, b) => b.started.localeCompare(a.started))
+        .slice(0, 10);
+      if (values.json) {
+        process.stdout.write(`${JSON.stringify({ live, recorded }, null, 2)}\n`);
         return;
       }
-      if (file === "a2a") {
-        const runner = await load(rest[0]);
-        if (rest.length > 1) return die("serve a2a takes one runner: an agent is one runner. Start another on a second port, or mount several with a2aAgent() in your own server");
-        const token = values.token ?? process.env["A2A_TOKEN"];
-        try {
-          const served = await serveRunner(runner, {
-            ...shared,
-            ...(values.port ? { port: num(values.port)! } : {}),
-            ...(token ? { token } : {}),
-            ...(values["public-url"] ? { publicUrl: values["public-url"] } : {}),
-          });
-          process.stderr.write(`${runner.spec.name} is an A2A agent at ${served.url} (card: ${served.url}/.well-known/agent-card.json)\n`);
-          onStop(served);
-        } catch (error) {
-          die((error as Error).message);
-        }
-        return;
+      process.stdout.write(live.length ? "live\n" : "no run is live\n");
+      for (const run of live) {
+        process.stdout.write(`  ${run.id.padEnd(12)} ${run.runner.padEnd(20)} at ${run.running.join(", ") || "between nodes"} · ${run.steps.length} steps · ${money(run.cost)}\n`);
       }
-      return die(`unknown serve target "${file ?? ""}" — try: serve mcp <file...>, serve a2a <file>`);
+      process.stdout.write(recorded.length ? "recorded\n" : "nothing recorded yet under .ensemble/runs\n");
+      for (const run of recorded) process.stdout.write(`  ${run.run.padEnd(40)} ${run.status.padEnd(10)} ${String(run.steps).padStart(3)} steps · ${money(run.cost)}\n`);
+      return;
+    }
+
+    case "stop": {
+      if (!file) return die("which run? — ensemble stop <id>, with an id from `ensemble status`");
+      const target = liveRuns().find((run) => run.id === file || String(run.pid) === file);
+      if (!target) return die(`no live run "${file}" — it may have ended already. Try: ensemble status`);
+      // It cancels itself and writes its record on the way out; wait for that rather than report a guess.
+      if (!(await stopRun(file))) return die(`${target.runner} (${target.id}) was told to stop and has not yet — a handler may be ignoring its signal`);
+      process.stderr.write(`  stopped ${target.runner} (${target.id}); its record is under .ensemble/runs\n`);
+      return;
     }
 
     default:
-      die(`unknown command "${command}" — try: validate, graph, run, resume, calibrate, check, skills, servers, agents, mcp, serve, version`);
+      die(`unknown command "${command}" — try: validate, graph, run, resume, status, stop, calibrate, check, skills, servers, agents, mcp, serve, version`);
   }
 }
 

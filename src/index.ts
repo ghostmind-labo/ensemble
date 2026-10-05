@@ -141,3 +141,6 @@ export type {
   State,
   WorkNode,
 } from "./spec.ts";
+
+export { liveRuns, recordRun, stopRun, tracked } from "./live.ts";
+export type { LiveRun, TrackedRunner, TrackOptions } from "./live.ts";

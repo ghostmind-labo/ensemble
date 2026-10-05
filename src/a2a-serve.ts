@@ -26,14 +26,16 @@
  * A2A has no field for what a task cost, so the run's cost travels in the
  * task's `metadata.ensemble`, next to the run id and the steps taken.
  *
- *   npx ensemble serve a2a triage.mts --port 4320
- *   agents: { triage: { protocol: "a2a", url: "http://localhost:4320" } }
+ * It is a connector, not a server, and it authenticates nobody: it is a request
+ * handler mounted in YOUR server, behind whatever sign-in that server has.
  *
- * Serving costs nothing; each task is a real run.
+ *   app.use("/agents/triage", a2aAgent(triage).handler)
+ *   agents: { triage: { protocol: "a2a", url: "https://example.com/agents/triage" } }
+ *
+ * Mounting costs nothing; each task is a real run.
  */
 import { randomUUID } from "node:crypto";
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import type { AddressInfo } from "node:net";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import {
   HumanAnswerError,
   ResumeError,
@@ -51,8 +53,11 @@ import {
 type Json = Record<string, unknown>;
 
 export interface AgentOptions {
-  /** Require `Authorization: Bearer <token>` on every call. The card says so. */
-  token?: string;
+  /**
+   * Merged into the agent card. The adapter authenticates nobody: when your server requires a
+   * credential, declare it here (`securitySchemes`, `securityRequirements`) so callers know.
+   */
+  card?: Record<string, unknown>;
   /** USD cap per task. A caller may ask for less (`metadata.budget`), never more. */
   budget?: number;
   /** The address callers reach this server at, for the card. Default: the request's Host. */
@@ -106,11 +111,6 @@ export function memoryStore(keep = 200): TaskStore {
   };
 }
 
-export interface ServeOptions extends AgentOptions {
-  port?: number;
-  host?: string;
-}
-
 export type Handler = (req: IncomingMessage, res: ServerResponse) => void;
 /** What a framework may have added to the request: a mount point, an already-parsed body. */
 type Mounted = IncomingMessage & { baseUrl?: string; body?: unknown };
@@ -125,14 +125,6 @@ export interface A2aAgent {
   drain(graceMs?: number): Promise<void>;
   /** Stop every run in flight, now. */
   close(): void;
-}
-
-export interface Served {
-  url: string;
-  server: Server;
-  /** Finish the runs in flight (up to `graceMs`), then stop listening. For SIGTERM. */
-  drain(graceMs?: number): Promise<void>;
-  close(): Promise<void>;
 }
 
 /** A task running in THIS process. Once it ends or pauses it lives only in the store. */
@@ -298,12 +290,7 @@ export function a2aAgent(runner: Runner, options: AgentOptions = {}): A2aAgent {
         tags: ["ensemble", ...new Set(graph.nodes.map((node) => node.kind))],
       },
     ],
-    ...(options.token
-      ? {
-          securitySchemes: { bearer: { httpAuthSecurityScheme: { scheme: "Bearer" } } },
-          securityRequirements: [{ schemes: { bearer: { list: [] } } }],
-        }
-      : {}),
+    ...options.card,
   });
 
   const emit = (entry: Entry, event: Json): void => {
@@ -505,10 +492,6 @@ export function a2aAgent(runner: Runner, options: AgentOptions = {}): A2aAgent {
 
     if (req.method === "GET" && path === "/.well-known/agent-card.json") return json(200, card(base));
     if (req.method !== "POST" || path !== "/a2a") return json(404, { error: "not found: the card is at /.well-known/agent-card.json and the agent at POST /a2a" });
-    if (options.token && req.headers.authorization !== `Bearer ${options.token}`) {
-      res.writeHead(401, { "www-authenticate": `Bearer realm="${graph.runner.name}"` });
-      return void res.end();
-    }
 
     // A body parser upstream (express.json()) has already read the stream.
     const parsed = (req as Mounted).body;
@@ -588,31 +571,5 @@ export function a2aAgent(runner: Runner, options: AgentOptions = {}): A2aAgent {
       await settled;
     },
     close,
-  };
-}
-
-/** Serve one runner on its own port: the handler, listening. */
-export async function serveRunner(runner: Runner, options: ServeOptions = {}): Promise<Served> {
-  const agent = a2aAgent(runner, options);
-  const server = createServer(agent.handler);
-  await new Promise<void>((done, fail) => {
-    server.once("error", fail);
-    server.listen(options.port ?? 4320, options.host ?? "127.0.0.1", () => done());
-  });
-  const { address, port } = server.address() as AddressInfo;
-  return {
-    url: options.publicUrl ?? `http://${address.includes(":") ? `[${address}]` : address}:${port}`,
-    server,
-    drain: async (graceMs) => {
-      await agent.drain(graceMs);
-      server.closeAllConnections();
-      await new Promise<void>((done) => server.close(() => done()));
-    },
-    close: () =>
-      new Promise<void>((done) => {
-        agent.close();
-        server.closeAllConnections();
-        server.close(() => done());
-      }),
   };
 }

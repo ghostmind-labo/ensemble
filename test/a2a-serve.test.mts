@@ -1,12 +1,12 @@
 // A runner served as an A2A agent (src/a2a-serve.ts), against the library's own
 // A2A client and against the wire: the card, a streamed run with one update per
 // node, a pause the caller answers, an answer that does not fit, cancel, a
-// token, a budget, and the handler mounted the way a framework would mount it.
+// budget, and the handler mounted the way a framework would mount it.
 // No decider is called: the only decide node asks a person, and the caller is that person.
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { a2aAgent, memoryStore, serveRunner, type ServeOptions } from "../src/a2a-serve.ts";
+import { a2aAgent, memoryStore, type AgentOptions } from "../src/a2a-serve.ts";
 import { AgentError, agentCard, choice, noul, runner, sendA2a, type A2aAgentSpec } from "../src/index.ts";
 
 type Json = Record<string, any>;
@@ -59,7 +59,22 @@ const refunds = runner({
 });
 assert.deepEqual(refunds.validate(), [], "the fixture is a sound runner");
 
-const serve = (options: ServeOptions = {}) => serveRunner(refunds, { port: 0, ...options });
+/** The adapter is a handler, not a server: this is the few lines of server a host supplies. */
+async function serve(options: AgentOptions = {}) {
+  const agent = a2aAgent(refunds, options);
+  const server = createServer(agent.handler);
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", () => done()));
+  const stop = (): Promise<void> =>
+    new Promise((done) => {
+      server.closeAllConnections();
+      server.close(() => done());
+    });
+  return {
+    url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+    drain: async (graceMs?: number) => (await agent.drain(graceMs), await stop()),
+    close: async () => (agent.close(), await stop()),
+  };
+}
 const spec = (url: string, extra: Partial<A2aAgentSpec> = {}): A2aAgentSpec => ({ protocol: "a2a", url, ...extra });
 const ask = (agent: A2aAgentSpec, prompt: string, signal = new AbortController().signal) => sendA2a("refunds", agent, { name: "refunds", agent, prompt, signal });
 
@@ -213,14 +228,15 @@ console.log("ok · 5 a runner calling a pausing runner fails with the fix, and t
 }
 console.log("ok · 6 CancelTask aborts the run, from the wire and from the library's client");
 
-// ── 7 · inputs, a token, and a budget the caller can lower but not raise ────
+// ── 7 · inputs, a card that declares the host's auth, and a budget the caller can lower but not raise ─
 {
-  const served = await serve({ token: "s3cret", budget: 0.5 });
+  // The adapter authenticates nobody; the host's server does, and says so through the card.
+  const served = await serve({ budget: 0.5, card: { securitySchemes: { bearer: { httpAuthSecurityScheme: { scheme: "Bearer" } } } } });
   const card = (await (await fetch(`${served.url}/.well-known/agent-card.json`)).json()) as Json;
-  assert.ok(card.securitySchemes.bearer, "the card declares the token");
-  const refused = await fetch(`${served.url}/a2a`, { method: "POST", body: "{}" });
-  assert.equal(refused.status, 401);
-  const auth = { authorization: "Bearer s3cret" };
+  assert.ok(card.securitySchemes.bearer, "what the host declares is in the card");
+  assert.equal(card.name, "refunds");
+  assert.equal((await rpc(served.url, "GetTask", { id: "nope" })).error.code, -32001, "and no credential is asked for by the adapter itself");
+  const auth = {};
 
   const withInputs = (await rpc(served.url, "SendMessage", { message: { role: "ROLE_USER", parts: [{ text: "order A-9" }, { data: { amount: 40 } }] } }, auth)).result.task as Json;
   assert.equal(withInputs.artifacts[0].parts[0].text, "paid: refund for order A-9 (40)", "a data part lands as inputs");
@@ -242,7 +258,7 @@ console.log("ok · 6 CancelTask aborts the run, from the wire and from the libra
   const broken = runner({ name: "broken", work: {}, nodes: { a: { work: "missing" } }, edges: [], entry: "a" });
   assert.throws(() => a2aAgent(broken), /does not validate, so it is not served/);
 }
-console.log("ok · 7 a data part is inputs, a token is required, and the budget passes down");
+console.log("ok · 7 a data part is inputs, the card carries the host's auth, and the budget passes down");
 
 // ── 8 · the handler mounts under a path, behind a body parser, like in Express ─
 {

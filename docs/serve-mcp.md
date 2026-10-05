@@ -1,66 +1,86 @@
-# Runners as MCP tools
+# Runners over MCP
 
-`@ghostmind-dev/ensemble/mcp` exposes ensemble runners as [Model Context Protocol](https://modelcontextprotocol.io) tools, so anything
-that speaks MCP (Claude, an IDE, another agent) can call them. One runner is one tool.
+`@ghostmind-dev/ensemble/mcp` is a connector: it lets anything that speaks the
+[Model Context Protocol](https://modelcontextprotocol.io) (Claude, an IDE, another agent) run your runners and, when
+you ask for it, watch and steer the runs. One runner is one tool.
 
-It is a separate entry point of the package, like [the A2A one](serve-a2a.md): the core never imports it, so a project
-that only calls `runner()` loads no server code. It has no dependencies. Nothing in a runner changes; the adapter
-listens to each run from outside.
+It is not a server and it authenticates nobody. It is a separate entry point of the package that the core never
+imports, with no dependencies. Nothing in a runner changes; the connector listens to each run from outside.
 
-The caller can only **call** the runners this process was started with. It cannot create or edit one, so no sandbox is
-involved: it is your code, on your machine or server.
+The caller can only **call** the runners the connector was given. It cannot create or edit one, so no sandbox is
+involved: it is your code.
 
-## Over stdio (a local client)
+## Which way to use it
+
+| Where | How | Server and sign-in |
+|---|---|---|
+| On your machine, for an assistant that has no shell | `npx ensemble serve mcp triage.mts` (stdio) | None: the assistant starts it as a child process |
+| Hosted | `mcpTools([triage]).handler` mounted in your own server | Yours: the handler sits behind whatever your server already has |
+
+An assistant that can run commands does not need MCP locally: the CLI does the same things (`ensemble run`,
+`status`, `stop`, `resume`). See the `ensemble` skill.
+
+## On your machine (stdio)
 
 ```sh
-npx ensemble serve mcp triage.mts
+npx ensemble serve mcp triage.mts refunds.mts
+claude mcp add ensemble -- npx ensemble serve mcp ./triage.mts ./refunds.mts     # in Claude Code
 ```
 
-In Claude Code: `claude mcp add triage -- npx ensemble serve mcp /path/to/triage.mts`, run from the project that installed the package. The server reads
-`OPENROUTER_API_KEY` from its environment, like any run. Whatever a handler logs goes to stderr, because stdout carries
-protocol messages only.
+The process needs `OPENROUTER_API_KEY` in its environment, like any run. Whatever a handler logs goes to stderr,
+because stdout carries protocol messages only. Runs are recorded under `.ensemble/runs`, the folder `ensemble run`
+writes, so the viewer and `ensemble status` see them too.
 
-## Over HTTP
+`--budget <usd>` caps each call, `--secret` (or `MCP_SECRET`) keeps paused runs resumable across a restart, and
+`--grace <seconds>` is how long runs in flight get to finish on Ctrl-C or SIGTERM (default 25).
 
-```sh
-npx ensemble serve mcp triage.mts refunds.mts --port 4321 --token "$MCP_TOKEN"     # POST http://127.0.0.1:4321/mcp
-```
-
-Or inside your own server, since `mcpTools(...)` returns a plain `(req, res)` handler:
+## Hosted (a handler in your server)
 
 ```ts
 import express from "express";
 import { mcpTools } from "@ghostmind-dev/ensemble/mcp";
-import { a2aAgent } from "@ghostmind-dev/ensemble/a2a";
 import triage from "./triage.mts";
 import refunds from "./refunds.mts";
 
 const app = express();
-app.use("/mcp", mcpTools([triage, refunds], { token: process.env.MCP_TOKEN, budget: 0.05 }).handler);
-app.use("/agents/triage", a2aAgent(triage).handler);      // the same runner, as an A2A agent
+app.use("/mcp", requireSignIn, mcpTools([triage, refunds], { budget: 0.05, secret: process.env.MCP_SECRET }).handler);
 app.listen(3000);
 ```
 
+`requireSignIn` is yours. The connector checks no credential, so do not expose the handler without one.
+
 | Option | What it does |
 |---|---|
-| `--port`, `--host` | Serve over HTTP at `/mcp` instead of stdio. Default host `127.0.0.1` |
-| `--token`, or `MCP_TOKEN` | Require `Authorization: Bearer <token>`. Put your own auth middleware in front for anything richer |
-| `--budget <usd>` | Cap on each call |
-| `--secret`, or `MCP_SECRET` | The key paused runs are sealed with. Without it a restart forgets paused runs |
+| `budget` | USD cap on each call |
+| `secret` | The key paused runs are sealed with. Every instance needs the same one |
+| `runsDir` | Record every run there (`run.json`, `graph.json`), and let `get_run` and `list_runs` read it |
+| `control` | Offer the tools that watch and steer runs (below) |
+| `pauseTtlMs` | How long a paused run may wait for its answer. Default 24 hours |
+| `allowedOrigins` | Origins a browser may call from, besides the server's own host |
+| `run` | Passed to every run: a `stepTimeout`, a `secretResolver`, a stub `decider` in a test |
 
-In code there are also `pauseTtlMs` (24 hours), `allowedOrigins`, and `run`, passed to every run: a `stepTimeout`, a
-`secretResolver`, a stub `decider` in a test.
+## The tools
+
+| Tool | What it does |
+|---|---|
+| `<runner name>` | Runs that runner and waits. Arguments are the runner's inputs. Returns the result, and the record of the run |
+| `answer` | Answers a run that stopped to ask. Present only when a runner can pause |
+| `start_run` | Starts a runner and returns a run id at once, without waiting |
+| `get_run` | A run as it stands: status, nodes in progress, finished steps with answers and confidence, the state so far, cost, and the result or the pending question |
+| `list_runs` | Recent runs, newest first: this process's and those on disk |
+| `cancel_run` | Stops a run that is still going |
+
+The last four are offered with `control: true`, which `ensemble serve mcp` sets.
 
 ## What maps to what
 
 | MCP | The runner |
 |---|---|
-| A tool | A runner: the tool's name is the runner's, its arguments are the runner's inputs |
 | The text result | The runner's `result` |
 | `structuredContent` | `status`, `result`, and `run`: the run id, graph hash, cost, and each step with the edge it took and its answers and confidence |
 | `notifications/progress` | One as each node starts and ends, when the caller sent a `progressToken` |
 | An elicitation form | A `by: "human"` pause: a choice is an enum, a noul a boolean, a score a level number |
-| The caller hanging up (HTTP), `notifications/cancelled` (stdio) | The run's `AbortSignal`, which reaches every handler |
+| The caller hanging up (HTTP), `notifications/cancelled` (stdio), `cancel_run` | The run's `AbortSignal`, which reaches every handler |
 | `isError: true` | The run failed, or stopped at its budget or step limit |
 
 ## A pause
@@ -70,36 +90,30 @@ A `by: "human"` node stops the run and asks its closed questions. How depends on
 - **A caller that can show forms** (the current protocol revision, with the elicitation capability) gets
   `input_required` with a form. The person fills it in, the client sends the same call again, and the run resumes.
 - **Any other caller** gets a normal result that says the run is waiting, with the questions and a `resume` token. It
-  answers by calling the `answer` tool with that token. The tool exists only when a served runner can pause.
+  answers by calling `answer` with that token. A run begun with `start_run` shows the same token in `get_run`.
 
-Either way the server remembers nothing. The paused run travels to the caller and back as an encrypted, authenticated
-token, so the caller cannot read or alter the state, and any instance started with the same `--secret` can resume it.
-An answer that does not fit the questions runs nothing and asks again, with the reason.
+The paused run travels to the caller and back as an encrypted, authenticated token, so the caller cannot read or
+alter the state, and any instance holding the same `secret` can resume it. An answer that does not fit the questions
+runs nothing and asks again, with the reason.
 
-## Several instances (Kubernetes, serverless)
+## Several instances
 
-The server keeps nothing between requests, so it runs behind a load balancer or scales to zero with one condition:
-**every instance needs the same `secret`**. A paused run is sealed with it, and an instance with a different key
-cannot open what another one sealed. Without a `secret` each process invents its own, which is only right for a
-single instance.
+A waited-for call and a pause keep nothing in the process, so they work behind a load balancer with one condition:
+**every instance needs the same `secret`**.
 
-```ts
-app.use("/mcp", mcpTools([triage, refunds], { secret: process.env.MCP_SECRET, token: process.env.MCP_TOKEN }).handler);
-```
+The `control` tools are the exception. They track runs in the process's memory, so `get_run` and `cancel_run` only
+see a run on the instance that started it. Use them with one instance (a local assistant), or serve the runner as an
+[A2A agent](serve-a2a.md), which keeps tasks in a shared store.
 
-Two things to plan for:
-
-- A call runs to completion on the instance that received it, so the run must fit within the platform's request
-  timeout. Progress notifications need a connection that can stream.
-- On a platform without Node's `(req, res)`, call `handle(message, { signal })` yourself: it takes one JSON-RPC
-  message and returns `{ status, body }`, with no transport in it.
+A call runs to completion on the instance that received it, so it must fit the platform's request timeout. On a
+platform without Node's `(req, res)`, call `handle(message, { signal })` yourself: one JSON-RPC message in,
+`{ status, body }` out, with no transport in it.
 
 ## Shutting down
 
-`ensemble serve mcp --port …` drains on SIGTERM or Ctrl-C: new calls are refused with `503` and `Retry-After` (so the
-caller or a load balancer tries another instance), calls in flight return their result, and whatever is still running
-after the grace period (25 s by default, `--grace <seconds>`) is stopped and returns `isError` with status
-`cancelled`. In your own server, call `drain()` from your signal handler:
+Call `drain()` from your signal handler: new calls are refused with `503` and `Retry-After` (so the caller or a load
+balancer tries another instance), calls in flight return, and whatever is still running after the grace period is
+stopped and reports `cancelled`.
 
 ```ts
 const tools = mcpTools([triage], { secret: process.env.MCP_SECRET });
@@ -109,15 +123,15 @@ process.on("SIGTERM", () => void tools.drain(25_000).then(() => process.exit(0))
 ## Protocol revisions
 
 MCP changed shape in revision `2026-07-28`: no `initialize` handshake, no sessions, metadata on every request, and
-server questions carried inside results. This adapter speaks that revision and the handshake-based ones before it
+server questions carried inside results. The connector speaks that revision and the handshake-based ones before it
 (`2025-11-25` back to `2024-11-05`), choosing per request by how the caller opens.
 
 ## Limits
 
 - Tools only: no resources, prompts, subscriptions or the tasks extension.
-- No OAuth. A bearer token, or your own middleware.
-- The token is one shared secret: a paused run is not bound to a user.
-- A caller's own budget cannot be passed; the cap is the server's.
+- No authentication of any kind. That belongs to the server the handler is mounted in.
+- A paused run is not bound to a user: whoever holds the token can answer it.
+- A caller's own budget cannot be passed; the cap is the host's.
 - The old HTTP+SSE transport (2024-11-05) is not served, only Streamable HTTP and stdio.
 
 Tested offline in `test/mcp-serve.test.mts`, against the library's own MCP client and against the wire in the current

@@ -19,14 +19,15 @@ each need their own key and cost format, and OpenRouter already returns
 A vendor-exclusive feature belongs in a user's own `work` handler, which is
 exactly what that seam is for.
 
-It still holds no prompts of its own, runs no tool loop, ships no skills, and
-draws nothing, and the core serves no HTTP: only the two opt-in serving entry
-points do (see **Serving**). Those were removed on purpose; a change that adds one
+It still holds no prompts of its own, runs no tool loop, ships no skills,
+serves no HTTP and authenticates nobody, and draws nothing. The two connectors
+are request handlers for somebody else's server (see **Reaching a runner from
+outside**). Those were removed on purpose; a change that adds one
 back is the change to question.
 
 ## Project map
 
-Twenty-two files, and each one has a single job.
+Twenty-three files, and each one has a single job.
 
 - `src/questions.ts` — `choice` / `score` / `noul`, their answer types, and the API limits enforced at authoring time
 - `src/jev.ts` — the decider: one `fetch` to OpenRouter's `POST /api/v1/systemone`, plus the `Decider` seam
@@ -46,10 +47,11 @@ Twenty-two files, and each one has a single job.
 - `src/calibrate.ts` — does a decision work: accuracy, calibration gap and gate prices against labelled cases, one decide node at a time
 - `src/supervise.ts` — the brainstem: a runner as a loop that lives for days. Memory, budgets, rest, journal and resume, a watcher runner
 - `src/report.ts` — the terminal reporter (one consumer of `RunEvent`, not the only possible one)
-- `src/a2a-serve.ts` — a runner SERVED as an A2A agent: a mountable handler, or its own port. A separate entry point
-- `src/mcp-serve.ts` — runners SERVED as MCP tools, over stdio and Streamable HTTP. A separate entry point
+- `src/live.ts` — a run in progress, where another process can see it and stop it: `tracked`, `liveRuns`, `stopRun`
+- `src/a2a-serve.ts` — the A2A connector: a runner as an agent, as a handler for your server. A separate entry point
+- `src/mcp-serve.ts` — the MCP connector: runners as tools, over stdio or as a handler. A separate entry point
 - `src/runner.ts` — ties them into a callable; `src/index.ts` — the public surface
-- `src/cli.ts` — `validate` / `graph` / `run` / `calibrate` / `check` / `skills` / `servers` / `mcp login·logout·status` / `serve mcp·a2a`
+- `src/cli.ts` — `validate` / `graph` / `run` / `calibrate` / `check` / `skills` / `servers` / `mcp login·logout·status` / `status` / `stop` / `serve mcp`
 
 `examples/` — ten runnable runners (`10-delegate` hands a task to an external agent over A2A, ACP or MCP, with three toy agents under `agents/` that the tests run as real processes), each with a header comment saying what it
 demonstrates. `06-watch` is a watcher runner that also supervises `01-triage`
@@ -80,30 +82,46 @@ loop of its own; a `decide` node routes in and another judges the reply (`patter
 out of the box will be open source and use OpenRouter as their only model provider (an approved catalog is planned,
 not built). In hosted ensemble `acp` and the in-process way cannot run (no child processes, one allowed import).
 
-**Serving.** A runner is reachable four ways: called as a function, through the CLI, as an A2A agent, and as an MCP
-tool. The last two are `src/a2a-serve.ts` and `src/mcp-serve.ts`, shipped as SEPARATE entry points
-(`@ghostmind-dev/ensemble/a2a`, `/mcp`) and through `ensemble serve a2a|mcp`. The rule that makes this safe: the core
-never imports them (`src/index.ts` exports neither, and `test/*-serve.test.mts` would not catch a violation, so check
-by hand), they add no dependency, and they add no concept: `RunEvent`s become status updates or progress, a
-`by: "human"` pause becomes `input-required` or an elicitation form (the caller answers the same closed questions, and
-only there; it cannot write state at any other moment), and cancel is the run's signal. The caller of the MCP entry
-can only CALL the runners the process was started with, never create or edit one, so there is no sandbox; that is the
-difference from the hosted product's MCP endpoint, which manages runners for signed-in users. Both must work on several instances at once (the app runs on Kubernetes): never
-keep anything in process memory that a second instance would need. MCP serving is stateless
-(a paused run travels as a token sealed with AES-GCM under `secret`, which every instance must share); A2A serving
-keeps tasks in a `TaskStore` (memory by default, a shared one in production), with a heartbeat so a dead instance's
-task reads as failed and a cancel mark so any instance can stop a run. MCP serving speaks revision `2026-07-28` AND the
-`initialize`-based ones, because this library's own client (`src/mcp.ts`) still opens with the handshake. Check
-https://modelcontextprotocol.io/specification/latest and https://a2a-protocol.org before changing either: MCP was
-redesigned once already. Pages: `docs/serve-a2a.md`, `docs/serve-mcp.md`.
+**Reaching a runner from outside.** A runner is called as a function, through the CLI, over MCP, or as an A2A
+agent. The owner's rule for who uses what: **locally an AI uses the CLI plus the skill; hosted, an AI uses MCP plus the
+skill.** So the CLI must be able to do everything an agent needs on its own machine (`run`, `status`, `stop`,
+`resume`), and MCP is not required locally.
+
+- `src/live.ts` makes a run watchable and stoppable from another process, however it was started: `tracked(runner)`
+  keeps `.ensemble/live/<pid>-<n>.json` current and cancels the run when a stop mark appears next to it. `ensemble run`
+  uses it, and so does a user's own `node run.mts`. No process signal is involved, so nothing is installed in the
+  host program. Do not move this into the CLI: a run started from a script must be just as visible.
+- `src/mcp-serve.ts` and `src/a2a-serve.ts` are CONNECTORS, shipped as separate entry points
+  (`@ghostmind-dev/ensemble/mcp`, `/a2a`). They speak the protocol and nothing else: **no server and no
+  authentication**. A standalone HTTP server and a bearer-token check were built and then removed on purpose; the
+  server and the sign-in belong to whoever mounts the handler. The only command is `ensemble serve mcp` over stdio,
+  where there is no network to guard. Adding OAuth, a token, or `--port` back is the change to question.
+- The core never imports the connectors (`src/index.ts` exports neither; check by hand), they add no dependency and
+  no concept: `RunEvent`s become status updates or progress, a `by: "human"` pause becomes `input-required` or an
+  elicitation form (the caller answers the same closed questions, and only there; it cannot write state at any other
+  moment), and cancel is the run's signal.
+- Over MCP the caller can only CALL the runners the process was given, never create or edit one, so there is no
+  sandbox; that is the difference from the hosted product's MCP endpoint, which manages runners for signed-in users.
+- Nothing may live in process memory that a second instance would need. MCP is stateless (a paused run travels as a
+  token sealed with AES-GCM under `secret`, which every instance must share); A2A keeps tasks in a `TaskStore` (memory
+  by default, a shared one in production) with a heartbeat and a cancel mark; both have `drain()`. The one exception
+  is MCP's opt-in `control` tools (`start_run`, `get_run`, `list_runs`, `cancel_run`), which track runs in memory and
+  are documented as single-instance.
+- MCP serving speaks revision `2026-07-28` AND the `initialize`-based ones, because this library's own client
+  (`src/mcp.ts`) still opens with the handshake. Check https://modelcontextprotocol.io/specification/latest and
+  https://a2a-protocol.org before changing either: MCP was redesigned once already.
+
+Pages: `docs/serve-mcp.md`, `docs/serve-a2a.md`.
 
 `plugin/` + `.claude-plugin/marketplace.json` — the Claude Code plugin (marketplace
 `ghostmind-ensemble`, plugin `ensemble`). It is **not** part of the npm package
-(`files` excludes it), so the library still ships no skills. Its four skills teach
-an agent to use the library: `ensemble-build` (use case → validated runner, with
-`scripts/dryrun.mts`, a $0 executor), `ensemble-questions` (question design),
-`ensemble-runs` (reading and tuning runs, with `scripts/summarize.mts`) and
-`ensemble-serve` (a runner as MCP tools or an A2A agent, and the viewer).
+(`files` excludes it), so the library still ships no skills. Its five skills teach
+an agent to use the library: `ensemble` (the whole loop, and the entry point:
+build, check, run, watch a live run, stop or answer it, change it, by CLI
+locally and by MCP when hosted), `ensemble-build` (use case → validated runner,
+with `scripts/dryrun.mts`, a $0 executor), `ensemble-questions` (question
+design), `ensemble-runs` (reading and tuning runs, with `scripts/summarize.mts`)
+and `ensemble-serve` (hosting the connectors in your own server).
 
 The viewer is a separate open package, `@ghostmind-dev/ensemble-view`
 (`/Volumes/Projects/labo/ensemble-view`): a read-only page over `.ensemble/runs`

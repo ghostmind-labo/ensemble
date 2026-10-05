@@ -16,20 +16,28 @@
  * The caller can only CALL. It cannot create or edit a runner: the runners are
  * the ones this process was started with, which is why no sandbox is needed.
  *
- * It keeps nothing between requests, as the protocol now requires. A paused run
- * travels to the caller and back as an encrypted token, so any instance holding
- * the same `secret` can resume it.
+ * It is a connector, not a server, and it authenticates nobody. Locally an
+ * assistant starts it as a child process and talks over stdio, where there is
+ * no network to guard. Hosted, it is a request handler inside YOUR server,
+ * behind whatever sign-in that server already has.
+ *
+ * It keeps nothing between requests that a second instance would need, as the
+ * protocol now requires: a paused run travels to the caller and back as an
+ * encrypted token, so any instance holding the same `secret` can resume it.
+ * The one exception is opt-in and local: with `control`, runs are tracked in
+ * memory so an assistant can start one, watch it and stop it.
  *
  * It speaks the current revision (2026-07-28: no handshake, metadata on every
  * request) and the handshake-based ones before it, because most deployed
  * clients, including this library's own, still open with `initialize`.
  *
- *   npx ensemble serve mcp triage.mts                        # stdio
- *   npx ensemble serve mcp triage.mts refunds.mts --port 4321  # Streamable HTTP at /mcp
+ *   npx ensemble serve mcp triage.mts refunds.mts        # stdio, for a local assistant
+ *   app.use("/mcp", mcpTools([triage]).handler)          # inside your own server
  */
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import type { AddressInfo } from "node:net";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import { join } from "node:path";
 import { createInterface } from "node:readline";
 import {
   HumanAnswerError,
@@ -43,6 +51,7 @@ import {
   type RunEvent,
   type RunOptions,
   type RunOutcome,
+  type RunStep,
   type Runner,
   type State,
 } from "./index.ts";
@@ -55,25 +64,51 @@ const META = "io.modelcontextprotocol/";
 const SERVER_INFO = { name: "ensemble", version: "1" };
 /** The tool that answers a paused run for callers that cannot be sent a form. */
 const ANSWER_TOOL = "answer";
+/** The tools that run nothing themselves: they watch and steer runs. */
+const CONTROL_TOOLS = ["start_run", "get_run", "list_runs", "cancel_run"];
+
+/** A run this process started, as it stands now. */
+interface Tracked {
+  id: string;
+  tool: string;
+  status: string;
+  started: string;
+  inputs: State;
+  steps: RunStep[];
+  /** Nodes that have started and not ended, by step number. */
+  active: Map<number, string>;
+  cost: number;
+  abort: AbortController;
+  done: Promise<void>;
+  /** The tool result it ended with. */
+  result?: Json;
+  /** The id of its run.json, once it has one. */
+  record?: string;
+}
 
 export interface ToolsOptions {
-  /** Require `Authorization: Bearer <token>` on every HTTP call. */
-  token?: string;
   /** USD cap on each call. */
   budget?: number;
   /** Seals paused runs. Set it to resume across restarts or instances; default: random, per process. */
   secret?: string;
   /** How long a paused run may wait for its answer. Default 24 hours. */
   pauseTtlMs?: number;
+  /**
+   * A folder to record every run in, one subfolder each with `run.json` and `graph.json`: the
+   * layout `ensemble run` writes, so the same viewer and tools read both. Also where `get_run` and
+   * `list_runs` look for runs this process did not make.
+   */
+  runsDir?: string;
+  /**
+   * Offer the tools that watch and steer runs: `start_run` (do not wait), `get_run`, `list_runs`
+   * and `cancel_run`. They track runs in this process's memory, so they suit one process (a local
+   * assistant over stdio); across several instances, serve the runner as an A2A agent instead.
+   */
+  control?: boolean;
   /** Origins a browser may call from, besides the server's own host. */
   allowedOrigins?: string[];
   /** Passed to every run: a stub decider in a test, a step timeout, a secret resolver. */
   run?: Omit<RunOptions, "signal" | "onEvent" | "human" | "budget">;
-}
-
-export interface ServeOptions extends ToolsOptions {
-  port?: number;
-  host?: string;
 }
 
 export type Handler = (req: IncomingMessage, res: ServerResponse) => void;
@@ -168,6 +203,7 @@ export function mcpTools(runners: Runner[] | Record<string, Runner>, options: To
     if (problems.length) throw new Error(`runner "${name}" does not validate, so it is not served:\n  - ${problems.join("\n  - ")}`);
     if (!/^[A-Za-z0-9_.-]{1,128}$/.test(name)) throw new Error(`runner "${name}" cannot be a tool: a tool name is 1 to 128 letters, digits, "_", "-" or "."`);
     if (name === ANSWER_TOOL) throw new Error(`a runner named "${ANSWER_TOOL}" cannot be served: that name is the tool that answers a paused run`);
+    if (CONTROL_TOOLS.includes(name)) throw new Error(`a runner named "${name}" cannot be served: that name is one of the connector's own tools (${CONTROL_TOOLS.join(", ")})`);
     if (byName.has(name)) throw new Error(`two runners are named "${name}": a tool name is unique within a server`);
     byName.set(name, runner);
   }
@@ -217,6 +253,27 @@ export function mcpTools(runners: Runner[] | Record<string, Runner>, options: To
         ...(graph.runner.inputs.includes("goal") ? { required: ["goal"] } : {}),
       },
     }));
+    if (options.control) {
+      const run = { type: "string", description: "A run id, as `start_run` and `list_runs` give it." };
+      list.push(
+        {
+          name: "start_run",
+          description: "Starts a runner and returns at once with a run id, instead of waiting for the result. Follow it with get_run.",
+          inputSchema: { type: "object", properties: { runner: { type: "string", enum: [...byName.keys()] }, inputs: { type: "object", description: "The runner's inputs, e.g. { \"goal\": \"…\" }." } }, required: ["runner", "inputs"] },
+        },
+        {
+          name: "get_run",
+          description: "A run as it stands: its status, the nodes running now, each finished step with its answers and confidence, the state so far, the cost, and the result or the pending question.",
+          inputSchema: { type: "object", properties: { run }, required: ["run"] },
+        },
+        {
+          name: "list_runs",
+          description: "Recent runs, newest first: those this process started and those recorded on disk.",
+          inputSchema: { type: "object", properties: { runner: { type: "string", description: "Only this runner's." }, limit: { type: "integer", minimum: 1, maximum: 200 } } },
+        },
+        { name: "cancel_run", description: "Stops a run that is still going. Every handler is told to stop.", inputSchema: { type: "object", properties: { run }, required: ["run"] } },
+      );
+    }
     if (pauses) {
       list.push({
         name: ANSWER_TOOL,
@@ -274,8 +331,137 @@ export function mcpTools(runners: Runner[] | Record<string, Runner>, options: To
     };
   }
 
+  /* ── runs, tracked: what `get_run`, `list_runs` and `cancel_run` look at ── */
+
+  const tracked = new Map<string, Tracked>();
+  function track(tool: string, inputs: State): Tracked {
+    const entry: Tracked = { id: `run_${randomBytes(5).toString("hex")}`, tool, status: "running", started: new Date().toISOString(), inputs, steps: [], active: new Map(), cost: 0, abort: new AbortController(), done: Promise.resolve() };
+    tracked.set(entry.id, entry);
+    // Keep the last hundred; one still running is never dropped.
+    for (const [id, old] of tracked) {
+      if (tracked.size <= 100) break;
+      if (old.status !== "running") tracked.delete(id);
+    }
+    return entry;
+  }
+
+  /** Write a run where `ensemble run` would, so the viewer and the next process can read it. Never fails a run. */
+  function record(tool: string, run: RunDoc, paused?: Paused): void {
+    if (!options.runsDir) return;
+    try {
+      const dir = join(options.runsDir, run.run.id);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "run.json"), `${JSON.stringify(run, null, 2)}\n`);
+      writeFileSync(join(dir, "graph.json"), `${JSON.stringify(graphs.get(tool), null, 2)}\n`);
+      if (paused) writeFileSync(join(dir, "paused.json"), `${JSON.stringify(paused, null, 2)}\n`);
+    } catch (error) {
+      process.stderr.write(`mcp: could not record the run under ${options.runsDir}: ${error instanceof Error ? error.message : String(error)}\n`);
+    }
+  }
+
+  const brief = (step: RunStep): Json => ({
+    node: step.node,
+    kind: step.kind,
+    took: step.took,
+    cost: step.cost,
+    ...(step.answers ? { answers: step.answers } : {}),
+    ...(step.error ? { error: step.error } : {}),
+  });
+
+  /** A tracked run as it stands. The state is rebuilt from what each step wrote, so it is true mid-run. */
+  const viewOf = (entry: Tracked): Json => {
+    const ended = obj(entry.result?.["structuredContent"]);
+    return {
+      run: entry.id,
+      runner: entry.tool,
+      status: entry.status,
+      started: entry.started,
+      cost: Number(entry.cost.toFixed(8)),
+      running: [...entry.active.values()],
+      steps: entry.steps.map(brief),
+      state: Object.assign({}, entry.inputs, ...entry.steps.map((step) => step.writes ?? {})),
+      ...(entry.record ? { record: entry.record } : {}),
+      ...("result" in ended ? { result: ended["result"] } : {}),
+      ...(ended["pending"] ? { pending: ended["pending"], resume: ended["resume"] } : {}),
+      ...(entry.result?.["isError"] ? { error: obj((entry.result["content"] as Json[] | undefined)?.[0])["text"] } : {}),
+    };
+  };
+
+  /** A run recorded on disk, by its run.json id. */
+  function recorded(id: string): Json | undefined {
+    if (!options.runsDir || !/^[\w.-]+$/.test(id)) return undefined;
+    try {
+      const run = JSON.parse(readFileSync(join(options.runsDir, id, "run.json"), "utf8")) as RunDoc;
+      let resultKey: string | undefined;
+      try {
+        resultKey = (JSON.parse(readFileSync(join(options.runsDir, id, "graph.json"), "utf8")) as { runner?: { result?: string } }).runner?.result;
+      } catch {
+        /* a run without its graph still reads */
+      }
+      return {
+        run: run.run.id,
+        runner: run.run.runner,
+        status: run.run.status,
+        started: run.run.started,
+        ended: run.run.ended,
+        cost: run.run.cost.total,
+        running: [],
+        steps: run.steps.map(brief),
+        state: run.state,
+        record: run.run.id,
+        ...(resultKey && run.state && resultKey in run.state ? { result: run.state[resultKey] } : {}),
+        ...(run.pending ? { pending: run.pending } : {}),
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
+  const told = (value: Json, isError = false): Json => ({ content: text(JSON.stringify(value, null, 2)), structuredContent: value, ...(isError ? { isError: true } : {}) });
+
+  async function control(name: string, args: Json): Promise<Json> {
+    if (name === "start_run") {
+      const tool = String(args["runner"] ?? "");
+      const runner = byName.get(tool);
+      if (!runner) return told({ error: `no runner named "${tool}": the runners are ${[...byName.keys()].join(", ")}` }, true);
+      const entry = track(tool, obj(args["inputs"]) as State);
+      // Its own life: the request that started it returns now, so nothing of that request may stop it.
+      entry.done = drive(tool, (runOptions) => runner(entry.inputs, runOptions), {}, { signal: new AbortController().signal }, false, undefined, entry).then(() => {});
+      return told({ run: entry.id, runner: tool, status: "running" });
+    }
+    if (name === "list_runs") {
+      const only = typeof args["runner"] === "string" ? args["runner"] : undefined;
+      const limit = Number.isInteger(args["limit"]) ? Number(args["limit"]) : 20;
+      const rows = [...tracked.values()].map((entry) => ({ run: entry.id, runner: entry.tool, status: entry.status, started: entry.started, cost: Number(entry.cost.toFixed(8)), steps: entry.steps.length, ...(entry.record ? { record: entry.record } : {}) }));
+      const known = new Set(rows.map((row) => row.record));
+      if (options.runsDir && existsSync(options.runsDir)) {
+        for (const id of readdirSync(options.runsDir)) {
+          if (known.has(id)) continue;
+          const run = recorded(id);
+          if (run) rows.push({ run: id, runner: String(run["runner"]), status: String(run["status"]), started: String(run["started"]), cost: Number(run["cost"]), steps: (run["steps"] as unknown[]).length, record: id });
+        }
+      }
+      const runs = rows.filter((row) => !only || row.runner === only).sort((a, b) => b.started.localeCompare(a.started)).slice(0, limit);
+      return told({ runs });
+    }
+    const id = String(args["run"] ?? "");
+    const entry = tracked.get(id);
+    if (name === "get_run") {
+      const found = entry ? viewOf(entry) : recorded(id);
+      return found ? told(found) : told({ error: `no run "${id}": list_runs shows the ones there are` }, true);
+    }
+    // cancel_run
+    if (!entry) return told({ error: `no run "${id}" is tracked by this process, so there is nothing to stop` }, true);
+    if (entry.status !== "running") return told({ ...viewOf(entry), error: `the run is ${entry.status}, not running` }, true);
+    entry.abort.abort();
+    await entry.done;
+    // A blocking call ends on its own request; give its result a moment to land.
+    for (let waited = 0; entry.status === "running" && waited < 2_000; waited += 20) await new Promise((done) => setTimeout(done, 20));
+    return told(viewOf(entry));
+  }
+
   /** Run or resume, with progress and cancel wired. Every ending is a tool result; only a bad token throws. */
-  async function drive(tool: string, start: (runOptions: RunOptions) => Promise<RunOutcome>, params: Json, context: Context, form: boolean, resumed?: Paused): Promise<Json> {
+  async function drive(tool: string, start: (runOptions: RunOptions) => Promise<RunOutcome>, params: Json, context: Context, form: boolean, resumed?: Paused, entry: Tracked = track(tool, resumed?.state ?? {})): Promise<Json> {
     const token = obj(params["_meta"])["progressToken"];
     let progress = 0;
     const tell = (message: string): void => {
@@ -283,23 +469,43 @@ export function mcpTools(runners: Runner[] | Record<string, Runner>, options: To
       context.notify({ jsonrpc: "2.0", method: "notifications/progress", params: { progressToken: token, progress: ++progress, message } });
     };
     const onEvent = (event: RunEvent): void => {
-      if (event.type === "node:start") tell(event.waiting);
-      else if (event.type === "node:end") tell(`${event.step.node} ${event.step.error ? "failed" : event.step.took ? `took ${event.step.took}` : "ended"}`);
+      if (event.type === "node:start") {
+        entry.active.set(event.n, event.node);
+        tell(event.waiting);
+      } else if (event.type === "node:end") {
+        entry.active.delete(event.step.n);
+        entry.steps.push(event.step);
+        entry.cost += event.step.cost;
+        tell(`${event.step.node} ${event.step.error ? "failed" : event.step.took ? `took ${event.step.took}` : "ended"}`);
+      }
     };
-    const abort = new AbortController();
+    const abort = entry.abort;
     const relay = (): void => abort.abort();
+    const ended = (result: Json, run?: RunDoc, paused?: Paused): Json => {
+      entry.status = String(obj(result["structuredContent"])["status"] ?? (result["resultType"] === "input_required" ? "paused" : "failed"));
+      entry.result = result;
+      entry.active.clear();
+      if (run?.run?.id) {
+        entry.record = run.run.id;
+        record(tool, run, paused);
+      }
+      return result;
+    };
     if (context.signal.aborted) relay();
     else context.signal.addEventListener("abort", relay, { once: true });
     live.add(abort);
     try {
       const outcome = await start({ ...options.run, signal: abort.signal, onEvent, ...(options.budget !== undefined ? { budget: options.budget } : {}) });
-      return resultOf(tool, outcome, form);
+      return ended(resultOf(tool, outcome, form), outcome.run, outcome.paused);
     } catch (error) {
       const cause = error instanceof RunFailed ? error.cause : error;
       // An answer that does not fit ran nothing: ask again, on the same snapshot, and say what was wrong.
-      if (resumed && (cause instanceof HumanAnswerError || cause instanceof ResumeError)) return pausedResult(tool, resumed, form, cause.message);
+      if (resumed && (cause instanceof HumanAnswerError || cause instanceof ResumeError)) return ended(pausedResult(tool, resumed, form, cause.message));
       const message = error instanceof Error ? error.message : String(error);
-      return { content: text(message), ...(error instanceof RunFailed ? { structuredContent: { status: "failed", run: summary(error.run) } } : {}), isError: true };
+      return ended(
+        { content: text(message), ...(error instanceof RunFailed ? { structuredContent: { status: "failed", run: summary(error.run) } } : {}), isError: true },
+        error instanceof RunFailed ? error.run : undefined,
+      );
     } finally {
       context.signal.removeEventListener("abort", relay);
       live.delete(abort);
@@ -316,6 +522,8 @@ export function mcpTools(runners: Runner[] | Record<string, Runner>, options: To
       const answer: HumanAnswer = { answers: obj(args["answers"]) as HumanAnswer["answers"], by: "mcp", ...(typeof args["comment"] === "string" ? { comment: args["comment"] } : {}) };
       return drive(tool, (runOptions) => byName.get(tool)!.resume(paused, answer, runOptions), params, context, false, paused);
     }
+
+    if (options.control && CONTROL_TOOLS.includes(name)) return control(name, args);
 
     const runner = byName.get(name);
     if (!runner) throw failure(-32602, `Unknown tool: ${name}`);
@@ -335,7 +543,7 @@ export function mcpTools(runners: Runner[] | Record<string, Runner>, options: To
       return drive(name, (runOptions) => runner.resume(paused, answer, runOptions), params, context, form, paused);
     }
 
-    return drive(name, (runOptions) => runner(args as State, runOptions), params, context, form);
+    return drive(name, (runOptions) => runner(args as State, runOptions), params, context, form, undefined, track(name, args as State));
   }
 
   /* ── the protocol: one message at a time, nothing remembered ── */
@@ -443,7 +651,6 @@ export function mcpTools(runners: Runner[] | Record<string, Runner>, options: To
       if (host !== req.headers.host && !(options.allowedOrigins ?? []).includes(origin)) return rejected(403, -32600, `Origin ${origin} is not allowed`);
     }
     if (req.method !== "POST") return json(405, undefined, { allow: "POST" });
-    if (options.token && req.headers.authorization !== `Bearer ${options.token}`) return json(401, undefined, { "www-authenticate": 'Bearer realm="ensemble"' });
 
     const answer = async (raw: string): Promise<void> => {
       let message: Json;
@@ -550,47 +757,5 @@ export function mcpTools(runners: Runner[] | Record<string, Runner>, options: To
     close: () => {
       for (const abort of live) abort.abort();
     },
-  };
-}
-
-export interface Served {
-  url: string;
-  server: Server;
-  /** Finish the calls in flight (up to `graceMs`), then stop listening. For SIGTERM. */
-  drain(graceMs?: number): Promise<void>;
-  close(): Promise<void>;
-}
-
-/** Serve runners over Streamable HTTP on their own port: the handler, listening at `/mcp`. */
-export async function serveTools(runners: Runner[] | Record<string, Runner>, options: ServeOptions = {}): Promise<Served> {
-  const tools = mcpTools(runners, options);
-  const server = createServer((req, res) => {
-    if (new URL(req.url ?? "/", "http://local").pathname !== "/mcp") {
-      res.writeHead(404, { "content-type": "application/json" });
-      return void res.end(JSON.stringify({ error: "not found: the MCP endpoint is POST /mcp" }));
-    }
-    tools.handler(req, res);
-  });
-  await new Promise<void>((done, fail) => {
-    server.once("error", fail);
-    server.listen(options.port ?? 4321, options.host ?? "127.0.0.1", () => done());
-  });
-  const { address, port } = server.address() as AddressInfo;
-  return {
-    url: `http://${address.includes(":") ? `[${address}]` : address}:${port}/mcp`,
-    server,
-    drain: async (graceMs) => {
-      await tools.drain(graceMs);
-      // Give the last replies a moment to leave before the sockets are closed.
-      await new Promise((done) => setTimeout(done, 50));
-      server.closeAllConnections();
-      await new Promise<void>((done) => server.close(() => done()));
-    },
-    close: () =>
-      new Promise<void>((done) => {
-        tools.close();
-        server.closeAllConnections();
-        server.close(() => done());
-      }),
   };
 }
