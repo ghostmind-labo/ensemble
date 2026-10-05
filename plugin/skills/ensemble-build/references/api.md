@@ -146,8 +146,18 @@ look: {
   reads?: ["goal"],
   writes?: ["text"] | ["text", "images"],           // positional
   temperature?: 0, maxTokens?: 400,
+  reasoning?: "low",               // max | xhigh | high | medium | low | minimal | none
 }
 ```
+
+- Many current models reason before they write, and the reasoning is paid for
+  out of `maxTokens`. A tight limit can leave no room for the answer: the step
+  fails with `spent its N tokens reasoning and wrote no answer`. Give such a node a
+  generous `maxTokens` (thousands, not hundreds) or `reasoning: "low"`. Check
+  `supported_parameters` in the model's catalogue entry for `reasoning`; a
+  model that cannot turn reasoning off may reject `"none"`.
+- A model call that fails after being billed still records its cost on the
+  step (`OpenRouterError.cost`), so the run's total and its budget count it.
 
 - `writes[1]` receives an array of `data:` URLs if the model drew images. Those
   keys count as image keys, so a later `sees:` can look at them but a decide node
@@ -545,6 +555,8 @@ a two-argument decider is still a valid `Decider`.
 
 CLI (through `package.json` scripts, never global):
 `ensemble validate | graph | run | resume <file> <paused.json> | calibrate <file> <cases> | check | skills [q] [--remote] | servers [q] | agents [q] | agents card <url> | agents list <file> | mcp login·logout·status | serve mcp <file...> | serve a2a <file> | version`.
+A run that fails still writes its `run.json` and `graph.json` (status
+`failed`, the error on the step where it stopped) and exits 1.
 Run options: `--input k=v`, `--budget`, `--max-steps`, `--json`, `-o`; `resume`
 adds `--answer k=value` (repeatable, one per question), `--comment` and `--by`.
 

@@ -96,6 +96,7 @@ export interface GraphNode {
     skillsFrom?: string;
     temperature?: number;
     maxTokens?: number;
+    reasoning?: string;
   };
   /** What a workflow can reach over MCP — visible before it runs. */
   mcp?: { server: string; tool?: string; toolFrom?: string; args?: { literal: Record<string, unknown> } | { source: string } };
@@ -240,6 +241,7 @@ export function toGraph(spec: RunnerSpec): GraphDoc {
               : {}),
           ...(node.temperature !== undefined ? { temperature: node.temperature } : {}),
           ...(node.maxTokens !== undefined ? { maxTokens: node.maxTokens } : {}),
+          ...(node.reasoning !== undefined ? { reasoning: node.reasoning } : {}),
         },
       };
     }

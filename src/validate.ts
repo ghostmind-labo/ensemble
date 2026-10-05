@@ -14,6 +14,7 @@
  * Problems are returned as strings, never thrown. `validate` is a report;
  * `execute` is what refuses to run.
  */
+import { REASONING_EFFORTS } from "./openrouter.ts";
 import {
   branchHolds,
   externalKeys,
@@ -160,6 +161,9 @@ export function validate(spec: RunnerSpec): string[] {
         problems.push(`node "${name}" names no model — give it an id, or { from: "<state key>" }`);
       }
       if (!node.prompt) problems.push(`node "${name}" has no prompt — the instruction IS the node`);
+      if (node.reasoning !== undefined && !REASONING_EFFORTS.includes(node.reasoning)) {
+        problems.push(`node "${name}" has reasoning "${String(node.reasoning)}" — use one of ${REASONING_EFFORTS.join(", ")}`);
+      }
       const writes = node.writes ?? [];
       if (writes.length > 2) {
         problems.push(

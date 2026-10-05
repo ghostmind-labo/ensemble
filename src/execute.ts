@@ -34,7 +34,7 @@ import {
 } from "./spec.ts";
 import { confidenceOf, misfit, valueOf, type Answer } from "./questions.ts";
 import { jev, jevConfigFor, type Decider } from "./jev.ts";
-import { openrouter, type Caller } from "./openrouter.ts";
+import { openrouter, OpenRouterError, type Caller } from "./openrouter.ts";
 import { pool } from "./mcp.ts";
 import type { SecretResolver, TokenStore } from "./mcp-auth.ts";
 import { findSkill, renderSkills } from "./skills.ts";
@@ -741,6 +741,7 @@ export async function execute(
             images: (node.sees ?? []).flatMap((key) => asUrls(state[key])),
             ...(node.temperature !== undefined ? { temperature: node.temperature } : {}),
             ...(node.maxTokens !== undefined ? { maxTokens: node.maxTokens } : {}),
+            ...(node.reasoning !== undefined ? { reasoning: node.reasoning } : {}),
             signal,
           }),
         );
@@ -828,6 +829,11 @@ export async function execute(
       // What an agent had done before it stopped is part of the record: the
       // tools it used and anything it was refused happened either way.
       if (cause instanceof AgentError && cause.partial) recordReply(step, cause.partial);
+      // A model call that came back empty was still billed: the step says what it cost.
+      if (cause instanceof OpenRouterError && cause.cost !== undefined) {
+        step.cost = cause.cost;
+        if (cause.usage) step.meta = { ...step.meta, usage: cause.usage };
+      }
       close();
       // Money spent before the throw was still spent. A handler that reported
       // a cost and then failed must count toward the total and the budget, or

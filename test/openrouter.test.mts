@@ -208,4 +208,36 @@ console.log("ok · 6 generated images come back as data: urls, empty prose and a
 }
 console.log("ok · 7 a missing key, a bad key, a rate limit and an empty reply each fail correctly");
 
-console.log("7 cases");
+// ── 8 · a model that reasons: the effort is sent, and thinking that eats the allowance is named and priced ─
+{
+  const asked = mock([{ status: 200, body: { choices: [{ message: { content: "ok" } }], usage: { cost: 0 } } }]);
+  await openrouter({ fetch: asked })({ model: "x", prompt: "y", reasoning: "low", maxTokens: 50 });
+  assert.deepEqual(JSON.parse(String(asked.calls[0]!.init?.body)).reasoning, { effort: "low" });
+  const plain = mock([{ status: 200, body: { choices: [{ message: { content: "ok" } }], usage: { cost: 0 } } }]);
+  await openrouter({ fetch: plain })({ model: "x", prompt: "y" });
+  assert.equal("reasoning" in JSON.parse(String(plain.calls[0]!.init?.body)), false, "nothing is sent unless asked for");
+
+  const spent = mock([
+    {
+      status: 200,
+      body: {
+        model: "vendor/thinker-1",
+        choices: [{ finish_reason: "length", message: { content: "" } }],
+        usage: { prompt_tokens: 40, completion_tokens: 700, cost: 0.0098, completion_tokens_details: { reasoning_tokens: 700 } },
+      },
+    },
+  ]);
+  await assert.rejects(
+    () => openrouter({ fetch: spent })({ model: "vendor/thinker", prompt: "y", maxTokens: 700 }),
+    (error: unknown) => {
+      assert.ok(error instanceof OpenRouterError);
+      assert.match(error.message, /vendor\/thinker-1 spent its 700 tokens reasoning and wrote no answer — raise maxTokens, or set reasoning: "low" on the node/);
+      assert.equal(error.cost, 0.0098, "it was billed, so the error says what it cost");
+      assert.deepEqual(error.usage, { prompt_tokens: 40, completion_tokens: 700 });
+      return true;
+    },
+  );
+}
+console.log("ok · 8 reasoning effort is sent, and an allowance spent on thinking fails with its cost and the fix");
+
+console.log("8 cases");

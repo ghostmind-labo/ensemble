@@ -39,8 +39,8 @@ export type {
 export { jev, jevConfigFor, JevError, DEFAULT_BASE_URL, DEFAULT_MODEL, USD_PER_INPUT_TOKEN } from "./jev.ts";
 export type { DecideOptions, Decider, Decision, JevConfig } from "./jev.ts";
 
-export { catalog, forgetCatalog, modelOptions, openrouter, OpenRouterError, shortlist, OPENROUTER_URL } from "./openrouter.ts";
-export type { Caller, CallerConfig, ModelCard, ModelFilter, ModelReply, ModelRequest } from "./openrouter.ts";
+export { catalog, forgetCatalog, modelOptions, openrouter, OpenRouterError, shortlist, OPENROUTER_URL, REASONING_EFFORTS } from "./openrouter.ts";
+export type { Caller, CallerConfig, ModelCard, ModelFilter, ModelReply, ModelRequest, ReasoningEffort } from "./openrouter.ts";
 
 export { execute, resume, DeciderAnswerError, HumanAnswerError, ResumeError, RunFailed, RunnerError, RUN_SCHEMA } from "./execute.ts";
 export type {

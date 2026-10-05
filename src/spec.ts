@@ -16,7 +16,7 @@
  */
 import type { Question } from "./questions.ts";
 import type { JevConfig } from "./jev.ts";
-import type { CallerConfig } from "./openrouter.ts";
+import type { CallerConfig, ReasoningEffort } from "./openrouter.ts";
 import type { McpServerSpec } from "./mcp.ts";
 import type { Skill } from "./skills.ts";
 import type { AgentSpec } from "./agent.ts";
@@ -152,7 +152,14 @@ export interface ModelNode extends Joinable {
    */
   writes?: string[];
   temperature?: number;
+  /**
+   * The ceiling on what the model may write. A model that reasons first pays
+   * for the thinking out of this too, so a tight limit can leave no room for
+   * the answer: the step then fails and says so.
+   */
   maxTokens?: number;
+  /** How hard a reasoning model should think: "low" for a simple rewrite, "high" for a hard problem. */
+  reasoning?: ReasoningEffort;
   label?: string;
 }
 

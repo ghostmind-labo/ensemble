@@ -334,6 +334,25 @@ function printQuestions(questions: QuestionReport[], set?: string): void {
  * but a script that expected an answer must notice: it exits 3, next to a
  * paused.json that `ensemble resume` takes.
  */
+/**
+ * A run that failed is still a run: the record of where it stopped is the thing
+ * you want, and a viewer or `summarize` can only count failures that are on disk.
+ */
+function saveFailed(runner: Runner, error: RunFailed, flags: { out?: string; json?: boolean }): never {
+  const json = `${JSON.stringify(error.run, null, 2)}\n`;
+  process.stderr.write(`  ✗ ${error.message} · ${money(error.run.run.cost.total)}\n`);
+  if (flags.json) process.stdout.write(json);
+  else {
+    const dir = flags.out ? dirname(resolve(flags.out)) : resolve(".ensemble", "runs", error.run.run.id);
+    const path = flags.out ? resolve(flags.out) : join(dir, "run.json");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path, json, "utf8");
+    writeFileSync(join(dirname(path), "graph.json"), `${JSON.stringify(runner.graph(), null, 2)}\n`, "utf8");
+    process.stderr.write(`  ${path}\n`);
+  }
+  return process.exit(1);
+}
+
 function finishRun(runner: Runner, outcome: RunOutcome, file: string, flags: { out?: string; json?: boolean }): void {
   const { run, paused } = outcome;
   const json = `${JSON.stringify(run, null, 2)}\n`;
@@ -476,10 +495,7 @@ async function main(): Promise<void> {
       } catch (error) {
         live.stop();
         if (error instanceof RunnerError) report(error.problems, runner.spec.name);
-        if (error instanceof RunFailed) {
-          process.stderr.write(`  ✗ ${error.message} · ${money(error.run.run.cost.total)}\n`);
-          process.exit(1);
-        }
+        if (error instanceof RunFailed) saveFailed(runner, error, { out: values.out, json: values.json });
         die((error as Error).message);
       }
       return;
@@ -530,10 +546,7 @@ async function main(): Promise<void> {
         live.stop();
         if (error instanceof ResumeError) die(error.message);
         if (error instanceof RunnerError) report(error.problems, runner.spec.name);
-        if (error instanceof RunFailed) {
-          process.stderr.write(`  ✗ ${error.message} · ${money(error.run.run.cost.total)}\n`);
-          process.exit(1);
-        }
+        if (error instanceof RunFailed) saveFailed(runner, error, { out: values.out, json: values.json });
         die((error as Error).message);
       }
       return;
