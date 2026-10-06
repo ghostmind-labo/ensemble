@@ -78,6 +78,21 @@ not just the symptom.
 | `memory key "k" is never written` | A declared memory key with no writer | Add it to a node's `writes`, or declare it in `inputs` instead |
 | `"k" is both an input and memory` | Same key in both lists | Pick one: inputs arrive each run, memory carries over |
 
+## Hosted ensemble: npm packages
+
+From `check_runner` or `save_runner`, as `{ ok: false, error }`.
+
+| Message contains | What it means | Fix |
+|---|---|---|
+| `Cannot find package 'x' … must be listed in dependencies` | The source imports a package that was not passed with it | Pass `dependencies: { "x": "<version or range>" }` next to `source`, on every check and save |
+| `the version of "x" is … (no path, URL, git address or alias)` | A dependency that is not a registry version, range or tag | A version (`"4.1.0"`), a range (`"^4.1.0"`) or `"latest"` |
+| `"x" is not an npm package name` | The key is not a name as published | `"zod"`, `"@scope/name"`; the version goes in the value |
+| `remove @ghostmind-dev/ensemble from dependencies` | The library was listed | Leave it out: the host provides it |
+| `npm could not install the dependencies: …` | npm's own reason: no such package, no such version | Check the name and the version on npmjs.com |
+| `does not come from the npm registry` | A package somewhere in the tree is fetched from a URL or from git | Use a package whose whole tree is on the registry |
+| `bring in N packages in all; the limit is …` / `take more than … MB on disk` / `took more than … s to install` | The tree is too large for a runner | A smaller package, or call the service over `fetch` instead |
+| `ERR_ACCESS_DENIED` when the package loads or is called | It reads a file, starts a process or a worker, or loads a native addon | That package runs locally only |
+
 ## Failures that validate cannot see (found by dryrun or a live run)
 
 | Symptom | Cause | Fix |

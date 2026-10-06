@@ -340,7 +340,12 @@ live.
 | `a2a` | Yes | Yes, to a public agent that takes no credentials |
 | `acp` | Yes | Local only: the sandbox starts no child process. `check` returns a warning with the fix |
 | `mcp` | Yes, on any server | Yes, on a remote (`url`) server that takes no credentials. A local (`command`) server is local only |
-| An agent in-process in a `work` handler (pattern 16) | Yes | Local only: the sandbox imports `@ghostmind-dev/ensemble` alone |
+| An agent in-process in a `work` handler (pattern 16) | Yes | Only when the library is an npm package listed in `dependencies` that makes network calls alone: the sandbox starts no process, reads no file and holds no secret |
+
+In hosted ensemble a runner imports `@ghostmind-dev/ensemble` and the npm
+packages passed as `dependencies` next to its source (`check_runner`,
+`save_runner`); the exact versions are fixed when it is saved and stay with
+that version of the runner.
 
 In hosted ensemble the sandbox holds no secrets yet, so `${NAME}` does not
 resolve there and an agent or MCP server that takes a token is local only for

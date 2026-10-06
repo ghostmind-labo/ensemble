@@ -4,6 +4,7 @@
   "type": "project",
   "description": "Typed decisions wired to your code: a graph whose forks are Jev's calibrated answers, proven offline and recorded as JSON. The npm library only; the hosted product and the docs site are the private ghostmind-app/together.",
   "tags": ["jev", "decisions", "graph", "openrouter", "mcp", "library"],
+  "groups": ["ensemble"],
   "routines": {
     "test": "npm test",
     "typecheck": "npm run typecheck",
