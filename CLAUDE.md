@@ -64,7 +64,7 @@ the README's third demo quotes, and what proves the concepts compose. `test/` â€
 `test/run.mts`.
 
 **This repo is the library only**: no service, no site, no UI. The hosted product and the docs site are a separate,
-private repo: `ghostmind-app/together` (`/Volumes/Projects/playground/together`), with Google sign-in, the REST API
+private repo: `ghostmind-app/together` (`/Volumes/Projects/ghostmind/together`), with Google sign-in, the REST API
 and MCP endpoint, the sandbox that runs user runners, the UI, and `web/`, which renders THIS repo's markdown
 (README, `docs/`, the plugin references) as the docs site â€” so a doc page written here is published from there,
 through the page list in its `web/app/src/lib/docs.ts`. It consumes this

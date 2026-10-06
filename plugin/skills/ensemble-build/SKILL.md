@@ -21,6 +21,21 @@ something, write it in a handler with whatever library does. The zero-dependency
 rule applies to the ensemble package itself, not to the runners people build
 with it.
 
+**In hosted ensemble too, with one more step.** There the runner is one source
+text and there is no `package.json`, so the packages it imports are named next
+to it: `check_runner` and `save_runner` take
+`{ source, dependencies: { "zod": "^4.1.0", "date-fns": "latest" } }`. The host
+installs them from the public npm registry (names and versions or ranges only:
+no git, URL or file address), and the check answers with the exact version each
+one resolved to. That set is saved with the runner's version: every later run,
+and every later version saved with the same `dependencies`, uses the same
+packages whatever is published since. Change a declared version to move. Send
+`dependencies` again on every save (`get_runner` returns them); a save without
+them fails with `Cannot find package`. A package runs under the sandbox's rules
+like the runner's own code: no file reads, no child process, no worker, no
+native addon, no secrets, and no install script ran, so a package that needs
+any of those works locally only.
+
 **A runner is just a script, and the library is a dependency, not a tool.**
 Install it in the project (`npm i @ghostmind-dev/ensemble`) and never globally.
 The way a runner runs is a script that imports it: `await r({ goal })` from a
@@ -90,7 +105,7 @@ handler (pattern 16).
 | `protocol: "a2a"` | Behind a URL, with an A2A card. Nothing to install | Yes | Yes, when it is public and takes no credentials | `"unknown"` always |
 | `protocol: "acp"` | A command on this machine (`agento acp`, `opencode acp`) | Yes | Runs locally only: the hosted sandbox starts no process | `"reported"` when the agent sends a USD cost, else `"unknown"` |
 | `protocol: "mcp"` | One tool of a declared MCP server (`agento mcp`, a remote server) | Yes | Yes, on a remote (`url`) server that takes no credentials | `"unknown"` always |
-| In a `work` handler | A library you import (`@ghostmind-dev/agento`, any agent SDK), with your own tools, hooks and approvals | Yes | Runs locally only: the hosted sandbox imports the ensemble library alone | What the handler `report()`s |
+| In a `work` handler | A library you import (`@ghostmind-dev/agento`, any agent SDK), with your own tools, hooks and approvals | Yes | Yes for an SDK that only makes network calls and takes no secret, listed in `dependencies`. One that starts a process, reads files or needs a token (`@ghostmind-dev/agento`) runs locally only | What the handler `report()`s |
 
 How to pick:
 
